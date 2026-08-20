@@ -53,8 +53,10 @@ than from Git. Configuration is layered JSON, and `mentat config show
 OpenAI, Anthropic, and Google, through OAuth or an API key. Managed local
 models and explicit `.gguf` paths through the `local` provider. Any OpenAI
 chat-completions server — llama.cpp, vLLM, LM Studio, Ollama — through the
-`ollama` provider. Provider declarations, accounts, and model selection are
-separate concerns, so switching models does not disturb credentials.
+`ollama` provider. The OpenCode Go subscription gateway through the
+`opencode-go` provider, with model metadata sourced from the gateway's serving
+set. Provider declarations, accounts, and model selection are separate
+concerns, so switching models does not disturb credentials.
 
 ## Safety
 

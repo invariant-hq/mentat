@@ -90,12 +90,13 @@ mentat auth status
 ```
 
 ```
-PROVIDER   PHASE      CONNECTED
-openai     unchecked  no
-anthropic  unchecked  yes
-google     unchecked  no
-local      missing    no
-ollama     missing    no
+PROVIDER     PHASE      CONNECTED
+openai       unchecked  no
+anthropic    unchecked  yes
+google       unchecked  no
+local        missing    no
+ollama       missing    no
+opencode-go  missing    no
 ```
 
 `CONNECTED` means a credential is stored. `PHASE` stays `unchecked` until the

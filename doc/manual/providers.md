@@ -40,6 +40,7 @@ The TUI exposes the same workflows through `/login`, `/logout`, and `/model`.
 | `google` | API key, `GOOGLE_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, or `GEMINI_API_KEY` | Built-in Gemini catalog. |
 | `local` | None | Managed local models or an explicit `.gguf` model path. |
 | `ollama` | Optional API key or `OLLAMA_API_KEY` | Dynamic: the configured daemon owns its model ids. |
+| `opencode-go` | API key or `OPENCODE_API_KEY` | The OpenCode Go gateway owns its model set; the server listing supplies model ids and metadata at runtime. |
 
 Run `mentat models list --all` for the current catalog, model status, cost, and
 credential readiness.
@@ -56,10 +57,10 @@ mentat auth login openai --method device-code
 mentat auth login openai --method api-key
 ```
 
-Anthropic and Google currently declare `api-key`. Omitting `--method` lets the
-provider choose its default interactive method. Without a terminal, select an
-explicit non-interactive method; API-key input additionally needs
-`--api-key-stdin`.
+Anthropic, Google, Ollama, and OpenCode Go currently declare `api-key`.
+Omitting `--method` lets the provider choose its default interactive method.
+Without a terminal, select an explicit non-interactive method; API-key input
+additionally needs `--api-key-stdin`.
 
 Stored credentials live in `$MENTAT_CONFIG_HOME/auth.json` when the explicit
 config-home override is set. Otherwise the path is
@@ -144,6 +145,25 @@ writes user configuration; use `config set model provider/model --project` or
 Managed local models expose `mentat models download MODEL` to fetch weights
 explicitly; first use also prepares a missing managed artifact. Only local
 models are downloadable.
+
+## OpenCode Go
+
+The `opencode-go` provider is a hosted subscription gateway at
+`https://opencode.ai/zen/go` (override with `providers.opencode-go.base_url`
+or `MENTAT_OPENCODE_GO_BASE_URL`). The gateway owns its model set — ids are
+whatever it serves, such as `kimi-k3` — and Mentat curates the models it
+vouches for while the server listing supplies every other model at runtime.
+`mentat models list --provider opencode-go` shows the current set.
+
+```sh
+mentat auth login opencode-go
+mentat models select opencode-go/kimi-k3
+```
+
+The gateway distinguishes two wire protocols: most models ride its
+OpenAI-compatible chat-completions endpoint, some its Anthropic-compatible
+messages endpoint. Mentat routes each model by the protocol its metadata
+declares, so any gateway-served id is usable without choosing a route.
 
 ## OpenAI-compatible servers
 

@@ -191,8 +191,8 @@ Model requests can contain prompts, instructions, loaded skills, source and tool
 output, and images. A fresh untitled session also makes a separate request with
 its first prompt to the configured small model for auto-titling.
 
-Authenticate with a provider. OpenAI supports OAuth or an API key; Anthropic
-and Google use API keys:
+Authenticate with a provider. OpenAI supports OAuth or an API key; Anthropic,
+Google, and OpenCode Go use API keys:
 
 ```sh
 mentat auth login anthropic
