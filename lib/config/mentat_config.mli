@@ -495,18 +495,24 @@ module Field : sig
 
   val notices_dune_diagnostics : (bool, defaulted) t
   (** [notices_dune_diagnostics] is the [notices.dune_diagnostics] field.
-      Defaults to [true]. *)
+      It silences the model's build-change notices only; the watch itself
+      and its status row are [dune.watch]'s. Defaults to [true]. *)
 
   val dune_watch : (string, defaulted) t
   (** [dune_watch] is the [dune.watch] field: [auto], [observe], or [off].
       [auto] attaches to an already-running build watch, or starts and
       supervises one when nothing answers; [observe] only attaches, never
-      starts; [off] disables the watch integration entirely. Defaults to
+      starts; [off] disables the watch integration entirely. Under a
+      read-only sandbox posture [auto] behaves as [observe] — a watch that
+      could not write [_build] would only die at startup. Defaults to
       ["auto"]. *)
 
   val dune_targets : (string list, defaulted) t
   (** [dune_targets] is the [dune.targets] field: the targets a started build
-      watch builds. Defaults to [["@check"]]. *)
+      watch builds, each passed verbatim after [dune build --watch] — entries
+      are targets, never dune flags, and a leading dash is refused. An empty
+      list builds dune's default target set ([@default]), usually a far
+      heavier watch than the default [["@check"]]. *)
 
   val workspace_tooling : (string, defaulted) t
   (** [workspace_tooling] is the [workspace.tooling] field: [auto], [on], or
