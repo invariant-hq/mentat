@@ -2100,8 +2100,35 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
     ]
   in
   let apply_patch_tools = [ Tools.Fs.Apply_patch.make build_capability ] in
+  (* A dune command's tool timeout is a hang's only witness — the forwarded
+     build traverses the watch's event loop — so it is reported to the
+     supervisor, which verifies before restarting; other programs' timeouts
+     are their own business. The command is shell text: leading VAR=value
+     assignments are skipped and the first word's basename is compared, the
+     same honesty as "whose program resolves to dune" affords a string. *)
+  let dune_stall_report ~command =
+    let looks_assigned token =
+      String.contains token '=' && not (String.contains token '/')
+    in
+    let rec program = function
+      | [] -> None
+      | token :: rest ->
+          if looks_assigned token then program rest else Some token
+    in
+    let tokens =
+      List.filter
+        (fun token -> not (String.is_empty token))
+        (String.split_on_char ' ' (String.trim command))
+    in
+    match program tokens with
+    | Some token when String.equal (Filename.basename token) "dune" -> (
+        match t.dune_watch with
+        | Some supervisor -> Dune_watch.report_stall supervisor
+        | None -> ())
+    | Some _ | None -> ()
+  in
   let shell =
-    Tools.Shell.make build_capability ~clock
+    Tools.Shell.make ~on_timeout:dune_stall_report build_capability ~clock
       ~shell:(Cfg.Resolved.get Cfg.Field.shell t.config)
   in
   (* The declaration-only background family: a process-lifetime registry backs
@@ -2238,6 +2265,12 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
           (fun () ->
             Lazy.force engaged;
             if notices_enabled then
+              (* The supervisor's word first — a restart or a blocked file
+                 watcher explains the readings that follow it. *)
+              (match t.dune_watch with
+              | Some supervisor -> Dune_watch.drain_notices supervisor
+              | None -> [])
+              @
               match Lazy.force producer with
               | None -> []
               | Some producer -> Workspace_notices.drain producer
@@ -2606,7 +2639,8 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
      processes are supervised on its own switch. *)
   let session_shell_tools_over registry =
     [
-      Tools.Shell.make ~registry build_capability ~clock
+      Tools.Shell.make ~registry ~on_timeout:dune_stall_report
+        build_capability ~clock
         ~shell:(Cfg.Resolved.get Cfg.Field.shell t.config);
       Tools.Shell.Shell_output.make registry;
       Tools.Shell.Shell_kill.make registry;

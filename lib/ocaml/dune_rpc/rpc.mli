@@ -162,4 +162,22 @@ module Instance : sig
       see {!Mirror.write}. The instance contributes only the ambient
       environment the registry directory derives from; the caller owns the
       entry and its removal. *)
+
+  val flush : t -> [ `Completed | `Timed_out | `No_server ]
+  (** [flush t] verifies the watch's event loop: a fresh connection to
+      {!socket_path} sends dune's [flush_file_watcher] — the public request
+      that waits for the file watcher's sync round-trip and the debounce
+      quiet period, exercising the event loop without waiting on the build —
+      bounded to ten seconds ([MENTAT_DUNE_WATCH_FLUSH_S] scales it for
+      hermetic tests). Any answer is [`Completed]: a slow build still
+      answers, a server without the method answered the negotiation, and an
+      error response is a response — only a wedged loop cannot reply.
+      [`No_server] is a connection that never opened (nothing to verify; the
+      exit paths own a dead child). [`Timed_out] is the hang verdict. *)
+
+  val activity : t -> int
+  (** [activity t] is a monotone count of stream events folded so far, for
+      liveness comparison around a {!flush}: a count that moved during the
+      verification window means the loop delivered events — alive — whatever
+      the flush itself did. *)
 end

@@ -75,6 +75,21 @@ val engage : t -> unit
     claimed; attaching remains the observer's continuous work and the
     observer's view is what {!health} reports. *)
 
+val report_stall : t -> unit
+(** [report_stall t] tells the supervisor a forwarded build stalled: a dune
+    command's tool call timed out while the watch held the lock. The live
+    loop answers with one bounded verification — dune's [flush_file_watcher],
+    which a slow build completes and a wedged event loop cannot — and only a
+    failed verification restarts the watch, as [Restarting Hung]. Reports
+    between lives, before the watch is up, or without a supervised watch at
+    all are dropped; the call never blocks and is safe from any fiber. *)
+
+val drain_notices : t -> Mentat_workspace.Notice.t list
+(** [drain_notices t] returns and clears the supervisor's pending notices —
+    a hang restart, a blocked file watcher — in the order they arose. The
+    drain-time notice producer appends them ahead of the build-change
+    notices it derives. *)
+
 val health : t -> Mentat_workspace.Health.t
 (** [health t] is the watch status a frontend renders, without IO:
     {!Mentat_ocaml_dune_rpc.Watch.compose} of the machine's word with the

@@ -158,19 +158,26 @@ val max_output_bytes : int
 
 val make :
   ?registry:Registry.t ->
+  ?on_timeout:(command:string -> unit) ->
   Mentat_workspace_io.t ->
   clock:_ Eio.Time.Mono.t ->
   shell:string ->
   Mentat_tool.t
-(** [make ?registry workspace_io ~clock ~shell] is the immutable [shell] tool
-    definition. Constructing it starts no process, observes no path, and
-    projects the sealed command-confinement posture once.
+(** [make ?registry ?on_timeout workspace_io ~clock ~shell] is the immutable
+    [shell] tool definition. Constructing it starts no process, observes no
+    path, and projects the sealed command-confinement posture once.
 
     [registry] is the per-session background-process registry a
     [background:true] command spawns into; the driver supplies it (bound to its
     per-session switch) when it builds the per-turn catalog. Omitted — as in the
     process-wide composition where no per-session switch exists — a background
     command fails [`Unavailable]; foreground behavior is unchanged.
+
+    [on_timeout] is called after a foreground command's timeout settles, with
+    the command text as written (default: nothing). It exists for the one
+    observer of stalled commands — a build-watch supervisor listening for a
+    forwarded [dune] build that hung — and runs after the child is reaped, so
+    it must not block. Background commands and cancellations never report.
 
     Raises [Invalid_argument] if [shell] is empty or contains NUL. *)
 

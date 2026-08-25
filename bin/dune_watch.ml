@@ -33,6 +33,8 @@ type t = {
   mutable session : Command.Session.t option;
   mutable mirror : Mentat_ocaml_dune_rpc.Mirror.t option;
   mutable mirror_failures : int;
+  mutable stalled : bool;
+  mutable notices : Mentat_workspace.Notice.t list;
 }
 
 (* The spawn-to-respawn pause, and the cadence at which a foreign watch's
@@ -66,6 +68,8 @@ let make ~rpc ~capability ~mono ~sw ~root ~run_id ~mode ~program ~targets =
     session = None;
     mirror = None;
     mirror_failures = 0;
+    stalled = false;
+    notices = [];
   }
 
 let sleep t seconds =
@@ -339,6 +343,56 @@ let start t =
           | Error error ->
               Error (Format.asprintf "%a" Command.Error.pp error)))
 
+(* A stalled forwarded build is the hang's only witness: the composition
+   reports a dune command's tool timeout here, and the live loop answers it
+   with one bounded verification. Between lives the flag is meaningless and
+   dropped. *)
+let report_stall t = t.stalled <- true
+
+let queue_notice t notice = t.notices <- t.notices @ [ notice ]
+
+let drain_notices t =
+  match t.notices with
+  | [] -> []
+  | notices ->
+      t.notices <- [];
+      notices
+
+let hung_notice () =
+  Mentat_workspace.Notice.make ~source:"dune"
+    ~severity:Mentat_workspace.Notice.Severity.Warning
+    ~title:"Build watch restarted (stopped responding to builds)"
+    ~body:
+      "A dune command that was running may have failed with \"Connection \
+       terminated\" or \"Build via RPC failed\"; run it again."
+    ~key:"dune.watch" ()
+
+let blocked_notice () =
+  Mentat_workspace.Notice.make ~source:"dune"
+    ~severity:Mentat_workspace.Notice.Severity.Warning
+    ~title:"Build watch off (file watcher blocked by the sandbox)"
+    ~body:
+      "dune came up but its file watcher never answered under the sealed \
+       profile, so builds would not follow file changes; the watch is off \
+       for this session."
+    ~key:"dune.watch" ()
+
+(* One bounded verification of the watch's event loop. A flush that answers
+   — or a stream that delivered events while it was pending: file churn
+   legitimately extends the debounce — is a slow build, not a hang; only a
+   loop that neither answered nor produced is wedged. *)
+let verify_loop t =
+  let before = Mentat_ocaml_dune_rpc.Instance.activity t.rpc in
+  match Mentat_ocaml_dune_rpc.Instance.flush t.rpc with
+  | (`Completed | `No_server) as verdict -> verdict
+  | `Timed_out ->
+      if Mentat_ocaml_dune_rpc.Instance.activity t.rpc <> before then begin
+        Log.debug (fun m ->
+            m "dune watch flush timed out but events flowed; loop alive");
+        `Completed
+      end
+      else `Timed_out
+
 (* One supervised life: follow the child's output until it settles — the
    wait doubles as the poll cadence for the private registry entry, the
    mirror, and the observer's attachment — and keep the stderr tail as the
@@ -346,7 +400,13 @@ let start t =
    ended. *)
 let live_once t session =
   let reached = ref false in
+  let self_tested = ref false in
+  let verdict = ref None in
   let tail = ref "" in
+  let kill because =
+    verdict := Some because;
+    Command.Session.signal ~grace:stop_grace_s session
+  in
   let rec loop cursor =
     let chunk =
       Command.Session.await session ~from:cursor
@@ -360,13 +420,50 @@ let live_once t session =
           if Option.is_none t.mirror && private_entry_registered t then
             write_mirror t session;
           if (not !reached) && observed_live t then reached := true;
-          loop chunk.Command.Session.next
+          (* The first flush after the watch comes up is the confinement
+             self-test: a fresh watch whose file watcher never answers is
+             blocked, not slow — announced at once, no restart budget
+             spent. *)
+          if !reached && not !self_tested then begin
+            self_tested := true;
+            match verify_loop t with
+            | `Completed | `No_server -> ()
+            | `Timed_out ->
+                Log.warn (fun m ->
+                    m "dune watch file watcher never answered its first flush");
+                kill `Blocked
+          end;
+          (* A reported stall verifies once; between lives, or before the
+             watch is up, the report has no forwarded build behind it and is
+             dropped. *)
+          if t.stalled then begin
+            t.stalled <- false;
+            if !reached && Option.is_none !verdict then
+              match verify_loop t with
+              | `Completed | `No_server ->
+                  Log.info (fun m ->
+                      m "dune watch stall report cleared by verification")
+              | `Timed_out ->
+                  Log.warn (fun m ->
+                      m "dune watch stopped responding to builds; restarting");
+                  kill `Hung
+          end;
+          if Option.is_none !verdict then loop chunk.Command.Session.next
         end
     | Command.Session.Exited _ | Command.Session.Terminated -> ()
   in
   loop Command.Session.Cursor.zero;
+  t.stalled <- false;
   remove_mirror t;
-  (!reached, exit_cause session !tail)
+  let cause =
+    match !verdict with
+    | Some verdict -> (verdict :> [ `Blocked | `Hung | `Stopped | `Exited of string ])
+    | None -> (
+        match exit_cause session !tail with
+        | `Terminated -> `Stopped
+        | `Exited _ as exited -> exited)
+  in
+  (!reached, cause)
 
 (* A foreign watch is observed, never signalled: stay while the observer
    holds a connection (or, between its reconnects, while the socket still
@@ -402,7 +499,8 @@ and spawn t deaths =
     match start t with
     | Error message ->
         Log.warn (fun m -> m "dune watch spawn failed: %s" message);
-        death t deaths ~reached:false ~cause:("spawn failed: " ^ message)
+        death t deaths ~reached:false
+          ~restart:(Health.Restart.Exited ("spawn failed: " ^ message))
     | Ok session -> (
         Log.info (fun m ->
             m "dune watch spawned pid %d" (Command.Session.pid session));
@@ -420,16 +518,27 @@ and spawn t deaths =
         remove_endpoint_debris t;
         if not t.stopped then
           match cause with
-          | `Terminated -> ()
+          | `Stopped -> ()
+          | `Blocked ->
+              queue_notice t (blocked_notice ());
+              set_word t
+                (Mentat_ocaml_dune_rpc.Watch.Announce
+                   (Health.Off
+                      (Health.Off.Blocked
+                         "file watcher blocked by the sandbox")))
+          | `Hung ->
+              queue_notice t (hung_notice ());
+              death t deaths ~reached:true ~restart:Health.Restart.Hung
           | `Exited cause ->
               if probe t then begin
                 wait_while_foreign t;
                 cycle t 0
               end
-              else death t deaths ~reached ~cause)
+              else death t deaths ~reached
+                     ~restart:(Health.Restart.Exited cause))
   end
 
-and death t deaths ~reached ~cause =
+and death t deaths ~reached ~restart =
   if not t.stopped then
     match Mentat_ocaml_dune_rpc.Watch.after_death ~reached ~deaths with
     | `Give_up ->
@@ -438,8 +547,7 @@ and death t deaths ~reached ~cause =
              (Health.Off Health.Off.Gave_up))
     | `Retry deaths ->
         set_word t
-          (Mentat_ocaml_dune_rpc.Watch.Announce
-             (Health.Restarting (Health.Restart.Exited cause)));
+          (Mentat_ocaml_dune_rpc.Watch.Announce (Health.Restarting restart));
         sleep t restart_pause_s;
         cycle t deaths
 
