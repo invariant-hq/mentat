@@ -363,6 +363,30 @@
   mentat_review
   mentat_workspace))
 
+; The review-findings document lives in bin/ (executable-side contract); its
+; source is copied in so its pure decode/schema/fingerprint unit tests keep
+; running as a fast unit suite without linking the executable.
+
+(copy_files
+ (files ../../bin/review_finding.{ml,mli}))
+
+(test
+ (name test_review_finding)
+ (modules test_review_finding review_finding)
+ (libraries windtrap jsont jsont.bytesrw mentat_digest mentat_llm))
+
+; The publication renderer lives in bin/ (executable-side contract); its
+; source is copied in so its pure diff/anchor/render unit tests keep running
+; as a fast unit suite without linking the executable.
+
+(copy_files
+ (files ../../bin/publication.{ml,mli}))
+
+(test
+ (name test_publication)
+ (modules test_publication publication review_finding)
+ (libraries windtrap jsont jsont.bytesrw mentat_digest))
+
 (test
  (name test_store)
  (modules test_store)

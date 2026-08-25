@@ -398,6 +398,15 @@ val resolve_workspace :
     inadmissible root), rendered as a clean runtime error (exit 1), never a
     crash. *)
 
+val review_git : t -> (Review_git.t, Exit_status.t) result
+(** [review_git t] is a git worktree loader over a freshly sealed read-only,
+    network-restricted workspace capability — the loader only resolves
+    revisions and renders diffs, so it gets the weakest posture that serves
+    that. The headless review runner resolves its diff target through it
+    before any client or engine is assembled. Each call re-seals the
+    capability and caches nothing. [Error] when the workspace cannot seal, as
+    {!resolve_workspace}. *)
+
 (** {1:probe Doctor's probe}
 
     The same staging as {!with_base}, consumed per-stage instead of fail-closed.

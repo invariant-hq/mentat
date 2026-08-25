@@ -1,0 +1,297 @@
+name: Mentat review
+
+# Reviews each pull request with the pinned mentat release and publishes the
+# findings as inline review threads plus one sticky summary comment. Two jobs
+# split the credentials: `review` holds the model key and only ever reads;
+# `publish` holds the PR write scope and never sees the key or the head
+# checkout.
+#
+# pull_request_target runs the workflow definition from the base branch, so a
+# PR editing this file has no effect on its own review. The head commit is
+# fetched as data at the event's SHA and never executed: the review tool
+# catalog has no shell, tool reads are sandbox-confined to the worktree, and
+# an untrusted checkout disables project config, instructions, and commands.
+#
+# Pins, set as repository settings: MENTAT_VERSION and MENTAT_MODEL
+# (variables), ANTHROPIC_API_KEY / OPENAI_API_KEY (secrets; only the one the
+# pinned model needs must exist).
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+
+permissions: {}
+
+concurrency:
+  group: mentat-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Review
+    # Trusted authors run on every push; fork PRs run once a maintainer
+    # applies the `mentat-review` label. The label is a one-time cost gate,
+    # not a per-revision vouch: it persists across pushes. The labeled
+    # activation checks which label fired so an unrelated label add does not
+    # re-run the review.
+    if: >
+      (github.event.action != 'labeled' ||
+       github.event.label.name == 'mentat-review') &&
+      (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+                github.event.pull_request.author_association) ||
+       contains(github.event.pull_request.labels.*.name, 'mentat-review'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      # Full history so the merge base resolves even when the base branch has
+      # advanced since the PR branched.
+      - name: Check out trusted base
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          fetch-depth: 0
+
+      # The head is fetched by the event's SHA, never the moving pull/N/head
+      # ref, so the tree reviewed, the permalinks, and the anchors all name
+      # one commit.
+      - name: Materialize the PR head as data, pinned to the event SHA
+        working-directory: base
+        run: |
+          git fetch origin "$HEAD_SHA"
+          git worktree add "$GITHUB_WORKSPACE/head" "$HEAD_SHA"
+
+      # The publisher anchors findings against the exact bytes the model
+      # reviewed, so the merge-base diff is computed once by this trusted
+      # step and handed to the publish job. The git arguments mirror the
+      # binary's own diff plumbing; quotePath and the prefix flags are
+      # pinned so no git configuration on the runner can change the
+      # `+++ b/` grammar the parser keys on.
+      - name: Precompute the merge-base diff
+        working-directory: base
+        run: |
+          git -c core.quotePath=false diff --no-color --no-ext-diff \
+            --src-prefix=a/ --dst-prefix=b/ \
+            "$(git merge-base "$BASE_SHA" "$HEAD_SHA")" "$HEAD_SHA" \
+            > "$GITHUB_WORKSPACE/review.diff"
+
+      # actions/checkout persists its auth header in base/.git/config, and
+      # the review sandbox admits base/.git as a readable root. The diff
+      # above was the last authenticated git operation, so scrub the
+      # credential before the model runs.
+      - name: Drop the persisted checkout credential
+        working-directory: base
+        run: git config --unset-all http.https://github.com/.extraheader
+
+      # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor,
+      # which would fail the sandbox probe. A failed preflight fails this
+      # step with a readable cause instead of a generic boot refusal; the
+      # binary's own fail-closed default refuses to run unsandboxed.
+      - name: Enable user namespaces and install bubblewrap
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo apt-get update && sudo apt-get install -y bubblewrap
+          bwrap --unshare-user --ro-bind / / /bin/true
+
+      # An attestation nobody verifies is half a guarantee: the tarball is
+      # checked against the repo's build provenance before anything runs.
+      - name: Install the pinned mentat release and verify provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MENTAT_VERSION: ${{ vars.MENTAT_VERSION }}
+        run: |
+          gh release download "$MENTAT_VERSION" --repo invariant-hq/mentat \
+            --pattern mentat-linux-x64.tar.gz
+          gh attestation verify mentat-linux-x64.tar.gz \
+            --repo invariant-hq/mentat
+          tar -xzf mentat-linux-x64.tar.gz mentat
+          sudo install -m 0755 mentat /usr/local/bin/mentat
+          rm mentat mentat-linux-x64.tar.gz
+
+      # The review subcommand computes the same merge-base diff itself, runs
+      # the headless review turn, and emits the findings document through the
+      # built-in schema. Model keys ride only this step's env; tool children
+      # receive a from-scratch allow-list environment without them. The rc is
+      # captured for the publish job because an exit code does not cross a
+      # job boundary.
+      - name: Review
+        id: review
+        working-directory: head
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          MENTAT_MODEL: ${{ vars.MENTAT_MODEL }}
+        run: |
+          set +e
+          timeout 15m mentat run review --base "$BASE_SHA" --json \
+            > "$GITHUB_WORKSPACE/run.jsonl"
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+      # Only a successful run has a well-formed stream to extract from; a
+      # failed one is diagnosed from run.jsonl by the publish job instead.
+      - name: Extract the findings document
+        if: steps.review.outputs.rc == '0'
+        run: |
+          jq -c 'select(.type == "turn.finished") | .output // empty' \
+            run.jsonl > findings.json
+
+      - name: Hand the run to the publish job
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mentat-review
+          path: |
+            run.jsonl
+            findings.json
+            review.diff
+          if-no-files-found: ignore
+    outputs:
+      rc: ${{ steps.review.outputs.rc }}
+
+  publish:
+    name: Publish
+    needs: review
+    if: always() && needs.review.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      BASE_REF: ${{ github.event.pull_request.base.ref }}
+      RC: ${{ needs.review.outputs.rc }}
+    steps:
+      # Tolerate a missing artifact: a review job that died before its first
+      # step still deserves an advisory rather than a silent publish failure.
+      - name: Download the review artifact
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: mentat-review
+
+      - name: Install the pinned mentat release and verify provenance
+        env:
+          MENTAT_VERSION: ${{ vars.MENTAT_VERSION }}
+        run: |
+          gh release download "$MENTAT_VERSION" --repo invariant-hq/mentat \
+            --pattern mentat-linux-x64.tar.gz
+          gh attestation verify mentat-linux-x64.tar.gz \
+            --repo invariant-hq/mentat
+          tar -xzf mentat-linux-x64.tar.gz mentat
+          sudo install -m 0755 mentat /usr/local/bin/mentat
+          rm mentat mentat-linux-x64.tar.gz
+
+      # Both comment families: review comments carry the threads, issue
+      # comments carry the summary. Filtered to the workflow token's own bot
+      # login and our markers — marker presence alone is forgeable, so the
+      # author predicate is what makes a thread ours.
+      - name: Fetch the comments already posted
+        run: |
+          {
+            gh api --paginate "repos/$REPO/pulls/$NUMBER/comments" \
+              --jq '.[] | {id: .id, body: .body, user: {login: .user.login}}'
+            gh api --paginate "repos/$REPO/issues/$NUMBER/comments" \
+              --jq '.[] | {id: .id, body: .body, user: {login: .user.login}}'
+          } | jq -s 'map(select(.user.login == "github-actions[bot]"
+                       and (.body | test("<!-- mentat-(review|finding:)"))))' \
+            > posted.json
+
+      - name: Render the publication
+        if: needs.review.outputs.rc == '0'
+        run: |
+          if [ ! -s findings.json ]; then
+            echo "nothing to publish: the review produced no findings document"
+            printf '' > out.json
+          else
+            mentat github review --pr "$REPO#$NUMBER" --at "$HEAD_SHA" \
+              --base-label "$BASE_REF" --origin actions \
+              --diff review.diff --posted posted.json \
+              < findings.json > out.json
+          fi
+
+      # Model text never touches a shell variable: bodies go from out.json
+      # through jq into files handed to gh api --input. Paths and methods are
+      # renderer-generated, never model text.
+      - name: Post the review threads
+        if: needs.review.outputs.rc == '0'
+        run: |
+          [ -s out.json ] || exit 0
+          if [ "$(jq -r '.threads_safe' out.json)" != "true" ]; then
+            echo "threads_safe is false: not posting thread requests" >&2
+            exit 0
+          fi
+          count="$(jq '.review | length' out.json)"
+          i=0
+          while [ "$i" -lt "$count" ]; do
+            jq ".review[$i].body" out.json > body.json
+            gh api --method "$(jq -r ".review[$i].method" out.json)" \
+              "$(jq -r ".review[$i].path" out.json)" --input body.json
+            i=$((i + 1))
+          done
+
+      - name: Upsert the summary comment
+        if: needs.review.outputs.rc == '0'
+        run: |
+          [ -s out.json ] || exit 0
+          jq '.summary.body' out.json > body.json
+          gh api --method "$(jq -r '.summary.method' out.json)" \
+            "$(jq -r '.summary.path' out.json)" --input body.json
+
+      # rc 2 is a workflow bug (bad flags), never a model outcome: fail
+      # loudly, post nothing.
+      - name: Fail on a review usage error
+        if: needs.review.outputs.rc == '2'
+        run: |
+          echo "mentat run review exited 2: the workflow invocation is wrong" >&2
+          exit 1
+
+      # Every other failure posts an advisory under the same sticky marker,
+      # naming the failure kind from the run log. Only fixed strings enter
+      # the body — a session's failure message is model-adjacent text and
+      # stays in the uploaded run log. The body's one structural requirement
+      # is that it contain a `<!-- mentat-review … -->` marker so the next
+      # run finds and patches it; the footer styling around the marker is
+      # free.
+      - name: Post the failure advisory
+        if: >
+          needs.review.outputs.rc != '0' && needs.review.outputs.rc != '2'
+        run: |
+          case "$RC" in
+            124) kind="the review timed out after 15 minutes" ;;
+            3) kind="the review parked on a decision it could not resolve unattended" ;;
+            1)
+              if grep -q '"type":"run.output_schema_failed"' run.jsonl 2>/dev/null; then
+                kind="the review completed without a valid findings document"
+              elif grep -q '"outcome":"step_limit"' run.jsonl 2>/dev/null; then
+                kind="the review hit its step limit"
+              elif grep -q '"type":"session.failed"' run.jsonl 2>/dev/null; then
+                kind="the review session failed"
+              else
+                kind="the review failed"
+              fi ;;
+            *) kind="the review job did not complete" ;;
+          esac
+          run_url="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID"
+          jq -n --arg kind "$kind" --arg url "$run_url" \
+            '{body: ("### Mentat review — not published\n\n"
+                     + $kind + "; see the [run log](" + $url + ").\n\n"
+                     + "<sub>mentat · <!-- mentat-review origin=actions --></sub>")}' \
+            > advisory.json
+          summary_id="$(jq -r \
+            '[.[] | select(.body | contains("<!-- mentat-review "))][0].id // empty' \
+            posted.json)"
+          if [ -n "$summary_id" ]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$summary_id" \
+              --input advisory.json
+          else
+            gh api --method POST "repos/$REPO/issues/$NUMBER/comments" \
+              --input advisory.json
+          fi

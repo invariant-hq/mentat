@@ -107,7 +107,18 @@ let scripted_loader () =
       ([ "git"; "rev-parse"; "--show-toplevel" ], Ok "/repo\n");
       ( [ "git"; "rev-parse"; "--verify"; "--quiet"; "trunk^{commit}" ],
         Ok "deadbeef\n" );
-      ([ "git"; "diff"; "--no-color"; "--no-ext-diff"; "deadbeef" ], Ok "DIFF");
+      ( [
+          "git";
+          "-c";
+          "core.quotePath=false";
+          "diff";
+          "--no-color";
+          "--no-ext-diff";
+          "--src-prefix=a/";
+          "--dst-prefix=b/";
+          "deadbeef";
+        ],
+        Ok "DIFF" );
       ( [ "git"; "ls-files"; "--others"; "--exclude-standard"; "-z" ],
         Ok "lib/new.ml\000" );
       ( [
@@ -160,6 +171,79 @@ let git_resolve_base () =
       match Review_git.Error.kind error with
       | Review_git.Error.Bad_revision _ -> ()
       | _ -> failf "expected Bad_revision, got %a" Review_git.Error.pp error)
+
+(* A loader scripting only the merge-base flow: base resolution, upstream
+   resolution, the rev-list comparison, and merge-base itself. *)
+let merge_base_loader ~upstream ~rev_list ~merge_base_ref () =
+  let run ?stdin:_ argv =
+    match argv with
+    | [ "git"; "rev-parse"; "--verify"; "--quiet"; "trunk^{commit}" ] ->
+        Ok "deadbeef\n"
+    | [ "git"; "rev-parse"; "--verify"; "--quiet"; "trunk@{upstream}^{commit}" ]
+      ->
+        upstream
+    | [ "git"; "rev-list"; "--count"; "trunk..trunk@{upstream}" ] -> rev_list
+    | [ "git"; "merge-base"; reference; "HEAD" ]
+      when String.equal reference merge_base_ref ->
+        Ok "cafebabe\n"
+    | _ -> Error ("unscripted git: " ^ String.concat " " argv)
+  in
+  let read rel = Error ("no such file: " ^ Rel.to_string rel) in
+  let write _ ~before:_ ~after:_ = Ok () in
+  Review_git.make ~run ~read ~write
+
+let git_merge_base_names_its_reference () =
+  let comparison loader =
+    match Review_git.merge_base loader ~base:"trunk" with
+    | Ok comparison -> comparison
+    | Error error -> failf "merge_base: %a" Review_git.Error.pp error
+  in
+  let no_upstream =
+    comparison
+      (merge_base_loader ~upstream:(Error "fatal: no upstream")
+         ~rev_list:(Error "unreached") ~merge_base_ref:"trunk" ())
+  in
+  equal string ~msg:"no upstream compares against the base" "trunk"
+    no_upstream.Review_git.reference;
+  equal string ~msg:"the merge base hash is trimmed" "cafebabe"
+    no_upstream.Review_git.sha;
+  is_true ~msg:"no upstream warns nothing"
+    (Option.is_none no_upstream.Review_git.upstream_warning);
+  let ahead =
+    comparison
+      (merge_base_loader ~upstream:(Ok "beefbeef\n") ~rev_list:(Ok "2\n")
+         ~merge_base_ref:"trunk@{upstream}" ())
+  in
+  equal string ~msg:"an ahead upstream is preferred" "trunk@{upstream}"
+    ahead.Review_git.reference;
+  is_true ~msg:"a used upstream warns nothing"
+    (Option.is_none ahead.Review_git.upstream_warning);
+  let not_ahead =
+    comparison
+      (merge_base_loader ~upstream:(Ok "beefbeef\n") ~rev_list:(Ok "0\n")
+         ~merge_base_ref:"trunk" ())
+  in
+  equal string ~msg:"an even upstream falls back to the base" "trunk"
+    not_ahead.Review_git.reference;
+  is_true ~msg:"an even upstream warns nothing"
+    (Option.is_none not_ahead.Review_git.upstream_warning);
+  let incomparable =
+    comparison
+      (merge_base_loader ~upstream:(Ok "beefbeef\n")
+         ~rev_list:(Error "fatal: shallow history") ~merge_base_ref:"trunk" ())
+  in
+  equal string ~msg:"an incomparable upstream falls back to the base" "trunk"
+    incomparable.Review_git.reference;
+  match incomparable.Review_git.upstream_warning with
+  | Some warning ->
+      is_true ~msg:"the warning names the upstream"
+        (let sub = "trunk@{upstream}" in
+         let n = String.length sub and m = String.length warning in
+         let rec go i =
+           i + n <= m && (String.equal (String.sub warning i n) sub || go (i + 1))
+         in
+         go 0)
+  | None -> fail "an incomparable upstream must warn"
 
 let git_load_builds_the_feature () =
   let loader = scripted_loader () in
@@ -225,7 +309,18 @@ let git_load_batches_base_blobs () =
   let run ?(stdin = "") argv =
     calls := argv :: !calls;
     match argv with
-    | [ "git"; "diff"; "--no-color"; "--no-ext-diff"; "deadbeef" ] -> Ok "DIFF"
+    | [
+     "git";
+     "-c";
+     "core.quotePath=false";
+     "diff";
+     "--no-color";
+     "--no-ext-diff";
+     "--src-prefix=a/";
+     "--dst-prefix=b/";
+     "deadbeef";
+    ] ->
+        Ok "DIFF"
     | [ "git"; "ls-files"; "--others"; "--exclude-standard"; "-z" ] -> Ok ""
     | [
      "git";
@@ -294,7 +389,18 @@ let mutation_loader ~worktree =
   let writes = ref [] in
   let run ?(stdin = "") argv =
     match argv with
-    | [ "git"; "diff"; "--no-color"; "--no-ext-diff"; "deadbeef" ] -> Ok "DIFF"
+    | [
+     "git";
+     "-c";
+     "core.quotePath=false";
+     "diff";
+     "--no-color";
+     "--no-ext-diff";
+     "--src-prefix=a/";
+     "--dst-prefix=b/";
+     "deadbeef";
+    ] ->
+        Ok "DIFF"
     | [ "git"; "ls-files"; "--others"; "--exclude-standard"; "-z" ] -> Ok ""
     | [
      "git";
@@ -435,6 +541,8 @@ let () =
       test "git parsing splits, filters, and fingerprints" git_parse_pure;
       test "git cat-file --batch parsing" git_cat_file_batch_parse;
       test "git resolve_base returns the commit hash" git_resolve_base;
+      test "git merge_base names the reference it compared"
+        git_merge_base_names_its_reference;
       test "git load builds the reviewable feature" git_load_builds_the_feature;
       test "git stats summarizes the worktree" git_stats_summarizes_the_worktree;
       test "git load reads base blobs in one cat-file --batch"

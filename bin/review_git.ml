@@ -226,23 +226,122 @@ let is_repository t =
         (Error.make Error.Not_a_repository
            ("not inside a git worktree: " ^ message))
 
-let resolve_base t spec =
+(* Quiet resolution: [Some hash] when [spec] names a commit, [None] otherwise. *)
+let resolve_opt t spec =
   match
     t.run [ "git"; "rev-parse"; "--verify"; "--quiet"; spec ^ "^{commit}" ]
   with
   | Ok output ->
       let hash = String.trim output in
-      if String.length hash > 0 then Ok hash
-      else
-        Error
-          (Error.make (Error.Bad_revision spec)
-             (Printf.sprintf "unknown base revision %s" spec))
-  | Error _ ->
+      if String.length hash > 0 then Some hash else None
+  | Error _ -> None
+
+let resolve_base t spec =
+  match resolve_opt t spec with
+  | Some hash -> Ok hash
+  | None ->
       Error
         (Error.make (Error.Bad_revision spec)
            (Printf.sprintf "unknown base revision %s" spec))
 
-let diff_args base = [ "diff"; "--no-color"; "--no-ext-diff"; base ]
+(* The unified-diff output is pinned against user git configuration: path
+   quoting off and the a/ b/ prefixes forced, so a downstream parser sees the
+   same bytes regardless of core.quotePath, diff.mnemonicPrefix, or
+   diff.noprefix. *)
+let diff_args base =
+  [
+    "-c";
+    "core.quotePath=false";
+    "diff";
+    "--no-color";
+    "--no-ext-diff";
+    "--src-prefix=a/";
+    "--dst-prefix=b/";
+    base;
+  ]
+
+type comparison = {
+  sha : string;
+  reference : string;
+  upstream_warning : string option;
+}
+
+(* The review base for a branch: the merge base of a reference and HEAD. The
+   reference is [base]'s upstream when it resolves and is strictly ahead, so a
+   review against a stale local base branch compares against what the remote
+   will see. No upstream configured is the ordinary local shape and falls back
+   to [base] silently; an upstream that resolves but cannot be compared falls
+   back too, with a warning the caller can surface — a stale comparison is
+   exactly what the upstream preference exists to prevent. *)
+let merge_base t ~base =
+  match resolve_base t base with
+  | Error e -> Error e
+  | Ok _ -> (
+      let upstream = base ^ "@{upstream}" in
+      let fallback reason =
+        ( base,
+          Some
+            (Printf.sprintf
+               "%s resolved but could not be compared with %s (%s); reviewing \
+                against %s"
+               upstream base reason base) )
+      in
+      let reference, upstream_warning =
+        match resolve_opt t upstream with
+        | None -> (base, None)
+        | Some _ -> (
+            match git t [ "rev-list"; "--count"; base ^ ".." ^ upstream ] with
+            | Error error -> fallback (Error.message error)
+            | Ok count -> (
+                match int_of_string_opt (String.trim count) with
+                | Some ahead when ahead > 0 -> (upstream, None)
+                | Some _ -> (base, None)
+                | None -> fallback "unreadable rev-list count"))
+      in
+      match git t [ "merge-base"; reference; "HEAD" ] with
+      | Error error ->
+          let message =
+            Printf.sprintf "cannot determine the merge base of %s and HEAD: %s"
+              reference (Error.message error)
+          in
+          Error (Error.make (Error.Git_failed message) message)
+      | Ok output ->
+          let hash = String.trim output in
+          if String.length hash > 0 then
+            Ok { sha = hash; reference; upstream_warning }
+          else
+            git_failed
+              (Printf.sprintf "no merge base between %s and HEAD" reference))
+
+let diff_text t ~base_sha = git t (diff_args base_sha)
+
+(* One commit's own change: its first parent against it. A root commit has no
+   parent and therefore no lone diff; that is a revision-class refusal, not a
+   git failure. *)
+let commit_diff t ~commit =
+  match resolve_base t commit with
+  | Error _ as error -> error
+  | Ok sha -> (
+      match resolve_opt t (sha ^ "^") with
+      | None ->
+          Error
+            (Error.make (Error.Bad_revision commit)
+               (Printf.sprintf
+                  "commit %s is a root commit; it has no parent to diff against"
+                  commit))
+      | Some parent ->
+          git t
+            [
+              "-c";
+              "core.quotePath=false";
+              "diff";
+              "--no-color";
+              "--no-ext-diff";
+              "--src-prefix=a/";
+              "--dst-prefix=b/";
+              parent;
+              sha;
+            ])
 
 let untracked_paths t =
   match git t [ "ls-files"; "--others"; "--exclude-standard"; "-z" ] with

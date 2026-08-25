@@ -24,6 +24,8 @@
   dune_watch
   dune_lint
   tool_boot
+  review_finding
+  publication
   review_git
   composition
   daemon
@@ -41,6 +43,7 @@
   cli_auth
   cli_session
   cli_run
+  cli_github
   cli_skills
   cli_commands
   cli_debug

@@ -2248,6 +2248,20 @@ let resolve_workspace t ~mode ~network :
         (Exit_status.runtime
            (Format.asprintf "%a" Mentat_workspace_io.Resolve_error.pp e))
 
+(* The review git loader over a freshly sealed read-only capability, for the
+   headless review runner, which resolves its diff target before any client or
+   engine is assembled. The loader only resolves revisions and renders diffs,
+   so it is sealed at the weakest posture that serves that — read-only, no
+   network — not the configured build authority. Each call re-seals the
+   capability and caches nothing. *)
+let review_git t =
+  Result.map
+    (fun capability ->
+      open_review_git capability
+        ~clock:(Eio.Stdenv.mono_clock t.shared.stdenv))
+    (resolve_workspace t ~mode:Cfg.Mode.Read_only
+       ~network:Mentat_sandbox.Policy.Network.Restricted)
+
 (* The full client. *)
 
 let session_cone t engine : Client.Driver.Session.t =

@@ -62,6 +62,7 @@ let root =
       Cli_trust.untrust_cmd;
       Cli_session.cmd;
       Cli_run.cmd;
+      Cli_github.cmd;
       Cli_tui.resume_cmd ~version;
       Cli_tui.review_cmd ~version;
       Cli_sandbox.cmd;
@@ -106,8 +107,8 @@ let take_verbosity argv =
    [mentat run "do X"] would fail as an unknown command. Splice an explicit
    [start] before a bare-word (or [-] stdin) first token to preserve the
    baseline [run PROMPT] ergonomic. An option-led first token ([run --json …])
-   already reaches the default [start]; the [start]/[resume]/[reply] subcommand
-   names and the [run -- PROMPT] escape are left untouched. *)
+   already reaches the default [start]; the [start]/[resume]/[reply]/[review]
+   subcommand names and the [run -- PROMPT] escape are left untouched. *)
 let rewrite_run_prompt argv =
   match Array.to_list argv with
   (* [run -- PROMPT] escapes a prompt that collides with a subcommand
@@ -117,7 +118,9 @@ let rewrite_run_prompt argv =
   | exe :: "run" :: "--" :: rest ->
       Array.of_list (exe :: "run" :: "start" :: "--" :: rest)
   | exe :: "run" :: token :: rest
-    when (not (List.mem token [ "start"; "resume"; "reply"; "--help"; "-h" ]))
+    when (not
+            (List.mem token
+               [ "start"; "resume"; "reply"; "review"; "--help"; "-h" ]))
          && (String.equal token "-"
             || not (String.length token > 0 && Char.equal token.[0] '-')) ->
       Array.of_list (exe :: "run" :: "start" :: token :: rest)

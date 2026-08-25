@@ -276,10 +276,14 @@ jobs:
           sudo apt-get update && sudo apt-get install -y bubblewrap
           bwrap --unshare-user --ro-bind / / /bin/true   # preflight; fail loudly here
       - name: Install pinned mentat release and verify provenance
+        env: { GH_TOKEN: ${{ github.token }} }
         run: |
-          # install.sh is fetched from the PINNED base checkout, not from main
-          sh base/scripts/install.sh -v "$MENTAT_VERSION"
-          gh attestation verify "$(command -v mentat)" --repo invariant-hq/mentat
+          # the attestation subject is the release tarball: verify it, then extract
+          gh release download "$MENTAT_VERSION" --repo invariant-hq/mentat \
+            --pattern mentat-linux-x64.tar.gz
+          gh attestation verify mentat-linux-x64.tar.gz --repo invariant-hq/mentat
+          tar -xzf mentat-linux-x64.tar.gz mentat
+          sudo install -m 0755 mentat /usr/local/bin/mentat
       - name: Review
         id: review
         working-directory: head
@@ -347,11 +351,12 @@ The audit- and adversary-driven decisions baked in:
   `chat_completions.ml:794-802` has the hook, nothing sets it; the outer
   margin lets the artifact still upload). `timeout` exits **124**, which
   the publisher treats as run failure like any other non-zero code.
-- **Provenance.** `install.sh` (which supports `-v X.Y.Z`) runs from the
-  *pinned base checkout*, not curled from `main`; the installed binary is
-  attestation-verified against the repo before first use (`release.yml`
-  attests the release binaries; producing an attestation nobody verifies is
-  half a guarantee). During the pre-release bridge, a prior job builds
+- **Provenance.** The pinned release tarball is downloaded and
+  attestation-verified against the repo *before extraction*: the tarball is
+  the subject `release.yml` attests, so verification runs on the artifact
+  the attestation actually covers, never on the extracted binary (producing
+  an attestation nobody verifies is half a guarantee). During the
+  pre-release bridge, a prior job builds
   mentat from the **base ref** and hands it forward **within the same run**
   as an artifact — never via a cross-run actions/cache, whose keys a
   labeled PR could poison in the `pull_request_target` context.

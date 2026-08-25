@@ -148,6 +148,48 @@ val resolve_base : t -> string -> (string, Error.t) result
     always name the same state. Errors with {!Error.Bad_revision} when [spec]
     names no commit. *)
 
+type comparison = {
+  sha : string;  (** The merge base, as a full commit hash. *)
+  reference : string;
+      (** The reference the merge base was computed against: [base] itself, or
+          [base@{upstream}] when the upstream resolved and was strictly
+          ahead. *)
+  upstream_warning : string option;
+      (** A caller-surfaceable warning when [base@{upstream}] resolved but
+          could not be compared with [base], so the comparison fell back to a
+          possibly stale [base]; [None] when the upstream was used, was not
+          ahead, or was not configured at all. *)
+}
+(** The result of {!merge_base}: the merge base and which reference it was
+    computed against. *)
+
+val merge_base : t -> base:string -> (comparison, Error.t) result
+(** [merge_base t ~base] is the merge base of revision [base] and [HEAD].
+    When [base]'s upstream ([base@{upstream}]) resolves and is strictly ahead
+    of [base], the upstream is preferred: a review against a stale local base
+    branch then compares against what the remote will see, not the stale local
+    tip. An upstream that is not configured falls back to [base] silently; one
+    that resolves but cannot be compared (a shallow history, say) falls back
+    with [upstream_warning] set. Errors with {!Error.Bad_revision} when [base]
+    names no commit, and {!Error.Git_failed} when the two histories share no
+    merge base. *)
+
+val diff_text : t -> base_sha:string -> (string, Error.t) result
+(** [diff_text t ~base_sha] is the raw unified diff from commit [base_sha] to
+    the worktree — committed and uncommitted tracked changes together, as
+    [git diff] renders them. The output format is pinned — path quoting
+    disabled and the [a/]/[b/] prefixes forced — so the bytes do not vary with
+    user git configuration. Untracked files are not part of the text.
+    [base_sha] must be a resolved commit hash (see {!resolve_base} and
+    {!merge_base}). *)
+
+val commit_diff : t -> commit:string -> (string, Error.t) result
+(** [commit_diff t ~commit] is the raw unified diff of revision [commit] alone:
+    its first parent against it, in the same pinned output format as
+    {!diff_text}. Errors with {!Error.Bad_revision} when [commit] names no
+    commit, and — with a message naming the commit — when it resolves to a
+    root commit, whose lone diff has no base. *)
+
 val fingerprint : t -> base:string -> (string, Error.t) result
 (** [fingerprint t ~base] is the current fingerprint of the reviewable state
     from [base] to the worktree: the tracked diff plus untracked paths and

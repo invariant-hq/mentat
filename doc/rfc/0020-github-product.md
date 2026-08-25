@@ -53,7 +53,7 @@ A thread on the diff:
 `Option.get`, so an empty `.mentat/config` crashes at startup before a
 session exists.
 
-<sub>mentat · <!-- mentat-finding:9f2c1a4e7b3d8065 --></sub>
+<sub>mentat · <!-- mentat-finding:9f2c1a4e7b3d8065 origin=actions --></sub>
 ```
 
 and one summary comment, upserted in place, carrying the verdict plus
@@ -70,7 +70,7 @@ Reviewed `a1b2c3d` against `main` · 3 findings · 2 threads posted
 |---|---|---|
 | 🟡 P2 | `Config.get`'s only other caller unwraps too | [`bin/main.ml:204`](…/blob/a1b2c3d/bin/main.ml#L204) |
 
-<sub>mentat 0.4.0 · claude-fable-5 · [run](…) · <!-- mentat-review -->
+<sub>mentat 0.4.0 · claude-fable-5 · [run](…) · <!-- mentat-review origin=actions -->
 </sub>
 ```
 
@@ -81,14 +81,31 @@ third row kind.
 The workflow, replacing RFC 0019's posting script:
 
 ```yaml
-- run: gh api --paginate "/repos/$R/pulls/$N/comments" > posted.json
+- run: |
+    { gh api --paginate "/repos/$R/pulls/$N/comments" \
+        --jq '.[] | {id: .id, body: .body, user: {login: .user.login}}'
+      gh api --paginate "/repos/$R/issues/$N/comments" \
+        --jq '.[] | {id: .id, body: .body, user: {login: .user.login}}'
+    } | jq -s 'map(select(.user.login == "github-actions[bot]"
+                 and (.body | test("<!-- mentat-(review|finding:)"))))' \
+      > posted.json
 - run: |
     jq -r 'select(.type=="turn.finished").output' run.jsonl \
-    | mentat github review --pr "$R#$N" --at "$SHA" \
+    | mentat github review --pr "$R#$N" --at "$SHA" --origin actions \
         --diff pr.patch --posted posted.json > out.json
 - run: |
-    jq -e .review out.json  | gh api --input - --method POST "/repos/$R/pulls/$N/reviews"
-    jq -e .summary out.json | gh api --input - --method PATCH "/repos/$R/issues/comments/$(jq -r .summary_id out.json)"
+    # one review-comment POST per thread; the summary request carries its
+    # own method (POST the first run, PATCH thereafter)
+    count="$(jq '.review | length' out.json)"; i=0
+    while [ "$i" -lt "$count" ]; do
+      jq ".review[$i].body" out.json > body.json
+      gh api --method "$(jq -r ".review[$i].method" out.json)" \
+        "$(jq -r ".review[$i].path" out.json)" --input body.json
+      i=$((i + 1))
+    done
+    jq '.summary.body' out.json > body.json
+    gh api --method "$(jq -r '.summary.method' out.json)" \
+      "$(jq -r '.summary.path' out.json)" --input body.json
 ```
 
 `pr.patch` is the merge-base diff **the review job already computed** (RFC
@@ -134,20 +151,27 @@ data: the same value is what the goldens assert, what stdout carries, and what
 
 Parse the supplied diff: walk each `@@ … +newStart @@` hunk, advancing the
 RIGHT-side counter on context and added lines, collecting commentable lines
-and their text. A finding is **anchored** when its `anchor` — the exact source
-text it is about (§8, a new schema field) — occurs exactly once among those
-lines; otherwise it is **unanchored** and becomes a summary row.
+and their text. A finding is **anchored** when its `anchor` — the exact text
+of the source line it is about (§8, a new schema field) — equals a
+commentable line of its claimed file after trimming: uniquely, or at the
+occurrence nearest its claimed `line`. The claimed line is a tiebreak, never
+a gate — a quote that matches exactly one line anchors there even when the
+claimed line is wrong, and a tie at equal distance refuses to anchor. A
+quote that matches nowhere is **unanchored** and becomes a summary row.
 
 Anchoring by quoted text rather than by line number is what makes the whole
 convergence story fall out:
 
 - Drift-immunity is structural. A finding whose surroundings shifted still
-  matches its own text.
+  matches its own text — and the dominant producer error, deriving absolute
+  line numbers from `@@` offsets, cannot demote a finding whose quote is
+  right.
 - A hallucinated or out-of-diff finding **cannot** anchor, so RFC 0019 §3.3's
   "report only findings introduced by this change" becomes checkable instead
   of hoped-for. A wrong `line` is unfalsifiable; a wrong quote is not.
-- No occurrence ordinal is needed: a multi-line quote is unique in practice,
-  and a quote that is not unique is simply unanchored.
+- No occurrence ordinal is needed: a duplicated quote (`in`, a closing
+  paren) is disambiguated by the claimed line, and an honest tie stays
+  unanchored rather than guessed.
 
 Rename detection is the honest caveat, and it degrades to unanchored. If git's
 and GitHub's hunk boundaries ever disagree (both default to three context
@@ -163,13 +187,22 @@ never-repost rule a forged marker would suppress a real finding permanently.
 The same author predicate governs the summary comment we upsert.
 
 Let `F` be this run's anchored fingerprints and `E` ours already posted:
-`F \ E` is posted in one review; `F ∩ E` is left untouched; `E \ F` is **left
-alone**. The funded slice never resolves a thread, because the producer is a
-model: a finding can vanish from one run by flakiness, and resolve-on-absence
-composed with never-repost would close a real P0 forever.
+`F \ E` is posted as one review-comment POST per thread — a request GitHub
+rejects fails alone, and convergence heals around it on the next run, where
+a single batched review POST would fail *in toto* on one marginal anchor;
+`F ∩ E` is left untouched; `E \ F` is **left alone**. The funded slice never
+resolves a thread, because the producer is a model: a finding can vanish
+from one run by flakiness, and resolve-on-absence composed with never-repost
+would close a real P0 forever.
 
-`Fingerprint.t = sha256(path | anchor | title)`, truncated to 64 bits — ample
-at review scale, where the set is tens of items per PR.
+`Fingerprint.t` = the digest of `[path; anchor; title]` under the domain
+`mentat.github.finding.v1`, 64 bits rendered as 16 lowercase hex — ample at
+review scale, where the set is tens of items per PR. The derivation is the
+digest library's length-framed key (each member is length-prefixed before
+hashing), so no member content can collide with a different `(path, anchor,
+title)` split — and it is a wire format: fingerprints persist in GitHub
+comments, so the derivation may never change silently (the unit suite pins
+one literal hex value for exactly this reason).
 
 **The known limit, stated plainly.** The fingerprint keys on code text, so the
 *expected* user action — editing the flagged line to fix it — re-keys the
@@ -185,6 +218,15 @@ HTML comment delimiters. Only `Marker.t` values emit `<!-- … -->`. A rendered
 body therefore cannot contain a marker — by construction, not by remembering
 to call a function at each site. This is a security invariant (a forged marker
 suppresses findings), so it is held by a type.
+
+Markers carry an origin discriminator from rung 0: `Marker.t` values render
+as `<!-- mentat-review origin=<token> -->` and
+`<!-- mentat-finding:<hex> origin=<token> -->`, the token supplied by
+`--origin` — `ci` by default, `actions` in the shipped workflow,
+`charter:<name>` at rung 1. The posted scanner keys on the marker prefix and
+accepts both the origin-bearing grammar and the bare legacy one, so
+convergence sees a thread regardless of which origin posted it: the
+discriminator names the publisher, it never partitions dedup.
 
 ### 2.5 Verdict, and the one policy
 
@@ -202,22 +244,26 @@ check would be unsafe under RFC 0019's skipping ingress anyway (§9).
 ### 2.6 The command
 
 ```
-mentat github review --pr OWNER/REPO#N --at SHA --diff FILE --posted FILE  < findings.json
+mentat github review --pr OWNER/REPO#N --at SHA --diff FILE --posted FILE
+  [--base-label REF] [--origin TOKEN]  < findings.json
 ```
 
-Findings on stdin; a JSON envelope on stdout (`review`, `summary`,
-`summary_id`, and a `threads_safe` flag the workflow honors — see §4). Exit
-`0` on success, `2` on usage, `1` if the findings or diff do not parse. It
-performs **no IO beyond reading its inputs and writing stdout**, so it has no
-retry policy, no partial-failure semantics, no `--dry-run` (it is always dry),
-and no network at all.
+Findings on stdin; a JSON envelope on stdout — the standard
+`schema_version`/`type` envelope, type `github.review`, carrying `review`,
+`summary`, and the `threads_safe` flag (see §4). `--base-label` only names,
+in the summary, what the head was reviewed against; `--origin` stamps the
+markers' origin discriminator (§2.4). Exit `0` on success, `2` on usage, `1`
+if the findings, diff, or posted listing do not parse. It performs **no IO
+beyond reading its inputs and writing stdout**, so it has no retry policy,
+no partial-failure semantics, no `--dry-run` (it is always dry), and no
+network at all.
 
 Module map — two pure modules and a responder, all executable-private:
 
 ```
-bin/cli_github.ml     the responder (P1–P4)
-bin/findings.ml       Finding.t, Body.t, Fingerprint.t, and the C6 decode
-bin/publication.ml    Diff.t, Anchored.t, Unanchored.t, Publication.t
+bin/cli_github.ml       the responder
+bin/review_finding.ml   Finding.t, Body.t, Fingerprint.t, and the C6 decode
+bin/publication.ml      Diff.t, Anchored.t, Unanchored.t, Publication.t
 ```
 
 Tests are byte-goldens on stdout plus windtrap properties: the parser's
@@ -242,9 +288,10 @@ a transport that does not exist.
 
 ## 4. Drawbacks
 
-Three `gh api` lines move to the workflow, where a reader can get them wrong;
-the head-SHA guard becomes a `threads_safe` field the workflow must honor with
-an `if`, which is the one place policy genuinely leaks into YAML. A future
+The posting loop moves to the workflow, where a reader can get it wrong; the
+head-SHA guard surfaces as the `threads_safe` flag — when it is `false` no
+thread requests are emitted, so the flag names why the list is empty rather
+than gating requests the workflow could mistakenly send. A future
 non-Actions caller would need transport in-process — but that caller is the
 resident daemon, which is unfunded, and it would want a real HTTP client
 rather than this command anyway. Retry becomes Actions' job-level retry; for

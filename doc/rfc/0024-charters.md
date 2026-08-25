@@ -662,13 +662,14 @@ deny-only unattended principal — `lib/session/decision.ml:303-311` —
 schema retry + `run.output_schema_failed`, JSONL, exit codes); the run
 fence and journal laws. **New** is §13's component list.
 
-**Coexistence and migration with Actions Stage 1.** The C2 marker gains
-an origin discriminator (`origin=actions` / `origin=charter:<name>` — an
-0020 §2 amendment, §11.2), carrying two renderer obligations now that
+**Coexistence and migration with Actions Stage 1.** The C2 marker carries
+an origin discriminator, minted from rung 0 (`origin=ci` by default,
+`origin=actions` in the workflow, `origin=charter:<name>` here — an
+0020 §2 amendment, §11.2), with two renderer obligations now that
 findings text is attacker-derived: marker detection matches only a
-complete marker line authored by the publishing identity (findings text
-is HTML-comment-stripped before rendering, so an embedded marker string
-is inert), and `@`-mentions in findings text are neutralized so a
+complete marker line authored by the publishing identity (comment
+delimiters in findings text are neutralized at decode, so an embedded
+marker string is inert even to raw-text scans), and `@`-mentions in findings text are neutralized so a
 prompt-injected review cannot page humans. A repo can run both publishers
 during migration observably and without corruption — at double spend,
 stated plainly. `charter add` detects `.github/workflows/*mentat*` and
@@ -836,8 +837,9 @@ is *funded* here, not pending. Adopted as binding from §10: never the
 live tree; connector-owned 0600 credentials, never `auth.json`; PAT-only
 identity (App identity stays paired with the relay future); no durable
 intent beyond inputs; the `Principal.Github` constraints. Amended in §2:
-the C2 marker gains the origin discriminator with §7's two neutralization
-obligations. Companion rescopes in RFC 0019: WATCH 2 becomes
+the C2 marker carries the origin discriminator from rung 0 — minted by the
+renderer's `--origin` flag — with §7's two neutralization obligations.
+Companion rescopes in RFC 0019: WATCH 2 becomes
 Actions-only (on the resident path, exit 3 is a designed outcome —
 parked, durable, alerted, answerable); WATCH 3's wall-clock deadline is
 node-owned for resident runs.
@@ -971,6 +973,7 @@ dogfood ≈ 5,700–8,400 LOC.**
 | Goal machinery (§11.4, **ruled deleted**) | ≈ −2,700 impl, −2,400 test; −4 protocol commands, −3 errors, −1 journal fact arm, −1 origin arm, −1 TUI screen, −1 tool, −2 CLI flags, −4 reply verbs, −1 config knob (+ its planned expansion, `bin/composition.ml:1783-1791`); tombstone decoders +≈150 until a journal migration | with the slice |
 | `mentat serve` as an agent subcommand (§11.5) | the agent binary sheds all residency; the composition moves, not grows | rung 1 |
 | `Bind.public` + `Unsupported` (§11.5) | ≈ −60 LOC; −2 dead dune deps from `lib/server` | in the funded slice |
+| The rung-0 renderer pair's duplicated `Error` module and positive-int decode guard (`bin/review_finding.ml` / `bin/publication.ml`) | ≈ −25 LOC, merged when the pair moves to its shared `bin/connector` home for the in-process publisher | rung 1 |
 | `gh` as a resident runtime dep | never incurred — the publisher posts over the vendored HTTPS stack (§7); `gh` stays Actions-only (`git` remains, confined to §3's hardened checkout provisioning) | by construction |
 | RFC 0022 (auto-review) de-funded (§7) | −651-line pending design; ~1,000 LOC never built | now |
 | TUI-private notify firing (§8) | ≈ −40 (one shared module; prevents a divergent second copy) | rung 1 |
@@ -1024,11 +1027,21 @@ The charter vocabulary, receipts, and fences survive either verdict.
 
 ## 14. Staging
 
-0. **Rung 0 (prerequisite, shared with the Actions path):** the 0019 §2
-   findings document and the 0020 renderer land and are dogfooded via
-   Actions Stage 1 — review *quality* is proven before any resident
-   machinery is funded, and the C2 origin discriminator (§7) is specified
-   in 0020 now, while the renderer is unbuilt and the amendment is free.
+0. **Rung 0 (prerequisite — ruled 2026-08-25, both paths):** the 0019
+   §2 findings document, the 0020 renderer, the `run review` /
+   `github review` commands, the Actions workflow, and the recipe page
+   (`doc/manual/github-review.md`) land together, and mentat's own PRs
+   are dogfooded via the workflow. **Both GitHub paths are supported
+   product surfaces** — the precedent is the field's own (OpenAI ships
+   the codex-action CI path *and* hosted App-based review): the
+   workflow serves CI-path repos at the cost of a model key in repo
+   secrets, stated plainly; mentatd (rung 1b) is the resident path that
+   removes that concession; the hosted App belongs to the fleet, paired
+   with the relay (§10). The commands are the shared substrate of all
+   three — the workflow and the recipe are glue over `run review` and
+   `github review`, and mentatd's publisher wraps the same renderer
+   core. Review *quality* is proven here before any resident machinery
+   is funded.
 1. **Rung 1 (the funded slice's cron-complete waypoint):** the `mentatd`
    binary (the server composition re-homed; `mentat` sheds `serve`) +
    the 0018 local-child subset (§9 — every run serves its session) +
