@@ -145,6 +145,13 @@ start_fake_dune_state () {
   wait_for_file fake-dune-ready
 }
 
+# Watch-supervisor posture: dune.watch defaults to auto, under which a
+# trusted fixture with a dune-project marker and an ambient dune on PATH
+# would spawn a real `dune build --watch` mid-cram. Fixtures that engage the
+# dune lane without wanting a spawn export MENTAT_DUNE_WATCH=observe as
+# their first act; run/dune-own.t opts into auto per command against the
+# fake dune shim.
+
 # Like start_fake_dune_state, but serving at $PWD/_build/.rpc/dune — the
 # pinned socket a real watch binds — so a supervisor probing that path finds
 # an answering foreign server.

@@ -36,7 +36,7 @@ carries the watch's own failing reading.
   > {"expect":{"body_contains":["function_call_output","call-n1"]},"response":{"id":"n2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"owned"}]}]}}
   > JSONL
   $ start_fake_openai own.jsonl capture-own port-own
-  $ mentat run "own prompt" --cwd "$PWD" --permission bypass --id own-turn 2>/dev/null
+  $ MENTAT_DUNE_WATCH=auto mentat run "own prompt" --cwd "$PWD" --permission bypass --id own-turn 2>/dev/null
   owned
   $ wait_fake_server
   $ cat fake-dune-argv
@@ -66,7 +66,7 @@ spawns.
   > {"expect":{"body_contains":["function_call_output","call-r1"]},"response":{"id":"r2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"respawned"}]}]}}
   > JSONL
   $ start_fake_openai respawn.jsonl capture-respawn port-respawn
-  $ mentat run "respawn prompt" --cwd "$PWD" --permission bypass --id respawn-turn 2>/dev/null
+  $ MENTAT_DUNE_WATCH=auto mentat run "respawn prompt" --cwd "$PWD" --permission bypass --id respawn-turn 2>/dev/null
   respawned
   $ wait_fake_server
   $ wc -l < fake-dune-argv | tr -d ' '
@@ -82,7 +82,7 @@ supervisor gives up and never spawns a third.
   > {"expect":{"body_contains":["function_call_output","call-g1"]},"response":{"id":"g2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"gave up"}]}]}}
   > JSONL
   $ start_fake_openai giveup.jsonl capture-giveup port-giveup
-  $ mentat run "giveup prompt" --cwd "$PWD" --permission bypass --id giveup-turn 2>/dev/null
+  $ MENTAT_DUNE_WATCH=auto mentat run "giveup prompt" --cwd "$PWD" --permission bypass --id giveup-turn 2>/dev/null
   gave up
   $ wait_fake_server
   $ wc -l < fake-dune-argv | tr -d ' '
@@ -100,7 +100,7 @@ readings.
   > {"expect":{"body_contains":["function_call_output","call-f1"]},"response":{"id":"f2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"attached"}]}]}}
   > JSONL
   $ start_fake_openai foreign.jsonl capture-foreign port-foreign
-  $ mentat run "foreign prompt" --cwd "$PWD" --permission bypass --id foreign-turn 2>/dev/null
+  $ MENTAT_DUNE_WATCH=auto mentat run "foreign prompt" --cwd "$PWD" --permission bypass --id foreign-turn 2>/dev/null
   attached
   $ wait_fake_server
   $ stop_fake_dune

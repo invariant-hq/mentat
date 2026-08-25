@@ -10,6 +10,7 @@ or compiler is on PATH.
 
   $ use_trusted_workspace
   $ touch dune-project
+  $ export MENTAT_DUNE_WATCH=observe
   $ printf failing > dune-state
   $ start_fake_dune_state "$PWD/dune-state"
   $ cat > watch.jsonl <<'JSONL'
