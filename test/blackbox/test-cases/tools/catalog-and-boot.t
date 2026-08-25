@@ -3,6 +3,7 @@ program resolution observes the sealed workspace once and never starts Dune.
 
   $ use_trusted_workspace
   $ unset MENTAT_DUNE MENTAT_OCAMLMERLIN OPAM_SWITCH_PREFIX
+  $ export MENTAT_DUNE_WATCH=observe
   $ mkdir -p "$XDG_CONFIG_HOME/mentat"
   $ printf '%s\n' 'let answer = 42' > sample.ml
   $ : > dune-project

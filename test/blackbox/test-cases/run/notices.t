@@ -19,6 +19,7 @@ or faulting when the endpoint is absent.
 
   $ use_trusted_workspace
   $ touch dune-project
+  $ export MENTAT_DUNE_WATCH=observe
   $ cat > notices.jsonl <<'JSONL'
   > {"expect":{"body_contains":["silent prompt"]},"response":{"id":"n1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"quiet answer"}]}]}}
   > JSONL
