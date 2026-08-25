@@ -128,9 +128,12 @@ and Mentat starts its own.
 
 ## 2. The watch: ownership, route, lifecycle
 
-**Argv and mode.** `<dune> build --root . --watch <targets>`, `dune` resolved
-as the tools resolve it (`Tool_boot.resolve_program`,
-`bin/composition.ml:1857`), cwd the workspace root. Targets: `dune.targets`
+**Argv and mode.** `<dune> build --root . --watch <targets>`, `dune`'s
+resolvability probed on the sealed child PATH and the launch resolving the
+bare name again on the same route — the watch is the same dune the confined
+shell's forwarded `dune build` finds (the one-shot tools still run the
+toolchain-resolved dune; a skew between the two is doctor's parity problem).
+Cwd the workspace root. Targets: `dune.targets`
 (default `["@check"]`) plus `@<dune.lint_alias>` when §5's probe finds the
 alias — `@check`, not `@default` or `@all`, because it is what merlin,
 ocaml-lsp, and litany's rule consume, without linking: on this repository
@@ -162,31 +165,48 @@ agent-writable (an entry there is parsed unvalidated by every dune client and
 every Mentat session on the machine), and under bubblewrap's unconditional
 `--unshare-pid` (`lib/sandbox/bubblewrap.ml:95`) the entry would be named by
 a namespace pid. So: the watch is spawned with
-`XDG_RUNTIME_DIR=<root>/.mentat/run/<session>` — inside the Write root, read
-by nobody else — and Mentat **mirrors** the entry into the user's real
+`XDG_RUNTIME_DIR=<root>/.mentat/run/watch-<pid>` — inside the Write root,
+read by nobody else, its content never parsed (the supervisor counts entries;
+the mirror is fabricated host-side), stale sibling directories of dead hosts
+swept at engage — and Mentat **mirrors** the entry into the user's real
 registry host-side, unconfined, with `pid = Session.pid` (the host pid) and
 the socket path, unlinking the mirror on every exit path. ocaml-lsp discovers
 the mirror; the agent can touch neither the real registry nor another
-project's. Mentat's own foreign-mode picker additionally rejects entries
-whose pid is not a process it can signal-0 without `EPERM`-only evidence.
+project's. The mirror is an editor courtesy only: its failure costs
+discovery, never the agent's readings (see Discovery). Mentat's own
+foreign-mode picker rejects entries whose pid is provably gone (`ESRCH`);
+`EPERM` is evidence of life, and the initialize handshake — not the entry —
+is what admits a server.
 
-**Discovery.** Mentat knows its watch's pid and socket; it never polls the
-registry for its own watch. Registry discovery (`rpc.ml:583-624`) survives
-for foreign attach only.
+**Discovery.** Mentat knows its watch's pid and socket: the supervisor
+**pins** that endpoint into the shared observer, whose attach loop bypasses
+the registry while the pin holds — it never polls the registry for its own
+watch, so a broken or unwritable user registry silences editor discovery,
+never the agent's build visibility. Registry discovery survives for foreign
+attach only. The pinned attachment also carries its identity: the connection
+reports the watch as ours, and the lane fact of §4 — the supervised watch's
+targets are known — travels with the pin.
 
-**Lifecycle.** The supervisor is created once per instance in `make_instance`
-(`bin/composition.ml:275`) under the instance switch — `build_execution_layer`
-takes it by reference, so the `tui_capabilities` and `tool_declarations`
-projections (`:2747,2755`) never spawn. It spawns **lazily, at the first
-turn's preparation** — never at daemon boot, so opening a TUI on a cold
-monorepo does not start a build, and `mentat run`/cram one-shots spawn only
-when a turn actually drains. Stop is `Session.signal` (SIGTERM to the group,
-grace, SIGKILL) issued before the switch releases, so dune's `at_exit`
-unlinks its socket and private registry entry; the switch's own release —
-Eio's child-only SIGKILL (`mentat_workspace_io.mli:598-603`) — is the
-backstop, and the mirror is unlinked host-side either way.
+**Lifecycle.** The supervisor is constructed on first demand beside the
+shared observer, under the instance switch — construction is pure, and the
+projection layers that only read its health never construct or engage
+anything. It engages **lazily, at the first turn's preparation** — never at
+daemon boot, so opening a TUI on a cold monorepo does not start a build, and
+`mentat run`/cram one-shots spawn only when a turn actually drains. Stop
+stops the machine first (a pending restart never respawns mid-shutdown),
+then `Session.signal` (SIGTERM to the group, a daemon-scale grace so dune's
+exit handlers outrun the SIGKILL, issued before the switch releases) — dune's
+`at_exit` unlinks its socket and private registry entry where the signal
+reaches it; on Linux the sealed route's `bwrap --new-session` detaches the
+child from the signalled group, so the supervisor unlinks the socket and
+private entries host-side once the child settles — same end state, different
+hand. The switch's own release — Eio's child-only SIGKILL
+(`mentat_workspace_io.mli:598-603`) — is the backstop, and the mirror is
+unlinked host-side either way.
 
-**The machine** (one vocabulary, shared with the wire type in §8):
+**The machine** (one vocabulary — the machine's word either defers to the
+observer or announces a §8 wire value; `Mentat_ocaml_dune_rpc.Watch` is the
+pure law, and an observed attachment always wins the composition):
 
 ```
 Off _ ─first drain─▶ Probing ─socket answers initialize─▶ Live {Theirs pid; …}
@@ -199,11 +219,13 @@ Live {Theirs _; _} ─connection EOF─▶ Probing   (held through the immediate
                                                 never flaps the row off)
 ```
 
-Under `dune.watch = observe` the no-server arc is
-`Probing ─no server─▶ Off No_server`, re-probed every `B`; only `auto`
-proceeds to `Starting`. A dune that does not resolve at all is
-`Off No_dune` before any probe. The foreign pid is the registry entry whose
-`where` is the answering socket, else the `_build/.lock` contents.
+Under `dune.watch = observe` nothing is spawned and nothing announced — the
+observer speaks alone, and its discovery is registry-only. A foreign watch
+that answers the socket but has no usable registry entry is invisible under
+observe; under `auto` the machine holds `Probing` beside it, honestly short
+of attached. The `_build/.lock` pid fallback is deliberately not built:
+foreign discovery is one mechanism, not two. A dune that does not resolve at
+all is `Off No_dune` before any probe.
 
 The pre-spawn **probe** exists because a spawned `dune build --watch` under a
 held lock does not fail: it forwards one build to the holder and exits 0/1
@@ -416,11 +438,17 @@ Global_lock.lock_exn` and fail beside any watch.
 | `ocaml_docs` — `dune describe workspace` (`docs.ml:1853-1866`) | **Honest refusal** for name queries while a watch holds the lock: `the docs universe needs dune describe, which cannot run beside the build watch; use ocaml_find_definitions/ocaml_type_at`. Path queries are unaffected. The lease (slice E) serves it. |
 | `ocaml_eval` — `dune ocaml top .` (`eval.ml:406-415`) | Same refusal, same lease. Never dune's "delete `_build/.lock`" text. |
 
-The prompt's OCaml tooling section gains one sentence: *Mentat runs
-`dune build --watch`; `dune build/test/exec/fmt/promote` forward to it; a
-"Connection terminated" or "Build via RPC failed" error means it restarted —
-run the command again; never delete `_build/.lock`.* The last clause exists
-because dune's lock message literally suggests it.
+The refusal fires beside **any** watch — the health projection spans both
+owners, and the common lock holder is the user's own terminal `dune build
+-w`, whose death by dune's delete-the-lock advice would be the costlier one.
+
+The prompt's OCaml tooling section gains one sentence: *when a build watch
+is running (the dune status row), `dune build/test/exec/fmt/promote` forward
+to it; a "Connection terminated" or "Build via RPC failed" error means it
+restarted — run the command again; never delete `_build/.lock`.* The
+conditional lead exists because the watch is not unconditional
+(off/observe/untrusted/no-dune/gave-up); the last clause because dune's lock
+message literally suggests the deletion.
 
 ## 8. Engine, protocol, UI
 
@@ -491,8 +519,8 @@ palette commands, `/dune restart` and `/dune stop`.
 |---|---|---|
 | `workspace.tooling` | survives; the master gate | `auto` |
 | `notices.dune_build` | **deleted** — declared, never read (`mentat_config.ml:819,885`) | — |
-| `dune.watch` | **added**: `auto` probe-attach-or-spawn; `observe` probe-attach only, never spawn; `off` | `auto` |
-| `dune.targets` | **added**: the watch's own targets | `["@check"]` |
+| `dune.watch` | **added**: `auto` probe-attach-or-spawn; `observe` attach only, never spawn; `off`. Env `MENTAT_DUNE_WATCH`; a read-only sandbox posture demotes `auto` to `observe` | `auto` |
+| `dune.targets` | **added**: the watch's own targets, validated as targets — a leading dash is refused at decode; an empty list is dune's `@default` | `["@check"]` |
 | `dune.lint_alias` | **added**: the alias whose presence lights the lint lane; `""` disables; trailing `!` forces | `"lint"` |
 | `notices.dune_diagnostics` | survives: build-lane notices (the row still shows) | `true` |
 | `notices.fswatch`, `notices.cr_comments` | untouched | `true` |
@@ -533,7 +561,28 @@ derived constant `B` (§3) and stated derivations — not knobs.
 ## 11. Drawbacks
 
 The registry mirror is a second writer of a file dune expects to own; a dune
-that starts validating registry authorship breaks it. The lint lane rests on
+that starts validating registry authorship breaks it — though the blast
+radius is editor discovery alone, since the agent's own readings ride the
+supervisor's pinned endpoint, never the registry.
+
+The macOS FSEvents admission is profile-wide: every confined command may
+open an event stream through the `com.apple.FSEvents` mach service, and
+event payloads carry path names and flags — so the names and timing of
+changes may be observable past the read scope; whether fseventsd filters
+delivery to it is not established. Accepted because the watch must run under
+the one sealed policy and per-command policy mutation is what the
+ordered-policy law forbids; scoping the allowance to the watch's own spawn
+would be a policy-vocabulary change through the verified kernel surface, and
+stays future narrowing.
+
+The session-run grant is a hole punched through the `.mentat` carveout for
+every confined command, not only the watch: whenever `.mentat` exists as a
+real owned directory, `.mentat/run` is materialized under the owned-path
+guard (lexical, `lstat`-checked, failing resolution closed on a planted
+symlink — a tracked `.mentat/run -> ~/.ssh` must never become a host write
+grant) and granted writable. Its content is read by nobody — entries are
+counted, never parsed, and cleared before each spawn — so cross-command
+scribbling can shift timing, not content. The lint lane rests on
 a message-text convention because the wire drops the rule name; a failing
 action under `@check` whose first line happens to end in ` [word]` lands in
 the lint lane. The recovery fallback leaves a residual: dune samples build
@@ -597,7 +646,7 @@ cram against `fswatch.t`'s 30 lines/scenario), not hoped.
 | slice | content | ≈ lines | seam / gate |
 |---|---|---|---|
 | A · attach + settle + law + status | persistent connection, two long-polls, store fold, overtake/quiet rules (`rpc.ml` +300); `Finding`/`Reading`/`Change` with `.mli`s (+250); producer render in `bin/` (`workspace_notices.*` rewritten in place); `Health` reshape + `workspace.dune` query + row + tick (+250); concurrent fake with scripted timeline (+250); cram + unit + goldens (+390) | ≈ +1,560 / −250 | **no spawn**: runs against any registered watch — the maintainer's own `dune build -w` — and already retires the 15 s guess, the head-string law, and the per-drain probe. Deleted outright: `Instance.build_health`, `Instance.Health`, the diagnostic store surface, and the glance's producer+mapping; `bin/workspace_notices.*` is rewritten to the drain producer alone. |
-| B · own it | `bin/dune_watch.{ml,mli}` supervisor (~650 with docs), lazy spawn via `start_session`, probe-before-spawn, private `XDG_RUNTIME_DIR` + host mirror, stop-before-release; describe deleted (−1,780 incl. suite and ripple); docs/eval refusals (+80); skill/prompt text; `dune.watch`/`dune.targets` | ≈ +900 / −1,800 | first deliverable is the confinement spike: FSEvents under seatbelt (statically, no `mach-lookup` for `com.apple.FSEvents` is allowed — the allowance line is the deliverable), registry write under the private dir, socket from a confined child; the §3 self-test backs it at runtime |
+| B · own it | `bin/dune_watch.{ml,mli}` supervisor (~650 with docs), lazy spawn via `start_session`, probe-before-spawn, private `XDG_RUNTIME_DIR` + host mirror, stop-before-release; describe deleted (−1,780 incl. suite and ripple); docs/eval refusals (+80); skill/prompt text; `dune.watch`/`dune.targets` | ≈ +900 / −1,800 | first deliverable is the confinement spike: FSEvents under seatbelt (statically, no `mach-lookup` for `com.apple.FSEvents` is allowed — the allowance line, profile-wide per §11, is the deliverable), registry write under the private dir, socket from a confined child; the §3 self-test backs it at runtime |
 | C · hang | flush probe, counters, budget, `dune.watch` notice, `MENTAT_DUNE_WATCH_PROBE_S`, fake `--hang-flush` | ≈ +300 | after B; insurance (the hang was old-dune) |
 | D · lint | alias parse + backstop, marker split, litany's one-line marker (upstream), dogfood stanza + dev dep | ≈ +280 | after A; independent of B |
 | E · commands + lease | `/dune restart|stop`, doctor lines, the watch lease serving docs and eval | ≈ +350 | after B |
