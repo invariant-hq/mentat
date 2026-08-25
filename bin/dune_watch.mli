@@ -86,3 +86,11 @@ val owns_lock : t -> bool
     lock — from spawn until the child's exit is observed. Lock-taking
     one-shot tools consult it to refuse honestly instead of failing with
     dune's own lock advice. *)
+
+val stop : t -> unit
+(** [stop t] signals a live supervised session (SIGTERM to its group, grace,
+    SIGKILL) and removes the registry mirror. Idempotent, and safe before
+    {!engage}. Call it during instance shutdown, before the engagement
+    switch releases, so the watch dies on SIGTERM — its own exit handlers
+    unlinking socket and private registry entry — rather than on the
+    switch's kill of still-running children. *)

@@ -145,6 +145,27 @@ start_fake_dune_state () {
   wait_for_file fake-dune-ready
 }
 
+# Like start_fake_dune_state, but serving at $PWD/_build/.rpc/dune — the
+# pinned socket a real watch binds — so a supervisor probing that path finds
+# an answering foreign server.
+start_fake_dune_at_root () {
+  local state_file="$1"
+  rm -f fake-dune-ready
+  fake_dune_rpc_server --root "$PWD" --state-file "$state_file" \
+    --socket-at-root --ready fake-dune-ready &
+  MENTAT_FAKE_DUNE_PID=$!
+  wait_for_file fake-dune-ready
+}
+
+# Put the fake dune shim on PATH under the name `dune`: invoked as
+# `dune build --root . --watch …` it records its argv in fake-dune-argv and
+# serves the watch protocol per fake-dune-mode (see the fake's header).
+use_fake_dune () {
+  mkdir -p fake-bin
+  ln -sf "$(command -v fake_dune_rpc_server)" fake-bin/dune
+  export PATH="$PWD/fake-bin:$PATH"
+}
+
 stop_fake_dune () {
   kill "$MENTAT_FAKE_DUNE_PID" 2>/dev/null
   wait "$MENTAT_FAKE_DUNE_PID" 2>/dev/null
