@@ -159,11 +159,9 @@ let headline ~tool ~input =
     | "send_message" | "follow_up" -> string_member "child" input
     | "update_goal" -> update_goal input
     (* These built-ins have no header argument: [apply_patch] carries its paths
-       inside the patch envelope, [ocaml_dune_describe] takes no input, and the
-       task board, plan, and question render from their own facts. *)
-    | "apply_patch" | "ocaml_dune_describe" | "todo_write" | "propose_plan"
-    | "ask_user" ->
-        None
+       inside the patch envelope, and the task board, plan, and question render
+       from their own facts. *)
+    | "apply_patch" | "todo_write" | "propose_plan" | "ask_user" -> None
     | _ -> None
   in
   Option.map clip projected

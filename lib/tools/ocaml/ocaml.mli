@@ -37,6 +37,3 @@ module Find_references = Find_references
 
 module Docs = Docs
 (** Bounded OCaml API documentation lookup. *)
-
-module Dune_describe = Dune_describe
-(** Fresh one-shot Dune project description. *)

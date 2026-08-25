@@ -34,7 +34,6 @@ let verb_of_name = function
   | "ocaml_rename" -> Tool_block.Ocaml_rename
   | "ocaml_eval" -> Tool_block.Ocaml_eval
   | "ocaml_docs" -> Tool_block.Ocaml_docs
-  | "ocaml_dune_describe" -> Tool_block.Dune
   | "ocaml_type_at" -> Tool_block.Ocaml_type
   | "ocaml_find_definitions" -> Tool_block.Ocaml_definition
   | "ocaml_find_references" -> Tool_block.Ocaml_references
@@ -308,18 +307,6 @@ let docs_summary output =
       in
       if List.is_empty clauses then "empty" else String.concat " · " clauses
 
-let project_summary output =
-  match decode Output_semantics.Ocaml.Project.jsont output with
-  | None -> unavailable_details
-  | Some result ->
-      Printf.sprintf "%s · %s"
-        (count
-           (Output_semantics.Ocaml.Project.components result)
-           ~one:"component" ~many:"components")
-        (count
-           (Output_semantics.Ocaml.Project.tests result)
-           ~one:"test" ~many:"tests")
-
 let rename_summary output =
   match decode Output_semantics.Ocaml.Rename.jsont output with
   | None -> unavailable_details
@@ -370,7 +357,6 @@ let completed_presentation tool output =
   | "ocaml_rename" -> known (rename_summary output)
   | "shell" | "ocaml_eval" -> process_presentation output
   | "ocaml_docs" -> known (docs_summary output)
-  | "ocaml_dune_describe" -> known (project_summary output)
   | "ocaml_type_at" -> known (type_at_summary output)
   | "ocaml_find_definitions" -> known (definition_summary output)
   | "ocaml_find_references" -> known (references_summary output)

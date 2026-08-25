@@ -26,7 +26,7 @@ OCaml tools, and keeps [propose_plan] reserved for Plan mode.
 
   $ write_config '["ocamlmerlin"]'
   $ cat > catalog.jsonl <<'JSONL'
-  > {"expect":{"body_contains":["catalog prompt","\"name\":\"read_file\"","\"name\":\"ocaml_dune_describe\""]},"response":{"id":"catalog-1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"catalog captured"}]}]}}
+  > {"expect":{"body_contains":["catalog prompt","\"name\":\"read_file\"","\"name\":\"ocaml_docs\""]},"response":{"id":"catalog-1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"catalog captured"}]}]}}
   > JSONL
   $ start_fake_openai catalog.jsonl capture-catalog port-catalog
   $ mentat run start --id tool-catalog "catalog prompt" --cwd "$PWD" 2>/dev/null
@@ -39,7 +39,6 @@ OCaml tools, and keeps [propose_plan] reserved for Plan mode.
   glob
   ocaml_ast_edit
   ocaml_docs
-  ocaml_dune_describe
   ocaml_eval
   ocaml_find_definitions
   ocaml_find_references
@@ -110,7 +109,6 @@ the auto cases observes either Dune marker as it starts.
   $ mentat_cram json '.tools[].name' capture-tooling-on/request-1.json | grep '^ocaml_' | sort
   ocaml_ast_edit
   ocaml_docs
-  ocaml_dune_describe
   ocaml_eval
   ocaml_find_definitions
   ocaml_find_references
@@ -127,7 +125,7 @@ the auto cases observes either Dune marker as it starts.
   $ : > dune-workspace
   $ capture_catalog tooling-auto-marker
   $ mentat_cram json '.tools[].name' capture-tooling-auto-marker/request-1.json | grep '^ocaml_' | wc -l | tr -d ' '
-  10
+  9
 
 These separate-process captures prove marker kind and containment: a directory
 does not engage project tooling, an admitted in-root symlink to a regular marker
@@ -145,7 +143,7 @@ turns on one cached client.
   $ ln -s marker-target/dune-project dune-project
   $ capture_catalog tooling-auto-in-root-symlink
   $ mentat_cram json '.tools[].name' capture-tooling-auto-in-root-symlink/request-1.json | grep '^ocaml_' | wc -l | tr -d ' '
-  10
+  9
   $ rm dune-project
   $ mkdir ../outside-marker
   $ : > ../outside-marker/dune-project
@@ -186,7 +184,6 @@ families: `write_file`, `edit_file`, `apply_patch`, `ocaml_ast_edit`,
   follow_up
   glob
   ocaml_docs
-  ocaml_dune_describe
   ocaml_eval
   ocaml_find_definitions
   ocaml_find_references
