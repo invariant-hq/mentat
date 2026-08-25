@@ -55,7 +55,7 @@ let building t = t.busy
 
 let span_s a b = Mtime.Span.to_float_ns (Mtime.span a b) *. 1e-9
 
-let reading t ~now ~quiet_s ~fallback_s =
+let reading ?lint t ~now ~quiet_s ~fallback_s =
   if (not t.synced) || t.busy then None
   else
     let quiet_for =
@@ -66,6 +66,11 @@ let reading t ~now ~quiet_s ~fallback_s =
       let empty_confirmed =
         t.settle_witnessed || quiet_for >= fallback_s
       in
+      let lint_live, lint_findings =
+        match lint with
+        | None -> (false, [])
+        | Some findings -> (true, findings)
+      in
       Some
-        (Mentat_ocaml.Build_change.Reading.make ~empty_confirmed
-           (List.rev_map snd t.findings))
+        (Mentat_ocaml.Build_change.Reading.make ~lint_live ~empty_confirmed
+           (List.rev_map snd t.findings @ lint_findings))

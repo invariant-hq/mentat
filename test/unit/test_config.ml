@@ -222,6 +222,7 @@ let all_field_names =
     "notices.dune_diagnostics";
     "dune.watch";
     "dune.targets";
+    "dune.lint_command";
     "workspace.tooling";
     "instructions.global";
     "instructions.project";

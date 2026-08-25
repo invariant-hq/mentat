@@ -423,11 +423,89 @@ let watch_law =
                   | `Retry _ -> fail "the second strike gives up")));
     ]
 
+let lint_lane =
+  group "lint lane"
+    [
+      test "the runner's output parses into lint-lane findings" (fun () ->
+          with_temp_dir @@ fun root ->
+          make_project ~root ~broken:false;
+          let workspace = workspace_at root in
+          let output =
+            "Some progress noise first\n\
+             File \"lib/probe_lib.ml\", line 1, characters 4-10:\n\
+             1 | let x = 42\n\
+             Warning 0 [litany]: comparison through List.length is a \
+             needless emptiness test [needless-list-length]\n\
+             File \"" ^ Filename.concat root "lib/probe_lib.ml"
+            ^ "\", line 2, characters 0-3:\n\
+               Error: physical comparison has a non-immediate operand\n\
+               trailing noise\n"
+          in
+          let findings =
+            Mentat_ocaml_dune_rpc.Lint_output.findings ~workspace output
+          in
+          equal int ~msg:"two blocks, two findings" 2 (List.length findings);
+          List.iter
+            (fun finding ->
+              is_true ~msg:"lane is lint by construction"
+                (Mentat_ocaml.Finding.Lane.equal
+                   (Mentat_ocaml.Finding.lane finding)
+                   Mentat_ocaml.Finding.Lane.Lint);
+              equal (option string) ~msg:"paths resolve workspace-relative"
+                (Some "lib/probe_lib.ml")
+                (Mentat_ocaml.Finding.path finding))
+            findings;
+          equal (list string) ~msg:"heads are the first message lines"
+            [
+              "comparison through List.length is a needless emptiness test \
+               [needless-list-length]";
+              "physical comparison has a non-immediate operand";
+            ]
+            (List.map Mentat_ocaml.Finding.head findings));
+      test "a clean run parses to no findings" (fun () ->
+          with_temp_dir @@ fun root ->
+          make_project ~root ~broken:false;
+          equal int ~msg:"nothing parsed" 0
+            (List.length
+               (Mentat_ocaml_dune_rpc.Lint_output.findings
+                  ~workspace:(workspace_at root) "")));
+      test "lint findings join the settled reading with the lane live"
+        (fun () ->
+          let store =
+            fold
+              [
+                (0., Store.Connected);
+                (0.1, Store.Diagnostics []);
+                (0.2, Store.Progress `Settle);
+              ]
+          in
+          let lint =
+            [
+              Mentat_ocaml.Finding.v ~lane:Mentat_ocaml.Finding.Lane.Lint
+                ~severity:Mentat_ocaml.Finding.Severity.Warning
+                ~head:"needless emptiness test [needless-list-length]" ();
+            ]
+          in
+          match
+            Store.reading ~lint store ~now:(at 1.) ~quiet_s:0.25 ~fallback_s:2.
+          with
+          | None -> fail "expected a reading"
+          | Some reading ->
+              is_true ~msg:"the build lane stays clean"
+                (Mentat_workspace.Health.Verdict.equal
+                   (Mentat_ocaml.Build_change.Reading.verdict reading)
+                   Mentat_workspace.Health.Verdict.Clean);
+              equal (option int) ~msg:"the lint lane counts the runner's word"
+                (Some 1)
+                (Mentat_ocaml.Build_change.Reading.lint reading));
+    ]
+
 let () =
   run "mentat.ocaml.dune_rpc"
     [
       test "the snapshot is Absent without a watch" snapshot_absent;
       store_rules;
       watch_law;
+      lint_lane;
       test "attach against a live dune watch" attach_live;
     ]

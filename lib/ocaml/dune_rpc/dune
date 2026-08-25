@@ -1,6 +1,6 @@
 (library
  (name mentat_ocaml_dune_rpc)
- (private_modules error rpc mirror watch)
+ (private_modules error rpc mirror watch lint_output)
  (libraries
   mentat_ocaml
   mentat_ocaml_toolchain
@@ -9,6 +9,7 @@
   csexp
   cstruct
   dune-rpc
+  ocamlc-loc
   eio
   logs
   mtime

@@ -516,6 +516,15 @@ module Field : sig
       list builds dune's default target set ([@default]), usually a far
       heavier watch than the default [["@check"]]. *)
 
+  val dune_lint_command : (string list, defaulted) t
+  (** [dune_lint_command] is the [dune.lint_command] field: the linter's
+      argv prefix, run from the workspace root after each green build settle
+      — the moment the build artifacts it reads are fresh. [[]] disables the
+      runner; a command whose program does not resolve on the sealed command
+      PATH leaves the lint lane off for the session. Defaults to
+      [["litany"; "check"]] — a default, not a coupling: any linter printing
+      compiler-shaped diagnostics fits. *)
+
   val workspace_tooling : (string, defaulted) t
   (** [workspace_tooling] is the [workspace.tooling] field: [auto], [on], or
       [off]. It gates the workspace's OCaml/Dune integration as a whole.

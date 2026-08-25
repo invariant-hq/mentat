@@ -231,9 +231,9 @@ let finding ?(lane = Mentat_ocaml.Finding.Lane.Build)
     ?(severity = Mentat_ocaml.Finding.Severity.Error) ?path ?location head =
   Mentat_ocaml.Finding.v ~lane ~severity ?path ?location ~head ()
 
-let classified ?(lint = true) ?(severity = Mentat_ocaml.Finding.Severity.Warning)
-    head =
-  Mentat_ocaml.Finding.classify ~lint ~severity ~head ()
+let lint_finding ?(severity = Mentat_ocaml.Finding.Severity.Warning) head =
+  Mentat_ocaml.Finding.v ~lane:Mentat_ocaml.Finding.Lane.Lint ~severity ~head
+    ()
 
 let reading ?lint_live ?(empty_confirmed = true) findings =
   Mentat_ocaml.Build_change.Reading.make ?lint_live ~empty_confirmed findings
@@ -248,32 +248,6 @@ let titles changes =
 let build_change =
   group "build change law"
     [
-      test "the marker classifies, and only with a rule-shaped tail" (fun () ->
-          let lint_head =
-            "comparison through List.length is a needless emptiness test \
-             [needless-list-length]"
-          in
-          is_true ~msg:"marker tail is lint"
-            (Mentat_ocaml.Finding.Lane.equal
-               (Mentat_ocaml.Finding.lane (classified lint_head))
-               Mentat_ocaml.Finding.Lane.Lint);
-          List.iter
-            (fun head ->
-              is_true ~msg:("build lane: " ^ head)
-                (Mentat_ocaml.Finding.Lane.equal
-                   (Mentat_ocaml.Finding.lane (classified head))
-                   Mentat_ocaml.Finding.Lane.Build))
-            [
-              "Unbound value restock";
-              "this type has no method [x] end";
-              "trailing bracket but capitalized [Foo]";
-              "no space before[bracket]";
-              "empty marker []";
-            ];
-          is_true ~msg:"lint:false keeps the marker in the build lane"
-            (Mentat_ocaml.Finding.Lane.equal
-               (Mentat_ocaml.Finding.lane (classified ~lint:false lint_head))
-               Mentat_ocaml.Finding.Lane.Build));
       test "identity is content: positions move silently, duplicates collapse"
         (fun () ->
           let e ?location () =
@@ -333,8 +307,9 @@ let build_change =
             (List.length changes));
       test "lanes are independent and an absent lint lane is frozen" (fun () ->
           let lint_finding =
-            classified "physical comparison has a non-immediate operand \
-                        [suspicious-physical-equality]"
+            lint_finding
+              "physical comparison has a non-immediate operand \
+               [suspicious-physical-equality]"
           in
           let state = Mentat_ocaml.Build_change.State.initial in
           let changes, state =
@@ -352,7 +327,7 @@ let build_change =
             0 (List.length changes));
       test "a lint lane reading empty and confirmed is lint clean" (fun () ->
           let lint_finding =
-            classified "needless emptiness test [needless-list-length]"
+            lint_finding "needless emptiness test [needless-list-length]"
           in
           let state = Mentat_ocaml.Build_change.State.initial in
           let _, state = step state (Some (reading [ lint_finding ])) in

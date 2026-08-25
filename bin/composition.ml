@@ -113,6 +113,7 @@ type t = {
      on first demand and engaged at the first drain — never at boot, so a
      frontend opened on a cold workspace starts no build. *)
   mutable dune_watch : Dune_watch.t option;
+  mutable dune_lint : Dune_lint.t option;
 }
 
 let dirs t = t.shared.dirs
@@ -395,6 +396,7 @@ let make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
     assembled = None;
     dune_rpc = None;
     dune_watch = None;
+    dune_lint = None;
   }
 
 (* The single-workspace CLI path: the exact staging sequence [with_base]
@@ -1382,6 +1384,40 @@ let dune_watch_supervisor t capability ~mode ~instance =
       t.dune_watch <- Some supervisor;
       supervisor
 
+(* The lint runner, one per instance beside the supervisor. Its gate
+   mirrors the watch's ladder: the dune lane must be live at all (the
+   trigger is the observer's readings — auto or observe alike, since a
+   foreign watch's green settle is as good as our own), the
+   [dune.lint_command] knob non-empty, and the command's program resolvable
+   on the sealed child PATH — probed once at construction, exactly as the
+   watch probes dune, so the linter found is the project's own,
+   version-matched to the compiler that wrote the artifacts it reads. A
+   missing linter is a normal state, not a broken expectation: the lane
+   stays silently lint-absent, and doctor is where the reason lives.
+   Creation is pure; {!Dune_lint.engage} is the caller's, at the first
+   drain. *)
+let dune_lint_runner t capability ~instance =
+  match t.dune_lint with
+  | Some runner -> Some runner
+  | None -> (
+      match Cfg.Resolved.get Cfg.Field.dune_lint_command t.config with
+      | [] -> None
+      | program :: _ as command -> (
+          match Mentat_workspace_io.child_program capability program with
+          | None -> None
+          | Some _ ->
+              let runner =
+                Dune_lint.make ~rpc:instance ~capability
+                  ~mono:(Eio.Stdenv.mono_clock t.shared.stdenv)
+                  ~sw:t.switch
+                  ~workspace:
+                    (Mentat_workspace.single
+                       (Mentat_workspace.Root.of_dir t.root))
+                  ~command
+              in
+              t.dune_lint <- Some runner;
+              Some runner))
+
 (* The review git loader wiring: the effect closures that adapt the workspace
    capability's sealed boundaries into the [run]/[read]/[write] the pure
    {!Review_git} loader takes. This is the executable-side half of the review
@@ -2238,7 +2274,9 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
                 let supervisor =
                   dune_watch_supervisor t build_capability ~mode ~instance
                 in
-                Dune_watch.engage supervisor)
+                Dune_watch.engage supervisor;
+                Option.iter Dune_lint.engage
+                  (dune_lint_runner t build_capability ~instance))
         in
         let producer =
           lazy

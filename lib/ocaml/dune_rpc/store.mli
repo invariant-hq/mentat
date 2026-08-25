@@ -55,10 +55,15 @@ val building : t -> bool
     connection opened or a build is in flight. *)
 
 val reading :
+  ?lint:Mentat_ocaml.Finding.t list ->
   t ->
   now:Mtime.t ->
   quiet_s:float ->
   fallback_s:float ->
   Mentat_ocaml.Build_change.Reading.t option
 (** [reading t ~now ~quiet_s ~fallback_s] is the settled reading, when the
-    rules above admit one. *)
+    rules above admit one. [lint] is the lint runner's current findings,
+    joined into the reading with the lane live — a settled build reading is
+    the one vehicle every lane rides ([None], the default, means the lane is
+    off, which is lint-absent, never lint-clean). The stream's own findings
+    are always build-lane; the lanes cannot cross. *)
