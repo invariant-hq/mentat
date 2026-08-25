@@ -21,3 +21,9 @@ module Store = Store
 
 module Instance = Rpc.Instance
 (** Workspace-level Dune RPC state shared by every observer. *)
+
+module Probe = Rpc.Probe
+(** One-shot liveness probe against a watch's known socket. *)
+
+module Mirror = Mirror
+(** The host-side registry mirror for a supervised build watch. *)
