@@ -452,8 +452,8 @@ let result_of_output output =
         (Format.asprintf "command supervision failed: %a%s" Eio.Exn.pp_err error
            note)
 
-let run_command workspace_io ~clock ~shell ~escalation ~cancelled input workdir
-    timeout_ms =
+let run_command workspace_io ~clock ~shell ~escalation ~on_timeout ~cancelled
+    input workdir timeout_ms =
   let argv = shell_argv shell input.Input.command in
   let capture =
     Mentat_workspace_io.Command.Head_tail
@@ -485,6 +485,14 @@ let run_command workspace_io ~clock ~shell ~escalation ~cancelled input workdir
         (command_error_failure error)
         (command_error_message error)
   | Ok outcome ->
+      (match outcome.Mentat_workspace_io.Command.termination with
+      | Mentat_workspace_io.Command.Timed_out ->
+          on_timeout ~command:input.Input.command
+      | Mentat_workspace_io.Command.Exited _
+      | Mentat_workspace_io.Command.Stopped
+      | Mentat_workspace_io.Command.Output_limit _
+      | Mentat_workspace_io.Command.Supervision_failed _ ->
+          ());
       Output.make ~input ~workdir ~timeout_ms outcome
       |> result_of_output
       |> Mentat_tool.Result.map Output.encode
@@ -580,7 +588,8 @@ let both_requested () =
      entirely, so a per-path grant would have nothing to widen. Ask for \
      grant_write with the exact paths, or escalate without it."
 
-let run workspace_io ~clock ~shell ~registry ~escalation ~cancelled input =
+let run workspace_io ~clock ~shell ~registry ~escalation ~on_timeout ~cancelled
+    input =
   if cancelled () then interrupted ()
   else if input.Input.background then
     if input.Input.escalate || input.Input.grant_write <> [] then
@@ -599,10 +608,11 @@ let run workspace_io ~clock ~shell ~registry ~escalation ~cancelled input =
           match resolve_workdir workspace_io input with
           | Error message -> Mentat_tool.Result.failed `Invalid_input message
           | Ok workdir ->
-              run_command workspace_io ~clock ~shell ~escalation ~cancelled
-                input workdir timeout_ms)
+              run_command workspace_io ~clock ~shell ~escalation ~on_timeout
+                ~cancelled input workdir timeout_ms)
 
-let make ?registry workspace_io ~clock ~shell =
+let make ?registry ?(on_timeout = fun ~command:_ -> ()) workspace_io ~clock
+    ~shell =
   if String.is_empty shell then invalid_arg "shell must not be empty";
   if String.contains shell '\000' then invalid_arg "shell must not contain NUL";
   let ordinary_execution = Confinement.confined workspace_io in
@@ -611,7 +621,8 @@ let make ?registry workspace_io ~clock ~shell =
     ~input:Input.contract ~output:Fun.id
     ~permissions:(permissions workspace_io ~ordinary_execution ~escalation)
     ~run:(fun ~cancelled input ->
-      run workspace_io ~clock ~shell ~registry ~escalation ~cancelled input)
+      run workspace_io ~clock ~shell ~registry ~escalation ~on_timeout
+        ~cancelled input)
     ()
 
 module Registry = Registry

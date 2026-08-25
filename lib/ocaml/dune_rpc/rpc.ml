@@ -556,6 +556,7 @@ module Instance = struct
        opened: a pinned watch's supervisor states it (the targets are known),
        a foreign watch's targets are unknown so the marker alone decides. *)
     mutable attached_lint : bool;
+    mutable events : int;
     mutable store : Store.t;
   }
 
@@ -572,6 +573,7 @@ module Instance = struct
       endpoint_pid = 0;
       status = Status.Absent;
       attached_lint = true;
+      events = 0;
       store = Store.initial;
     }
 
@@ -628,6 +630,51 @@ module Instance = struct
   let mirror t ~pid =
     Mirror.write ~env:t.env ~root:(primary_root t) ~pid
       ~socket:(socket_path t)
+
+  (* Test-only scaling, like the reading windows below: a hermetic fake
+     answers or parks a flush in microseconds. Production never sets it. *)
+  let flush_timeout_s =
+    match Sys.getenv_opt "MENTAT_DUNE_WATCH_FLUSH_S" with
+    | None | Some "" -> 10.0
+    | Some value -> ( try float_of_string value with Failure _ -> 10.0)
+
+  let flush t =
+    let (Net net) = t.net in
+    let (Mono mono) = t.mono in
+    let endpoint =
+      Endpoint.make ~root:(primary_root t) (Endpoint.Unix (socket_path t))
+    in
+    Eio.Fiber.first
+      (fun () ->
+        let result =
+          Eio.Switch.run @@ fun sw ->
+          Connection.with_connection ~sw ~net endpoint ~f:(fun connection ->
+              let witness =
+                Drpc.Decl.Request.witness
+                  Drpc.Procedures.Public.flush_file_watcher
+              in
+              let client = connection.Connection.client in
+              match
+                Dune_rpc_fiber.run
+                  (Dune_rpc_client.Versioned.prepare_request client witness)
+              with
+              (* A server without the method still answered the version
+                 negotiation: its event loop is alive, which is all the
+                 verification asks. *)
+              | Error _ -> Ok `Completed
+              | Ok staged -> (
+                  match
+                    Dune_rpc_fiber.run
+                      (Dune_rpc_client.request client staged ())
+                  with
+                  | Ok (`Ok | `Not_in_watch_mode) -> Ok `Completed
+                  (* An error response is a response: the loop answered. *)
+                  | Error _ -> Ok `Completed))
+        in
+        match result with Ok verdict -> verdict | Error _ -> `No_server)
+      (fun () ->
+        Eio.Time.Mono.sleep mono flush_timeout_s;
+        `Timed_out)
 
   let normalize_abs path =
     match Lpath.Abs.of_string path with
@@ -738,7 +785,11 @@ module Instance = struct
       Log.info (fun m -> m "dune watch %a" Status.pp status);
     t.status <- status
 
-  let fold_event t event = t.store <- Store.apply ~at:(now t) event t.store
+  let fold_event t event =
+    t.events <- t.events + 1;
+    t.store <- Store.apply ~at:(now t) event t.store
+
+  let activity t = t.events
 
   let first_line text =
     match String.index_opt text '\n' with

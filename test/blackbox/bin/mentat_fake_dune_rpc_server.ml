@@ -40,7 +40,10 @@
    [dune build ...] (symlink it to a PATH entry named [dune]) it appends its
    argv to [fake-dune-argv] in the cwd — the spawn marker a cram asserts —
    consults [fake-dune-mode] in the cwd ([exit:N] dies at once, [exit-once:N]
-   dies once and rewrites itself to [serve], [serve] is the default), then
+   dies once and rewrites itself to [serve]; [hang] serves but answers only
+   its first flush_file_watcher and makes forwarders sleep forever — the
+   whole hung-watch scenario; [hang-flush] parks every flush, the
+   blocked-file-watcher scenario; [serve] is the default), then
    serves the watch protocol: registry entry under its own XDG_RUNTIME_DIR
    (the private directory a supervisor hands it), socket at
    [_build/.rpc/dune], dynamic state from [dune-state] in the cwd. A shim
@@ -152,6 +155,28 @@ let diag_events_payload events =
 
 let progress_payload progress =
   Conv.to_sexp (Conv.option Drpc.Progress.sexp) (Some progress)
+
+(* flush_file_watcher: the supervisor's liveness verification. A healthy fake
+   answers [`Ok]; a fake playing a wedged event loop parks the request
+   forever. [flush_answer_limit]: [None] answers every flush, [Some n]
+   answers the first [n] of this process's life and parks the rest — so a
+   watch can pass its first-flush self-test and then hang verification. *)
+let flush_answer_limit : int option ref = ref None
+let flush_seen = ref 0
+
+let flush_payload =
+  let ok = Conv.constr "ok" Conv.unit (fun () -> `Ok) in
+  let not_in_watch_mode =
+    Conv.constr "not_in_watch_mode" Conv.unit (fun () -> `Not_in_watch_mode)
+  in
+  let conv =
+    Conv.sum
+      [ Conv.econstr ok; Conv.econstr not_in_watch_mode ]
+      (function
+        | `Ok -> Conv.case () ok
+        | `Not_in_watch_mode -> Conv.case () not_in_watch_mode)
+  in
+  Conv.to_sexp conv `Ok
 
 let adds diags =
   List.map
@@ -346,6 +371,12 @@ let serve mode fd =
               then conn.prog_parked <- Some id
               else answer_progress conn id)
       | Dynamic _, None -> assert false
+    else if String.equal method_ "flush-file-watcher" then begin
+      incr flush_seen;
+      match !flush_answer_limit with
+      | Some limit when !flush_seen > limit -> () (* parked: a wedged loop *)
+      | Some _ | None -> respond oc id (Ok flush_payload)
+    end
     else handle_handshake oc id call
   in
   let rec loop () =
@@ -411,13 +442,21 @@ let serve_forever ~mode ~root ~socket ~bind_in ~ready =
     (fun signal -> Sys.set_signal signal (Sys.Signal_handle (fun _ -> exit 0)))
     [ Sys.sigterm; Sys.sigint ];
   if not (String.equal ready "") then write_file ready "ready\n";
+  (* Concurrent accept, as dune's own server: the observer holds its
+     long-poll connection for the whole session, and a probe or a
+     verification flush must still be answered beside it — a
+     one-at-a-time loop would park them in the backlog. A probe torn down
+     between connect and close — a supervisor cancelled mid-handshake —
+     vanishes mid-write; the disconnection must never kill the fake. *)
   let rec accept_loop () =
     let fd, _ = Unix.accept listen in
-    (* A probe torn down between connect and close — a supervisor cancelled
-       mid-handshake — vanishes mid-write; the disconnection must never kill
-       the fake. *)
-    (try serve mode fd with Sys_error _ -> ());
-    (try Unix.close fd with Unix.Unix_error _ -> ());
+    ignore
+      (Thread.create
+         (fun fd ->
+           (try serve mode fd with Sys_error _ -> ());
+           try Unix.close fd with Unix.Unix_error _ -> ())
+         fd
+        : Thread.t);
     accept_loop ()
   in
   accept_loop ()
@@ -443,7 +482,17 @@ let run_as_dune () =
   | [ "exit-once"; code ] ->
       write_file mode_file "serve\n";
       exit (int_of_string code)
-  | _ ->
+  | directive_tokens ->
+      (* [hang]: the whole hang scenario in one directive — a forwarder
+         (socket occupied) sleeps forever, as a build forwarded into a
+         wedged watch would, and a server answers its first flush (the
+         self-test) then parks the rest (the verification). [hang-flush]:
+         a server parks every flush, so the self-test itself fails — the
+         blocked-file-watcher scenario. *)
+      (match directive_tokens with
+      | [ "hang" ] -> flush_answer_limit := Some 1
+      | [ "hang-flush" ] -> flush_answer_limit := Some 0
+      | _ -> ());
       let sock_dir = Filename.concat root "_build/.rpc" in
       let socket = Filename.concat sock_dir "dune" in
       mkdir_p sock_dir;
@@ -459,6 +508,11 @@ let run_as_dune () =
             | exception Unix.Unix_error _ -> false)
       in
       if occupied then begin
+        if String.equal directive "hang" then
+          (* A build forwarded into a wedged watch never returns. *)
+          while true do
+            Unix.sleep 3600
+          done;
         print_string "forwarded one build to the running server\n";
         exit 0
       end;
@@ -494,6 +548,9 @@ let () =
           Arg.Set socket_at_root,
           "bind the socket at ROOT/_build/.rpc/dune, where a real watch \
            serves" );
+        ( "--hang-flush",
+          Arg.Unit (fun () -> flush_answer_limit := Some 0),
+          "park every flush_file_watcher request: a wedged event loop" );
       ]
     in
     Arg.parse spec
