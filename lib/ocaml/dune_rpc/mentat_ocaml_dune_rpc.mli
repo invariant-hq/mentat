@@ -15,8 +15,9 @@
     effects that drive it. Normalising [dune describe] output into a project
     description needs none of that and lives in {!Mentat_ocaml.Describe}. *)
 
-module Diagnostic = Rpc.Diagnostic
-(** Dune diagnostic identifiers. *)
+module Store = Store
+(** The pure fold of a watch's diagnostic and progress streams — exposed so
+    its timing rules are table-testable without a connection. *)
 
 module Instance = Rpc.Instance
 (** Workspace-level Dune RPC state shared by every observer. *)

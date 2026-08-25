@@ -1,8 +1,7 @@
 {
   "state": "live",
-  "reason": "",
-  "pid": 4242,
   "ours": false,
+  "pid": 4242,
   "phase": "settled",
   "errors": 2,
   "warnings": 1,

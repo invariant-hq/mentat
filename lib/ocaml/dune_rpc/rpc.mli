@@ -7,23 +7,8 @@
 
     {!Instance} is the shareable workspace object that polls the Dune
     registry, attaches to the matching endpoint, and folds the watch's own
-    diagnostic events into the settled readings every consumer snapshots. *)
-
-module Diagnostic : sig
-  (** Dune diagnostic identifiers. *)
-
-  module Id : sig
-    (** Stable identifier for a Dune diagnostic event. *)
-
-    type t
-    (** The type for non-empty diagnostic identifiers. Diagnostics are keyed
-        by this id inside the attach loop's store; consumers read findings and
-        never the id, so it stays opaque. *)
-  end
-
-  type id = Id.t
-  (** The type for diagnostic identifiers. *)
-end
+    diagnostic events into the settled readings every consumer snapshots. The
+    fold itself is the pure {!Store}. *)
 
 module Instance : sig
   (** Workspace-level Dune RPC state shared by every observer.
@@ -40,52 +25,56 @@ module Instance : sig
   val create :
     fs:_ Eio.Path.t ->
     net:_ Eio.Net.t ->
+    mono:_ Eio.Time.Mono.t ->
     workspace:Mentat_workspace.t ->
     ?env:(string -> string option) ->
     unit ->
     t
-  (** [create ~fs ~net ~workspace ()] is a workspace-level Dune RPC instance.
+  (** [create ~fs ~net ~mono ~workspace ()] is a workspace-level Dune RPC
+      instance.
 
-      [fs] is used to poll Dune's registry. [net] is used to connect to the
-      selected endpoint. [env] defaults to {!Sys.getenv_opt} and is used for XDG
-      registry discovery.
+      [fs] is used to poll Dune's registry, [net] to connect to the selected
+      endpoint, and [mono] to stamp stream events — the clock is part of the
+      instance's identity, since a snapshot cannot answer the quiet rule
+      without it. [env] defaults to {!Sys.getenv_opt} and is used for XDG
+      registry discovery. Construction performs no IO and never suspends: a
+      first caller's lazy initialisation stays race-free by construction.
 
       The value owns registry polling and the latest diagnostic state for
-      [workspace]. It never starts Dune; it only observes an already-running RPC
-      instance. *)
+      [workspace]. It never starts Dune; it only observes an already-running
+      RPC instance. *)
 
   (** The attach-side view of the observed watch. *)
-  module Watch : sig
-    type status =
+  module Status : sig
+    type t =
       | Absent
           (** No matching endpoint is registered for the workspace, or nothing
               answered. Build diagnostics are unavailable, which is not an
               error. *)
-      | Connecting of { pid : int }
+      | Connecting
           (** An endpoint is registered and a connection is being established.
           *)
       | Attached of { pid : int }
           (** A live connection holds the watch's diagnostic and progress
-              subscriptions. *)
-    (** The type for attach statuses. [pid] is the watch's advertised process
-        id. *)
+              subscriptions; [pid] is the watch's advertised process id. *)
+    (** The type for attach statuses. *)
 
-    val equal : status -> status -> bool
+    val equal : t -> t -> bool
     (** [equal a b] is [true] iff [a] and [b] are the same status with the
         same pid. *)
 
-    val pp : Format.formatter -> status -> unit
-    (** [pp ppf status] formats [status] for diagnostics. *)
+    val pp : Format.formatter -> t -> unit
+    (** [pp ppf t] formats [t] for diagnostics. *)
   end
 
   (** What the attach loop knows right now, taken without IO. *)
   module Snapshot : sig
     type t = {
-      status : Watch.status;
+      status : Status.t;
       building : bool;
           (** A build is in progress, or no build has settled since the
               connection opened. Meaningful only when attached. *)
-      reading : Mentat_workspace.Build_change.Reading.t option;
+      reading : Mentat_ocaml.Build_change.Reading.t option;
           (** The settled reading, when one exists: the connection is attached,
               the last progress sample is a settle, and the diagnostic stream
               has been quiet long enough to be at rest. [None] otherwise —
@@ -93,10 +82,19 @@ module Instance : sig
               change law's business, never invented here. *)
     }
     (** The type for snapshots. *)
+
+    val health : t -> Mentat_workspace.Health.t
+    (** [health t] is the wire status a frontend glances at: nothing attached
+        is {!Mentat_workspace.Health.Off} [No_server], a connection in flight
+        is {!Mentat_workspace.Health.Probing}, and an attached watch is
+        {!Mentat_workspace.Health.Live} with a foreign owner — mid-build or
+        unsettled as [Building], at rest as [Settled] with the reading's
+        verdict and lint count. The caller owes the tooling gate: a disabled
+        or untrusted workspace never reaches this projection. *)
   end
 
-  val attach : t -> mono:_ Eio.Time.Mono.t -> unit
-  (** [attach t ~mono] runs the attach loop and never returns: poll the
+  val attach : t -> unit
+  (** [attach t] runs the attach loop and never returns: poll the
       registry for a matching endpoint, connect, hold the watch's [diagnostic]
       and [progress] subscriptions — folding dune's own add/remove events into
       the finding store — and on any disconnect fall back to polling. Run it

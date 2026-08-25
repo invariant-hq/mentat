@@ -96,14 +96,28 @@ module Off : sig
   (** [pp ppf t] formats [t] for diagnostics. *)
 end
 
+(** Why an owned watch is being respawned. *)
+module Restart : sig
+  type t = Exited of string | Hung
+  (** The type for restart causes: the watch died on its own — the payload is
+      its exit description — or it stopped answering liveness probes and was
+      killed. The distinction is rendered differently and counted separately.
+  *)
+
+  val equal : t -> t -> bool
+  (** [equal a b] is [true] iff [a] and [b] are the same cause with the same
+      payload. *)
+
+  val pp : Format.formatter -> t -> unit
+  (** [pp ppf t] formats [t] for diagnostics. *)
+end
+
 type t =
   | Off of Off.t  (** No watch and no attachment. *)
   | Probing  (** Discovery or connection establishment is in flight. *)
   | Starting  (** A spawned watch has not yet accepted a connection. *)
   | Live of { owner : Owner.t; phase : Phase.t }  (** Attached. *)
-  | Restarting of { cause : string }
-      (** An owned watch is being respawned; [cause] names why (["exit 1"],
-          ["hang"]). *)
+  | Restarting of Restart.t  (** An owned watch is being respawned. *)
 (** The type for watch statuses. *)
 
 val equal : t -> t -> bool

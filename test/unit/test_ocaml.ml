@@ -222,10 +222,259 @@ let project_description_invariants () =
       in
       Ocaml.Project.make ~tests:[ bad_test ] [ library; external_dep ])
 
+(* Build-change law helpers. *)
+
+let component_gen =
+  Gen.string_of ~size:(Gen.int_range 1 5) (Gen.char_range 'a' 'z')
+
+let finding ?(lane = Mentat_ocaml.Finding.Lane.Build)
+    ?(severity = Mentat_ocaml.Finding.Severity.Error) ?path ?location head =
+  Mentat_ocaml.Finding.v ~lane ~severity ?path ?location ~head ()
+
+let classified ?(lint = true) ?(severity = Mentat_ocaml.Finding.Severity.Warning)
+    head =
+  Mentat_ocaml.Finding.classify ~lint ~severity ~head ()
+
+let reading ?lint_live ?(empty_confirmed = true) findings =
+  Mentat_ocaml.Build_change.Reading.make ?lint_live ~empty_confirmed findings
+
+let step state reading = Mentat_ocaml.Build_change.step state reading
+
+let titles changes =
+  List.map
+    (fun change -> Mentat_workspace.Notice.title (Mentat_ocaml.Build_change.notice change))
+    changes
+
+let build_change =
+  group "build change law"
+    [
+      test "the marker classifies, and only with a rule-shaped tail" (fun () ->
+          let lint_head =
+            "comparison through List.length is a needless emptiness test \
+             [needless-list-length]"
+          in
+          is_true ~msg:"marker tail is lint"
+            (Mentat_ocaml.Finding.Lane.equal
+               (Mentat_ocaml.Finding.lane (classified lint_head))
+               Mentat_ocaml.Finding.Lane.Lint);
+          List.iter
+            (fun head ->
+              is_true ~msg:("build lane: " ^ head)
+                (Mentat_ocaml.Finding.Lane.equal
+                   (Mentat_ocaml.Finding.lane (classified head))
+                   Mentat_ocaml.Finding.Lane.Build))
+            [
+              "Unbound value restock";
+              "this type has no method [x] end";
+              "trailing bracket but capitalized [Foo]";
+              "no space before[bracket]";
+              "empty marker []";
+            ];
+          is_true ~msg:"lint:false keeps the marker in the build lane"
+            (Mentat_ocaml.Finding.Lane.equal
+               (Mentat_ocaml.Finding.lane (classified ~lint:false lint_head))
+               Mentat_ocaml.Finding.Lane.Build));
+      test "identity is content: positions move silently, duplicates collapse"
+        (fun () ->
+          let e ?location () =
+            finding ~path:"lib/a.ml" ?location "Unbound value restock"
+          in
+          let state = Mentat_ocaml.Build_change.State.initial in
+          let changes, state =
+            step state (Some (reading [ e ~location:"lib/a.ml:5:0-5:7" () ]))
+          in
+          equal (list string) ~msg:"first failing states the finding"
+            [ "Build failing (1 error: 1 new)" ]
+            (titles changes);
+          let changes, state =
+            step state
+              (Some
+                 (reading
+                    [
+                      e ~location:"lib/a.ml:9:0-9:7" ();
+                      e ~location:"lib/a.ml:9:0-9:7" ();
+                    ]))
+          in
+          equal int ~msg:"moved and duplicated is silent" 0
+            (List.length changes);
+          let changes, _ =
+            step state
+              (Some (reading [ finding ~path:"lib/a.ml" "A different error" ]))
+          in
+          equal (list string) ~msg:"a different head at the same path notices"
+            [ "Build failing (1 error: 1 new, 1 resolved)" ]
+            (titles changes));
+      test "step is idempotent and no-reading is identity" (fun () ->
+          let state = Mentat_ocaml.Build_change.State.initial in
+          let r = reading [ finding "boom" ] in
+          let changes, state = step state (Some r) in
+          equal int ~msg:"first states" 1 (List.length changes);
+          let changes, state = step state (Some r) in
+          equal int ~msg:"same reading again is silent" 0 (List.length changes);
+          let changes, state = step state None in
+          equal int ~msg:"no reading is silent" 0 (List.length changes);
+          let changes, _ = step state (Some (reading [])) in
+          equal (list string) ~msg:"then a clean reading recovers"
+            [ "Build recovered" ] (titles changes));
+      test "recovery needs confirmation and a non-empty baseline" (fun () ->
+          let state = Mentat_ocaml.Build_change.State.initial in
+          let changes, state = step state (Some (reading [])) in
+          equal int ~msg:"clean over a clean baseline is silent" 0
+            (List.length changes);
+          let _, state = step state (Some (reading [ finding "boom" ])) in
+          let changes, state =
+            step state (Some (reading ~empty_confirmed:false []))
+          in
+          equal int ~msg:"an unconfirmed empty reading is withheld" 0
+            (List.length changes);
+          let changes, _ = step state (Some (reading [ finding "boom" ])) in
+          equal int
+            ~msg:"the withheld reading moved no baseline: same set is silent" 0
+            (List.length changes));
+      test "lanes are independent and an absent lint lane is frozen" (fun () ->
+          let lint_finding =
+            classified "physical comparison has a non-immediate operand \
+                        [suspicious-physical-equality]"
+          in
+          let state = Mentat_ocaml.Build_change.State.initial in
+          let changes, state =
+            step state (Some (reading [ finding "boom"; lint_finding ]))
+          in
+          equal (list string) ~msg:"both lanes state, build first"
+            [ "Build failing (1 error: 1 new)"; "1 finding (1 new)" ]
+            (titles changes);
+          let changes, state = step state (Some (reading [])) in
+          equal (list string)
+            ~msg:"build recovers; the absent lint lane says nothing"
+            [ "Build recovered" ] (titles changes);
+          let changes, _ = step state (Some (reading [ lint_finding ])) in
+          equal int ~msg:"identical lint findings returning are not re-stated"
+            0 (List.length changes));
+      test "a lint lane reading empty and confirmed is lint clean" (fun () ->
+          let lint_finding =
+            classified "needless emptiness test [needless-list-length]"
+          in
+          let state = Mentat_ocaml.Build_change.State.initial in
+          let _, state = step state (Some (reading [ lint_finding ])) in
+          let changes, _ = step state (Some (reading ~lint_live:true [])) in
+          equal (list string) ~msg:"lint clean" [ "Lint clean" ]
+            (titles changes));
+      test "notice bytes: severity, title grammar, body, coalescing keys"
+        (fun () ->
+          let e1 =
+            finding ~path:"lib/inventory.ml"
+              ~location:"lib/inventory.ml:5:17-5:40"
+              "This expression has type string but an expression was expected \
+               of type int"
+          in
+          let e2 =
+            finding ~path:"lib/store.ml" ~location:"lib/store.ml:12:3-12:9"
+              "Unbound value restock"
+          in
+          let state = Mentat_ocaml.Build_change.State.initial in
+          let changes, state = step state (Some (reading [ e1; e2 ])) in
+          let notice =
+            Mentat_ocaml.Build_change.notice (List.nth changes 0)
+          in
+          equal string ~msg:"source" "dune" (Mentat_workspace.Notice.source notice);
+          is_true ~msg:"severity error"
+            (Mentat_workspace.Notice.Severity.equal
+               (Mentat_workspace.Notice.severity notice)
+               Mentat_workspace.Notice.Severity.Error);
+          equal string ~msg:"title" "Build failing (2 errors: 2 new)"
+            (Mentat_workspace.Notice.title notice);
+          equal (option string) ~msg:"body lists fresh findings"
+            (Some
+               "lib/inventory.ml:5:17-5:40: This expression has type string \
+                but an expression was expected of type int\n\
+                lib/store.ml:12:3-12:9: Unbound value restock")
+            (Mentat_workspace.Notice.body notice);
+          equal string ~msg:"key" "dune.build" (Mentat_workspace.Notice.key notice);
+          let changes, _ = step state (Some (reading [ e1 ])) in
+          let notice =
+            Mentat_ocaml.Build_change.notice (List.nth changes 0)
+          in
+          equal string ~msg:"resolved title"
+            "Build failing (1 error: 0 new, 1 resolved)"
+            (Mentat_workspace.Notice.title notice);
+          equal (option string) ~msg:"unchanged trailer"
+            (Some "1 unchanged since the last notice")
+            (Mentat_workspace.Notice.body notice));
+      test "a warnings-only build lane is failing at warning severity"
+        (fun () ->
+          let w =
+            finding ~severity:Mentat_ocaml.Finding.Severity.Warning
+              ~path:"lib/a.ml" "unused open"
+          in
+          let changes, _ =
+            step Mentat_ocaml.Build_change.State.initial (Some (reading [ w ]))
+          in
+          let notice =
+            Mentat_ocaml.Build_change.notice (List.nth changes 0)
+          in
+          equal string ~msg:"title counts warnings"
+            "Build failing (1 warning: 1 new)"
+            (Mentat_workspace.Notice.title notice);
+          is_true ~msg:"severity warning"
+            (Mentat_workspace.Notice.Severity.equal
+               (Mentat_workspace.Notice.severity notice)
+               Mentat_workspace.Notice.Severity.Warning));
+      prop
+        "property: permutation, duplication, and moved positions never \
+         re-notice"
+        (Gen.list ~size:(Gen.int_range 1 6)
+           (Gen.pair component_gen (Gen.int_range 0 99)))
+        (fun heads ->
+          let findings location =
+            List.map
+              (fun (head, line) ->
+                finding ~path:"lib/a.ml"
+                  ~location:
+                    (Printf.sprintf "lib/a.ml:%d:0-%d:%d" (location + line)
+                       (location + line) (String.length head))
+                  ("error " ^ head))
+              heads
+          in
+          let _, state =
+            step Mentat_ocaml.Build_change.State.initial
+              (Some (reading (findings 0)))
+          in
+          let moved_and_shuffled =
+            List.rev (findings 7) @ findings 7
+          in
+          let changes, _ = step state (Some (reading moved_and_shuffled)) in
+          equal int
+            ~msg:"same heads at new positions, reversed and duplicated, are \
+                  silent"
+            0 (List.length changes));
+      test "the body elides past twenty fresh findings" (fun () ->
+          let findings =
+            List.init 23 (fun i ->
+                finding ~path:"lib/a.ml" ("error " ^ string_of_int i))
+          in
+          let changes, _ =
+            step Mentat_ocaml.Build_change.State.initial
+              (Some (reading findings))
+          in
+          let body =
+            Option.value ~default:""
+              (Mentat_workspace.Notice.body
+                 (Mentat_ocaml.Build_change.notice (List.nth changes 0)))
+          in
+          let lines = String.split_on_char '\n' body in
+          equal int ~msg:"20 lines then the elision line" 21
+            (List.length lines);
+          equal (option string) ~msg:"elision counts the rest"
+            (Some "… and 3 more")
+            (List.nth_opt lines 20));
+    ]
+
+
 let () =
   run "mentat.ocaml"
     [
       test "position and range" position_and_range;
       test "diagnostic invariants" diagnostic_invariants;
       test "project description invariants" project_description_invariants;
+      build_change;
     ]

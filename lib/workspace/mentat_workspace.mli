@@ -49,16 +49,9 @@ module Notice = Notice
     both renders and re-injects into that turn's model request. *)
 
 module Health = Health
-(** The tooling build-health verdict a frontend glances at, wire-safe and
-    fail-honest: only affirmative verdicts render, absence is honest. *)
-
-module Finding = Finding
-(** Build and lint diagnostic identities — the content keys the change law
-    compares. *)
-
-module Build_change = Build_change
-(** The build-change law: the pure diff between consecutive settled diagnostic
-    readings, per lane, rendered as {!Notice.t}. *)
+(** The workspace build-watch status a frontend glances at, wire-safe and
+    fail-honest as a type: the status is always renderable, a build verdict
+    exists only inside a settled phase. *)
 
 type t
 (** An admitted workspace. Exactly one root is primary and writable; every

@@ -201,11 +201,15 @@ let ticker state_file =
             List.iter
               (fun conn ->
                 if not conn.closed then begin
+                  (* A peer can vanish between the reader noticing EOF and
+                     this write; with SIGPIPE ignored that raises, and a dead
+                     ticker would starve every later flip. Contain it. *)
                   (match (conn.diag_parked, conn.diag_sent) with
                   | Some id, sent
                     when not (Option.equal String.equal sent (Some state)) ->
                       conn.diag_parked <- None;
-                      answer_diag conn id
+                      (try answer_diag conn id
+                       with Sys_error _ -> conn.closed <- true)
                   | _ -> ());
                   match (conn.prog_parked, conn.prog_sent) with
                   | Some id, sent
@@ -215,10 +219,12 @@ let ticker state_file =
                               sent
                               (Some (progress_for_state state))) ->
                       conn.prog_parked <- None;
-                      answer_progress conn id
+                      (try answer_progress conn id
+                       with Sys_error _ -> conn.closed <- true)
                   | _ -> ()
                 end)
-              !dyn_conns));
+              !dyn_conns;
+            dyn_conns := List.filter (fun conn -> not conn.closed) !dyn_conns));
     loop ()
   in
   loop ()

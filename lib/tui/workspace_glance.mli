@@ -32,14 +32,16 @@ val tooling :
   palette:Theme.Palette.t ->
   tooling:Mentat_workspace.Health.t ->
   'msg Mosaic.t list
-(** [tooling ~tooling] is the dune watch row. Fail-honest: an absent watch
-    ([Off]) and a connection in flight ([Probing]) yield [[]], never a guessed
-    verdict. A live watch renders its phase — a muted [dune · building], a
-    warned [dune · unresponsive], or the settled verdict: [dune · clean]
-    muted, [dune · n errors] with the count in the error style,
-    [dune · n warnings] warned when a failed build printed warnings alone —
-    with a [· n lint] suffix when the lint lane holds findings. [Starting] and
-    [Restarting] render their status words. *)
+(** [tooling ~tooling] is the dune watch row. A build verdict exists only
+    inside a settled phase; the status itself is a fact about the watch and
+    renders in every state but [Off Disabled] (nothing was attempted, no row).
+    Muted status words: [dune · starting], [dune · building],
+    [dune · off · no watch] and its siblings; warnings:
+    [dune · hung · restarting], [dune · unresponsive]. A settled verdict is
+    [dune · clean] muted, [dune · n errors] in the error style, or
+    [dune · n warnings] warned when a failed build printed warnings alone,
+    with a [· n lint] suffix when the lint lane holds findings. A foreign
+    watch's rows carry a muted [theirs ·] prefix. *)
 
 val goal :
   palette:Theme.Palette.t ->
