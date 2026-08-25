@@ -163,8 +163,6 @@ type t =
           the plan reaches Build admission intact. *)
   | Journal_task_board of Mentat_session.Task.Board.t
       (** Atomic full-board state. *)
-  | Journal_goal of Mentat_session.Goal.Update.t
-      (** One fact; per-transition wire tags derive at the headless mapping. *)
   | Journal_delegation of Mentat_session.Delegation.t
       (** The immutable spawn edge. *)
   | Journal_queue of Mentat_session.Queue.Update.t

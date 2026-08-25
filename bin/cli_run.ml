@@ -184,7 +184,6 @@ let mode_string = function
 
 let turn_origin_string = function
   | Turn.Origin.User -> "user"
-  | Turn.Origin.Goal_continuation -> "goal_continuation"
   | Turn.Origin.Queued _ -> "queued"
   | Turn.Origin.Triggered _ -> "triggered"
   | Turn.Origin.Plan_build -> "plan_build"
@@ -606,7 +605,6 @@ let render_feed t ~client ~json ~session ~output_schema ~thinking ~terminal
                       owner_json Session.Compaction.jsont compaction );
                   ];
                 loop final_text terminal
-            | Fact.Journal_goal _ -> loop final_text terminal
             | Fact.Journal_queue update ->
                 emit (queue_event_type update)
                   [ ("queue", owner_json Session.Queue.Update.jsont update) ];

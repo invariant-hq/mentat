@@ -41,7 +41,7 @@
     edits ([config set], [unset], [init]) are a sessionless executable surface,
     not a session command or decision, so they have no vocabulary here either.
     Rendering is the frontends'. The headless CLI's dotted tag map
-    ([tool.finished], [permission.*], [journal.goal.*]) is a derived rendering
+    ([tool.finished], [permission.*], [journal.queue.*]) is a derived rendering
     at the headless envelope over {!Fact.jsont}'s stable per-arm tags, never
     this codec's own. Nothing here reaches an engine, store, or transport. *)
 
@@ -56,7 +56,7 @@ module Position = Position
 (** {1:vocabulary Commands, facts, progress} *)
 
 module Command = Command
-(** Session intents — the Conversation + Goals command sum. *)
+(** Session intents — the six-verb command sum. *)
 
 module Attach = Attach
 (** The image-attach request/completion vocabulary. *)

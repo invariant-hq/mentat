@@ -380,8 +380,8 @@ codec serves journal and wire with strict unknown-tag rejection
 (`lib/session/turn.ml:53-99`, `lib/protocol/wire.ml:10-15`), but the
 wire is pre-deployment — its only speakers are in-tree clients shipped
 in the same release artifact — so negotiation ceremony would protect no
-one; the journal is the real compatibility surface, and §11.6's
-tombstone rule keeps existing journals replayable. The ripple is
+one; the journal is pre-release data too, and §11.6 retires removed
+arms hard rather than carrying them. The ripple is
 enumerable (the codec arm, the exhaustive origin/input match in replay
 validation, projections, corpus goldens — priced in §13); the
 vocabulary, with §11.4's removals landing alongside, comes out net
@@ -820,9 +820,10 @@ is replaced:
 > typed trigger provenance, attribution never authority — enters at
 > the pre-deployment vocabulary (RFC 0024 §11.6, no version bump), and
 > `Origin.Goal_continuation` leaves with the goal vocabulary
-> (RFC 0024 §11.4), legacy journals replaying through tombstone
-> decoders. Charters cannot widen grants beyond the read-only envelope
-> until S4's `Integration` principal exists.
+> (RFC 0024 §11.4), retired hard: a pre-release journal carrying goal
+> facts stops loading with a loud decode error. Charters cannot widen
+> grants beyond the read-only envelope until S4's `Integration`
+> principal exists.
 
 RFC 0019 C8's forward reference ("…until the daemon owns that question
 (S3)") is discharged exactly so.
@@ -869,11 +870,16 @@ on dogfood: behavior and vocabulary go **with the slice** — the
 admission arm, accounting, `update_goal`, the screen, the flags,
 `continuation_turn_limit`, the four `Goal_*` commands, the
 `Prompt.goal` payload, `Journal_goal`, the errors, and
-`Origin.Goal_continuation` — with legacy-read tombstone decoders
-(≈150 LOC) keeping existing journals replayable under §11.6's rule.
-Requires amending RFC 0000 **D10** and D11's "wins over goal
-continuation" clause, carried by this RFC. `Step_limit_wind_down` is
-not goal machinery and stays.
+`Origin.Goal_continuation` — retired **hard, with no tombstones**:
+the tags join the tree's retired-vocabulary list as deliberate decode
+errors, so a journal carrying goal facts stops loading loudly. The data
+at stake is pre-release only, and the retirement discipline's
+simplicity — every retired tag is a hard decode error, no
+half-vocabulary lingers — outweighs replayability of superseded
+pre-release sessions (§11.6 re-scopes the zero-data-loss gate
+accordingly). Requires amending RFC 0000 **D10** and D11's "wins over
+goal continuation" clause, carried by this RFC. `Step_limit_wind_down`
+is not goal machinery and stays.
 
 **11.5 RFC 0017 — residency moves to `mentatd`.** Two amendments. (a)
 **The daemon composition changes owners, not shape.** `mentat serve` and
@@ -907,14 +913,16 @@ exists to protect deployed readers, and there are none: the wire is
 pre-deployment, its only speakers are in-tree clients shipped in the
 same release artifact — bumping would be ceremony protecting no one.
 `Turn.Origin.Triggered` enters and the goal vocabulary (§11.4) leaves
-as ordinary vocabulary changes, net smaller. The one real
-compatibility surface is the **journal on disk**: existing journals
-contain goal facts, and Phase 1's zero-data-loss gate makes their
-replay non-negotiable — so the removed arms keep **legacy-read
-tombstone decoders** (decode-only, never encoded, ≈150 LOC,
-deleted when a journal-migration story exists). The handshake floor
-(`mentat_server.mli:299-301`) stays as built, unexercised until a
-deployed reader exists to protect.
+as ordinary vocabulary changes, net smaller. The **journal on disk** is
+pre-release data under the same reasoning: the removed arms are
+retired **hard** — the tags become deliberate decode errors, exactly
+the treatment every previously retired tag already receives — and a
+journal carrying goal facts stops loading with a loud error rather
+than replaying through carried tombstones. Phase 1's zero-data-loss
+gate is re-scoped to post-release journals; superseded pre-release
+sessions are not worth a second, decode-only vocabulary. The handshake
+floor (`mentat_server.mli:299-301`) stays as built, unexercised until
+a deployed reader exists to protect.
 
 ## 12. Failure semantics
 
@@ -954,7 +962,7 @@ provider transport's HTTPS stack; C2 upsert); the `mentatd` binary
 split ~150–250 (a second composition root over the same libraries,
 build stanzas, the `serve`→`mentatd` migration shim); the vocabulary
 change ~300–400 (the `Triggered` codec arm, replay-validation arms,
-projections, corpus goldens, plus the goal tombstone decoders); the
+projections, corpus goldens); the
 0018 local-child subset ~1,200–2,000 (the `Child_backend` seam,
 session-serve boot, broker spawn/observe/reap with re-materialization,
 session-keyed registration, orphan rediscovery — §9; this serializes
@@ -970,7 +978,7 @@ dogfood ≈ 5,700–8,400 LOC.**
 
 | Deletion | Surface | When |
 |---|---|---|
-| Goal machinery (§11.4, **ruled deleted**) | ≈ −2,700 impl, −2,400 test; −4 protocol commands, −3 errors, −1 journal fact arm, −1 origin arm, −1 TUI screen, −1 tool, −2 CLI flags, −4 reply verbs, −1 config knob (+ its planned expansion, `bin/composition.ml:1783-1791`); tombstone decoders +≈150 until a journal migration | with the slice |
+| Goal machinery (§11.4, **ruled deleted**) | ≈ −2,700 impl, −2,400 test; −4 protocol commands, −3 errors, −1 journal fact arm, −1 origin arm, −1 TUI screen, −1 tool, −2 CLI flags, −4 reply verbs, −1 config knob (+ its planned expansion, `bin/composition.ml:1783-1791`); no tombstones (hard retire) | with the slice |
 | `mentat serve` as an agent subcommand (§11.5) | the agent binary sheds all residency; the composition moves, not grows | rung 1 |
 | `Bind.public` + `Unsupported` (§11.5) | ≈ −60 LOC; −2 dead dune deps from `lib/server` | in the funded slice |
 | The rung-0 renderer pair's duplicated `Error` module and positive-int decode guard (`bin/review_finding.ml` / `bin/publication.ml`) | ≈ −25 LOC, merged when the pair moves to its shared `bin/connector` home for the in-process publisher | rung 1 |
@@ -980,10 +988,10 @@ dogfood ≈ 5,700–8,400 LOC.**
 | Roadmap ladder rungs 3–5 → one design; goal doc surface | ≈ −50 prose; two future design campaigns collapsed into charter trigger arms | on landing |
 | Avoided outright | the ~300-LOC headless-band re-hosting (the node spawns `run start`); an in-node scheduler; a delivery/intent store; a second structured parser | by construction |
 
-**The honest net:** the tree grows in the slice — ≈ **+1,800 to +3,700
-impl** (4,500–6,400 built against ≈2,650 deleted net of tombstones:
-goals −2,700, `Bind.public` −60, notify dedup −40, tombstones +150) —
-while tests shrink ≈ **−1,400 to −1,800** (600–1,000 added against
+**The honest net:** the tree grows in the slice — ≈ **+1,700 to +3,600
+impl** (4,500–6,400 built against ≈2,800 deleted: goals −2,700,
+`Bind.public` −60, notify dedup −40) — while tests shrink
+≈ **−1,400 to −1,800** (600–1,000 added against
 −2,400) and the wire loses four commands net. What shrinks is
 *surface*, not line count: an agent binary with no daemon, a
 net-smaller wire vocabulary, one origin arm swapped for a truthful one,
@@ -1045,7 +1053,7 @@ The charter vocabulary, receipts, and fences survive either verdict.
 1. **Rung 1 (the funded slice's cron-complete waypoint):** the `mentatd`
    binary (the server composition re-homed; `mentat` sheds `serve`) +
    the 0018 local-child subset (§9 — every run serves its session) +
-   the vocabulary change (`Origin.Triggered` in, goals out, tombstones;
+   the vocabulary change (`Origin.Triggered` in, goals retired hard;
    §11.6) + charter vocabulary + `fire --event|--sweep` + receipts +
    fences + notify + the first-party publisher + the `Bind.public`
    deletion. A crontab line is a complete, fenced, deduplicated,
@@ -1135,10 +1143,11 @@ The charter vocabulary, receipts, and fences survive either verdict.
    its reasons recorded (§15.2c); the cost and the serialization behind
    0018's first two rungs are accepted knowingly (§13).
 2. **Goals are deleted** (§11.4) — with the slice, not gated on dogfood;
-   tombstone decoders keep existing journals replayable.
+   retired hard, no tombstones: a goal-bearing journal stops loading
+   with a loud decode error.
 3. **No protocol version bump** (§11.6) — the wire is pre-deployment;
-   the vocabulary changes land in v1; the journal is the compatibility
-   surface and the tombstone rule covers it.
+   the vocabulary changes land in v1; the journal is pre-release data
+   and retires the removed arms hard.
 
 **During implementation:**
 4. The receipt byte schema and its `status` fold — byte goldens per house

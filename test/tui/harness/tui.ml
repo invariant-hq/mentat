@@ -2015,7 +2015,7 @@ let projected_tool_facts fixture ~session claims =
       | Protocol.Fact.Tool_prepared _ | Protocol.Fact.Tool_returned _
       | Protocol.Fact.Tool_ambiguous _ | Protocol.Fact.Decision_requested _
       | Protocol.Fact.Decision_resolved _ | Protocol.Fact.Journal_task_board _
-      | Protocol.Fact.Journal_goal _ | Protocol.Fact.Journal_delegation _
+      | Protocol.Fact.Journal_delegation _
       | Protocol.Fact.Journal_queue _ | Protocol.Fact.Compaction _
       | Protocol.Fact.Workspace_notice _ | Protocol.Fact.Undo _ ->
           None)
@@ -2626,10 +2626,6 @@ let submit_command (fixture : fixture) = function
       Ok ()
   | Protocol.Command.Answer_decision { session; decision; answer } ->
       answer_decision fixture ~session ~decision ~answer
-  | Protocol.Command.Goal_pause _ | Protocol.Command.Goal_edit _
-  | Protocol.Command.Goal_resume _ | Protocol.Command.Goal_clear _ ->
-      (* The TUI no longer emits goal commands; a stray one is a harness bug. *)
-      failwith "next tui harness: a retired goal command escaped the shell"
 
 let unavailable text =
   Error (Protocol.Error.Unavailable (Mentat_diagnostic.of_text text))

@@ -196,8 +196,6 @@ let project_event ~session_id ~session_state ~mutation ~emit ~seq
         (rev_cumulative, true, mk (Fact.Compaction compaction))
     | Mentat_session.Event.Tasks_replaced board ->
         (rev_cumulative, true, mk (Fact.Journal_task_board board))
-    | Mentat_session.Event.Goal_updated update ->
-        (rev_cumulative, true, mk (Fact.Journal_goal update))
     | Mentat_session.Event.Delegation_recorded edge ->
         (rev_cumulative, true, mk (Fact.Journal_delegation edge))
     | Mentat_session.Event.Delegations_detached ->

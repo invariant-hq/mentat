@@ -1463,10 +1463,9 @@ let evidence_changes = function
   | Protocol.Fact.Tool_returned { mutation = None; _ }
   | Protocol.Fact.Tool_ambiguous { mutation = None; _ }
   | Protocol.Fact.Decision_requested _ | Protocol.Fact.Decision_resolved _
-  | Protocol.Fact.Journal_task_board _ | Protocol.Fact.Journal_goal _
-  | Protocol.Fact.Journal_delegation _ | Protocol.Fact.Journal_queue _
-  | Protocol.Fact.Compaction _ | Protocol.Fact.Workspace_notice _
-  | Protocol.Fact.Undo _ ->
+  | Protocol.Fact.Journal_task_board _ | Protocol.Fact.Journal_delegation _
+  | Protocol.Fact.Journal_queue _ | Protocol.Fact.Compaction _
+  | Protocol.Fact.Workspace_notice _ | Protocol.Fact.Undo _ ->
       []
 
 let queue_update update queue =
@@ -1491,9 +1490,9 @@ let consume_queued turn queue =
         (fun entry ->
           not (Session.Queue.Id.equal admitted (Session.Queue.Entry.id entry)))
         queue
-  | Session.Turn.Origin.User | Session.Turn.Origin.Goal_continuation
-  | Session.Turn.Origin.Triggered _ | Session.Turn.Origin.Plan_build
-  | Session.Turn.Origin.Compaction | Session.Turn.Origin.Step_limit_wind_down ->
+  | Session.Turn.Origin.User | Session.Turn.Origin.Triggered _
+  | Session.Turn.Origin.Plan_build | Session.Turn.Origin.Compaction
+  | Session.Turn.Origin.Step_limit_wind_down ->
       queue
 
 let find_child child children =
@@ -1641,8 +1640,8 @@ let turn_origin_of ~now ~prefix ~index turn =
               origin_at = now;
             }
       | Some _ | None -> None)
-  | Session.Turn.Origin.Goal_continuation | Session.Turn.Origin.Plan_build
-  | Session.Turn.Origin.Compaction | Session.Turn.Origin.Step_limit_wind_down ->
+  | Session.Turn.Origin.Plan_build | Session.Turn.Origin.Compaction
+  | Session.Turn.Origin.Step_limit_wind_down ->
       None
 
 (* Every turn of any origin advances [turn_count]; a user turn additionally
@@ -1839,8 +1838,7 @@ let fold_fact ~now fact t =
   | Protocol.Fact.Turn_provider_failed _ | Protocol.Fact.Turn_message _
   | Protocol.Fact.Tool_started _ | Protocol.Fact.Tool_prepared _
   | Protocol.Fact.Tool_returned _ | Protocol.Fact.Tool_ambiguous _
-  | Protocol.Fact.Journal_goal _ | Protocol.Fact.Compaction _
-  | Protocol.Fact.Workspace_notice _ ->
+  | Protocol.Fact.Compaction _ | Protocol.Fact.Workspace_notice _ ->
       (t, [])
 
 let fold_progress ~now progress t =

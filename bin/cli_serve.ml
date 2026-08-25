@@ -7,7 +7,7 @@ open! Cmdliner
 
 let run socket stop spawned web web_port =
   if stop then Daemon.stop ()
-  else Daemon.serve ~socket_override:socket ~spawned ~web ~web_port
+  else Daemon_server.serve ~socket_override:socket ~spawned ~web ~web_port
 
 let socket_opt =
   Arg.(

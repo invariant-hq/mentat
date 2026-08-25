@@ -1139,7 +1139,6 @@ let all_verbs =
   Catalog.Verb.
     [
       Todo_write;
-      Update_goal;
       Ask_user;
       Propose_plan;
       Spawn;
@@ -1337,7 +1336,7 @@ let engine_catalog =
   | Error e -> failf "catalog: %a" Catalog.Error.pp e
 
 let engine_config _id ~latest_model:_ =
-  Ok (Agent.Config.make ~model:engine_model ~continuation_turn_limit:None ())
+  Ok (Agent.Config.make ~model:engine_model ())
 
 let make_engine ~sw ~store ~script =
   let now =

@@ -39,7 +39,6 @@ module Json = Jsont.Json
 let all_verbs =
   [
     Catalog.Verb.Todo_write;
-    Catalog.Verb.Update_goal;
     Catalog.Verb.Ask_user;
     Catalog.Verb.Propose_plan;
     Catalog.Verb.Spawn;
@@ -84,13 +83,6 @@ let tid s = Session.Turn.Id.of_string s
 
 let plain_response text =
   Llm.Response.make ~model ~stop:Llm.Response.Stop.end_turn
-    (Llm.Message.Assistant.text text)
-
-(* A response reporting [tokens] of input usage, so a goal-continuation turn it
-   settles accrues that spend against the goal's budget. *)
-let usage_response ~tokens text =
-  Llm.Response.make ~model ~stop:Llm.Response.Stop.end_turn
-    ~usage:(Llm.Usage.make ~input:tokens ~output:0 ())
     (Llm.Message.Assistant.text text)
 
 let tool_call_response ~name ~input text =
@@ -426,7 +418,7 @@ let catalog =
   | Error e -> failf "catalog: %a" Catalog.Error.pp e
 
 let default_config _id ~latest_model:_ =
-  Ok (Agent.Config.make ~model ~continuation_turn_limit:None ())
+  Ok (Agent.Config.make ~model ())
 
 let default_script = Ports.script @@ fun _request -> Ok (plain_response "Done.")
 
@@ -917,7 +909,7 @@ let verb_result ~catalog ?declarations ~name input =
   in
   let env =
     Step.Env.make ~catalog ~sandbox:identity ~max_steps:8
-      ~compaction_pressure_tokens:None ~continuation_turn_limit:None
+      ~compaction_pressure_tokens:None
       ~max_spawn_depth:1 ~max_exchanges:8 ~depth:0 ()
   in
   let session =
@@ -983,10 +975,6 @@ let engine_verbs_reject_unknown_input_members () =
                     [ ("id", Json.string "one"); ("content", Json.string "x") ];
                 ] );
           ] );
-      ( "update_goal",
-        json_object
-          [ ("action", Json.string "declare"); ("objective", Json.string "x") ]
-      );
       ("ask_user", json_object [ ("prompt", Json.string "Continue?") ]);
       ("propose_plan", json_object [ ("body", Json.string "1. Continue") ]);
       ("spawn", json_object [ ("task", Json.string "Inspect this") ]);
@@ -1075,40 +1063,6 @@ let spawn_rejects_an_unknown_role () =
     (contains_sub ~sub:"role"
        (String.concat "\n" (Llm.Tool.Result.texts result)))
 
-let update_goal_budget_requires_a_safe_json_integer () =
-  let input token_budget =
-    json_object
-      [
-        ("action", Json.string "declare");
-        ("objective", Json.string "ship it");
-        ("token_budget", token_budget);
-      ]
-  in
-  List.iter
-    (fun (name, token_budget) ->
-      let result, _events =
-        verb_result ~catalog ~name:"update_goal" (input token_budget)
-      in
-      is_true
-        ~msg:("update_goal rejects " ^ name)
-        (Llm.Tool.Result.is_error result);
-      is_true
-        ~msg:("update_goal explains the rejected " ^ name)
-        (contains_sub ~sub:"expected an integer in JSON's safe integer range"
-           (String.concat "\n" (Llm.Tool.Result.texts result))))
-    [
-      ("a fractional token budget", Json.number 1.5);
-      ("a numeric-string token budget", Json.string "42");
-      ("an unsafe token budget", Json.number 9_007_199_254_740_992.);
-      ("an out-of-range token budget", Json.number 9_223_372_036_854_775_808.);
-    ];
-  let result, _events =
-    verb_result ~catalog ~name:"update_goal"
-      (input (Json.number 9_007_199_254_740_991.))
-  in
-  is_false ~msg:"update_goal accepts the largest safe JSON integer"
-    (Llm.Tool.Result.is_error result)
-
 let engine_verb_declaration_drift_blocks_dispatch () =
   let spawn_catalog =
     match Catalog.make ~verbs:[ Catalog.Verb.Spawn ] [] with
@@ -1139,9 +1093,7 @@ let engine_verb_declaration_drift_blocks_dispatch () =
 (* Pure step: config, env, error folding. *)
 
 let config_defaults_are_the_documented_ones () =
-  (* [continuation_turn_limit] is mandatory (no default, H1): the caller here
-     chooses [None] explicitly, and the field carries exactly that. *)
-  let cfg = Agent.Config.make ~model ~continuation_turn_limit:None () in
+  let cfg = Agent.Config.make ~model () in
   equal int ~msg:"max_steps defaults to 500" 500 cfg.Agent.Config.max_steps;
   equal int ~msg:"max_spawn_depth defaults to 1" 1
     cfg.Agent.Config.max_spawn_depth;
@@ -1149,88 +1101,20 @@ let config_defaults_are_the_documented_ones () =
   (match cfg.Agent.Config.review with
   | Mentat_permission.Review_behavior.Enforce -> ()
   | _ -> fail "review defaults to Enforce");
-  (match cfg.Agent.Config.compaction_pressure_tokens with
+  match cfg.Agent.Config.compaction_pressure_tokens with
   | None -> ()
-  | Some _ -> fail "compaction is disabled by default");
-  match cfg.Agent.Config.continuation_turn_limit with
-  | None -> ()
-  | Some _ -> fail "the explicit continuation choice must round-trip"
+  | Some _ -> fail "compaction is disabled by default"
 
 let config_rejects_non_positive_knobs () =
   raises (Invalid_argument "max_steps must be positive") (fun () ->
-      Agent.Config.make ~model ~continuation_turn_limit:None ~max_steps:0 ());
+      Agent.Config.make ~model ~max_steps:0 ());
   raises (Invalid_argument "max_spawn_depth must be positive") (fun () ->
-      Agent.Config.make ~model ~continuation_turn_limit:None ~max_spawn_depth:0
-        ());
+      Agent.Config.make ~model ~max_spawn_depth:0 ());
   raises (Invalid_argument "max_exchanges must be positive") (fun () ->
-      Agent.Config.make ~model ~continuation_turn_limit:None ~max_exchanges:(-1)
-        ());
-  raises (Invalid_argument "continuation_turn_limit must be positive")
-    (fun () -> Agent.Config.make ~model ~continuation_turn_limit:(Some 0) ())
+      Agent.Config.make ~model ~max_exchanges:(-1) ())
 
-let admission_depends_on_the_continuation_limit_scalar () =
-  let identity = Sandbox.identity Sandbox.direct in
-  let contract =
-    Session.Contract.make ~mode:Session.Contract.Mode.Build ~model
-      ~declarations:[] ~policy:Mentat_permission.Policy.default
-      ~review:Mentat_permission.Review_behavior.Enforce ~sandbox:identity ()
-  in
-  let turn =
-    Session.Turn.make ~id:(tid "t-admission") ~origin:Session.Turn.Origin.User
-      ~input:(Session.Turn.Input.user_text "Start the goal")
-      ~max_steps:1 ~contract ()
-  in
-  let provider =
-    Session.Provider_request.Started.make ~turn:(Session.Turn.id turn)
-      ~request_digest:(Mentat_digest.string "admission-request")
-  in
-  let goal =
-    Session.Goal.Update.declare
-      ~id:(Session.Goal.Id.of_string "goal-admission")
-      ~objective:"Continue the work" ()
-  in
-  let session =
-    Session.create ~id:(sid "admission") ~cwd
-      ~created_at:(Session.Time.of_unix_ms 1L)
-      ()
-  in
-  let session =
-    match
-      Session.append_all
-        [
-          Session.Event.turn_started turn;
-          Session.Event.provider_requested provider;
-          Session.Event.provider_settled
-            (Session.Provider_request.Settled.responded
-               ~id:(Session.Provider_request.Started.id provider)
-               (plain_response "Ready."));
-          Session.Event.turn_finished ~turn:(Session.Turn.id turn)
-            Session.Turn.Outcome.completed;
-          Session.Event.goal_updated goal;
-        ]
-        session
-    with
-    | Ok session -> session
-    | Error error -> failf "admission fixture: %a" Session.Error.pp error
-  in
-  (match
-     Step.next_admission ~continuation_turn_limit:None (Session.state session)
-   with
-  | Step.Admission.Continuation _ -> ()
-  | Step.Admission.Queued _ | Step.Admission.Budget_wind_down _
-  | Step.Admission.Step_limit_wind_down _ | Step.Admission.Idle ->
-      fail "an unbounded active goal should continue");
-  match
-    Step.next_admission ~continuation_turn_limit:(Some 0)
-      (Session.state session)
-  with
-  | Step.Admission.Idle -> ()
-  | Step.Admission.Queued _ | Step.Admission.Continuation _
-  | Step.Admission.Budget_wind_down _ | Step.Admission.Step_limit_wind_down _ ->
-      fail "an exhausted continuation limit should idle"
-
-(* The shared contract for goal-admission fixtures. *)
-let goal_contract () =
+(* The shared contract for admission fixtures. *)
+let admission_contract () =
   Session.Contract.make ~mode:Session.Contract.Mode.Build ~model
     ~declarations:[] ~policy:Mentat_permission.Policy.default
     ~review:Mentat_permission.Review_behavior.Enforce
@@ -1266,55 +1150,14 @@ let append_or_fail ~what events session =
   | Ok session -> session
   | Error error -> failf "%s: %a" what Session.Error.pp error
 
-(* A goal-continuation turn's spend accrues against the goal's budget; when the
-   budget hits zero the next admission is a wind-down carrying the budget-limit
-   notice rather than an ordinary continuation. *)
-let a_budget_exhausted_goal_winds_down_with_the_budget_notice () =
-  let contract = goal_contract () in
-  let goal_id = Session.Goal.Id.of_string "goal-budget" in
-  let session =
-    Session.create ~id:(sid "budget") ~cwd
-      ~created_at:(Session.Time.of_unix_ms 1L)
-      ()
-    |> append_or_fail ~what:"budget fixture: opening turn"
-         (settled_turn ~contract ~id:"t-user" ~origin:Session.Turn.Origin.User
-            ~text:"start" ~response:(plain_response "ready") ())
-    |> append_or_fail ~what:"budget fixture: declare"
-         [
-           Session.Event.goal_updated
-             (Session.Goal.Update.declare ~id:goal_id ~objective:"Ship it"
-                ~token_budget:100 ());
-         ]
-    |> append_or_fail ~what:"budget fixture: continuation"
-         (settled_turn ~contract ~id:"t-cont"
-            ~origin:Session.Turn.Origin.Goal_continuation ~text:"continue"
-            ~response:(usage_response ~tokens:100 "worked")
-            ())
-  in
-  match
-    Step.next_admission ~continuation_turn_limit:None (Session.state session)
-  with
-  | Step.Admission.Budget_wind_down { goal; input } ->
-      is_true ~msg:"the wind-down names the budgeted goal"
-        (Session.Goal.Id.equal goal goal_id);
-      is_true ~msg:"the wind-down turn carries the budget-limit notice"
-        (contains_sub ~sub:"token budget has been reached"
-           (Option.value ~default:"" (Session.Turn.Input.text input)));
-      is_true ~msg:"the wind-down turn tells the model not to call update_goal"
-        (contains_sub ~sub:"do not call update_goal"
-           (Option.value ~default:"" (Session.Turn.Input.text input)))
-  | Step.Admission.Continuation _ | Step.Admission.Queued _
-  | Step.Admission.Step_limit_wind_down _ | Step.Admission.Idle ->
-      fail "a budget-exhausted goal should wind down"
-
 (* The step limit is a runaway backstop, not a verdict that the work is over: a
-   turn that reaches it is owed one wrap-up turn, with no goal to continue and
-   with nothing else queued. That wind-down turn carries its own origin, which
-   is what stops a wind-down that spends its own budget from admitting a second
-   one. An interrupted turn is the control: the user stopped the work, so
-   nothing is admitted on their behalf. *)
-let a_step_limited_turn_winds_down_once_with_no_goal () =
-  let contract = goal_contract () in
+   turn that reaches it is owed one wrap-up turn, with nothing else queued.
+   That wind-down turn carries its own origin, which is what stops a wind-down
+   that spends its own budget from admitting a second one. An interrupted turn
+   is the control: the user stopped the work, so nothing is admitted on their
+   behalf. *)
+let a_step_limited_turn_winds_down_once () =
+  let contract = admission_contract () in
   let session =
     Session.create ~id:(sid "steps") ~cwd
       ~created_at:(Session.Time.of_unix_ms 1L)
@@ -1324,9 +1167,7 @@ let a_step_limited_turn_winds_down_once_with_no_goal () =
             ~text:"start" ~response:(plain_response "working")
             ~outcome:Session.Turn.Outcome.step_limit ())
   in
-  (match
-     Step.next_admission ~continuation_turn_limit:None (Session.state session)
-   with
+  (match Step.next_admission (Session.state session) with
   | Step.Admission.Step_limit_wind_down input ->
       is_true ~msg:"the wind-down turn carries the step-limit notice"
         (contains_sub ~sub:"reached its step limit"
@@ -1335,9 +1176,8 @@ let a_step_limited_turn_winds_down_once_with_no_goal () =
         ~msg:"the wind-down turn asks for the work to be parked and stated"
         (contains_sub ~sub:"summarize where the work stands"
            (Option.value ~default:"" (Session.Turn.Input.text input)))
-  | Step.Admission.Continuation _ | Step.Admission.Budget_wind_down _
   | Step.Admission.Queued _ | Step.Admission.Idle ->
-      fail "a step-limited turn with no goal should wind down, not idle");
+      fail "a step-limited turn should wind down, not idle");
   (* The wind-down spends its own budget: the next admission is not another
      wind-down, so the mechanism cannot ping-pong. *)
   let wound_down =
@@ -1348,13 +1188,9 @@ let a_step_limited_turn_winds_down_once_with_no_goal () =
          ~outcome:Session.Turn.Outcome.step_limit ())
       session
   in
-  (match
-     Step.next_admission ~continuation_turn_limit:None
-       (Session.state wound_down)
-   with
+  (match Step.next_admission (Session.state wound_down) with
   | Step.Admission.Idle -> ()
-  | Step.Admission.Step_limit_wind_down _ | Step.Admission.Continuation _
-  | Step.Admission.Budget_wind_down _ | Step.Admission.Queued _ ->
+  | Step.Admission.Step_limit_wind_down _ | Step.Admission.Queued _ ->
       fail "a wind-down turn must not admit a second wind-down");
   let interrupted =
     Session.create ~id:(sid "stopped") ~cwd
@@ -1366,161 +1202,16 @@ let a_step_limited_turn_winds_down_once_with_no_goal () =
             ~outcome:(Session.Turn.Outcome.interrupted ~cancelled:true ())
             ())
   in
-  match
-    Step.next_admission ~continuation_turn_limit:None
-      (Session.state interrupted)
-  with
+  match Step.next_admission (Session.state interrupted) with
   | Step.Admission.Idle -> ()
-  | Step.Admission.Step_limit_wind_down _ | Step.Admission.Continuation _
-  | Step.Admission.Budget_wind_down _ | Step.Admission.Queued _ ->
+  | Step.Admission.Step_limit_wind_down _ | Step.Admission.Queued _ ->
       fail "an interrupted turn admits nothing"
-
-(* A goal does not change what the step limit means, only what follows the
-   wrap-up: the wind-down displaces one continuation, the goal stays active, and
-   the continuation resumes on the turn after. An exhausted token budget still
-   wins, because its notice says everything this one does and parks the goal
-   besides. *)
-let a_step_limited_goal_turn_winds_down_then_resumes () =
-  let contract = goal_contract () in
-  let goal_id = Session.Goal.Id.of_string "goal-steps" in
-  let session =
-    Session.create ~id:(sid "goal-steps") ~cwd
-      ~created_at:(Session.Time.of_unix_ms 1L)
-      ()
-    |> append_or_fail ~what:"goal-step fixture: opening turn"
-         (settled_turn ~contract ~id:"t-user" ~origin:Session.Turn.Origin.User
-            ~text:"start" ~response:(plain_response "ready") ())
-    |> append_or_fail ~what:"goal-step fixture: declare"
-         [
-           Session.Event.goal_updated
-             (Session.Goal.Update.declare ~id:goal_id ~objective:"Ship it"
-                ~token_budget:100 ());
-         ]
-    |> append_or_fail ~what:"goal-step fixture: step-limited continuation"
-         (settled_turn ~contract ~id:"t-cont"
-            ~origin:Session.Turn.Origin.Goal_continuation ~text:"continue"
-            ~response:(usage_response ~tokens:10 "worked")
-            ~outcome:Session.Turn.Outcome.step_limit ())
-  in
-  (match
-     Step.next_admission ~continuation_turn_limit:None (Session.state session)
-   with
-  | Step.Admission.Step_limit_wind_down input ->
-      is_true ~msg:"the goal's wind-down carries the step-limit notice"
-        (contains_sub ~sub:"reached its step limit"
-           (Option.value ~default:"" (Session.Turn.Input.text input)))
-  | Step.Admission.Continuation _ | Step.Admission.Budget_wind_down _
-  | Step.Admission.Queued _ | Step.Admission.Idle ->
-      fail "a step-limited goal turn should wind down before continuing");
-  let wound_down =
-    append_or_fail ~what:"goal-step fixture: the wind-down turn"
-      (settled_turn ~contract ~id:"t-wind"
-         ~origin:Session.Turn.Origin.Step_limit_wind_down ~text:"wrap up"
-         ~response:(plain_response "parked") ())
-      session
-  in
-  (match
-     Step.next_admission ~continuation_turn_limit:None
-       (Session.state wound_down)
-   with
-  | Step.Admission.Continuation input ->
-      is_true ~msg:"the goal resumes on the turn after the wind-down"
-        (contains_sub ~sub:"Continue working toward this goal"
-           (Option.value ~default:"" (Session.Turn.Input.text input)))
-  | Step.Admission.Step_limit_wind_down _ | Step.Admission.Budget_wind_down _
-  | Step.Admission.Queued _ | Step.Admission.Idle ->
-      fail "the goal should keep going after its wind-down");
-  (* The same step-limited continuation, but the goal's budget is spent too. *)
-  let spent =
-    Session.create ~id:(sid "goal-spent") ~cwd
-      ~created_at:(Session.Time.of_unix_ms 1L)
-      ()
-    |> append_or_fail ~what:"spent fixture: opening turn"
-         (settled_turn ~contract ~id:"t-user" ~origin:Session.Turn.Origin.User
-            ~text:"start" ~response:(plain_response "ready") ())
-    |> append_or_fail ~what:"spent fixture: declare"
-         [
-           Session.Event.goal_updated
-             (Session.Goal.Update.declare ~id:goal_id ~objective:"Ship it"
-                ~token_budget:100 ());
-         ]
-    |> append_or_fail ~what:"spent fixture: step-limited continuation"
-         (settled_turn ~contract ~id:"t-cont"
-            ~origin:Session.Turn.Origin.Goal_continuation ~text:"continue"
-            ~response:(usage_response ~tokens:100 "worked")
-            ~outcome:Session.Turn.Outcome.step_limit ())
-  in
-  match
-    Step.next_admission ~continuation_turn_limit:None (Session.state spent)
-  with
-  | Step.Admission.Budget_wind_down _ -> ()
-  | Step.Admission.Step_limit_wind_down _ | Step.Admission.Continuation _
-  | Step.Admission.Queued _ | Step.Admission.Idle ->
-      fail "an exhausted budget's wind-down subsumes the step limit's"
-
-(* Editing the objective makes the first following goal turn lead with the
-   objective-updated notice and the new objective, while keeping the standing
-   continuation guidance; a later goal turn drops the notice. *)
-let an_edited_objective_leads_the_next_goal_turn_with_the_update_notice () =
-  let contract = goal_contract () in
-  let goal_id = Session.Goal.Id.of_string "goal-edit" in
-  let edited =
-    Session.create ~id:(sid "edit") ~cwd
-      ~created_at:(Session.Time.of_unix_ms 1L)
-      ()
-    |> append_or_fail ~what:"edit fixture: opening turn"
-         (settled_turn ~contract ~id:"t-user" ~origin:Session.Turn.Origin.User
-            ~text:"start" ~response:(plain_response "ready") ())
-    |> append_or_fail ~what:"edit fixture: declare then edit"
-         [
-           Session.Event.goal_updated
-             (Session.Goal.Update.declare ~id:goal_id
-                ~objective:"Port the parser" ());
-           Session.Event.goal_updated
-             (Session.Goal.Update.edit ~id:goal_id ~objective:"Port the lexer");
-         ]
-  in
-  (match
-     Step.next_admission ~continuation_turn_limit:None (Session.state edited)
-   with
-  | Step.Admission.Continuation input ->
-      let text = Option.value ~default:"" (Session.Turn.Input.text input) in
-      is_true ~msg:"the first post-edit turn leads with the update notice"
-        (contains_sub ~sub:"edited the session goal's objective" text);
-      is_true ~msg:"the post-edit turn keeps the continuation guidance"
-        (contains_sub ~sub:"Continue working toward this goal" text);
-      is_true ~msg:"the post-edit turn carries the new objective"
-        (contains_sub ~sub:"Port the lexer" text)
-  | Step.Admission.Budget_wind_down _ | Step.Admission.Queued _
-  | Step.Admission.Step_limit_wind_down _ | Step.Admission.Idle ->
-      fail "an edited active goal should continue");
-  (* Once a goal-continuation turn has re-entered on the edited objective, the
-     notice is spent and the next turn is a plain continuation. *)
-  let continued =
-    append_or_fail ~what:"edit control: re-derivation turn"
-      (settled_turn ~contract ~id:"t-cont"
-         ~origin:Session.Turn.Origin.Goal_continuation ~text:"re-derive"
-         ~response:(plain_response "done") ())
-      edited
-  in
-  match
-    Step.next_admission ~continuation_turn_limit:None (Session.state continued)
-  with
-  | Step.Admission.Continuation input ->
-      let text = Option.value ~default:"" (Session.Turn.Input.text input) in
-      is_false ~msg:"a later goal turn drops the update notice"
-        (contains_sub ~sub:"edited the session goal's objective" text);
-      is_true ~msg:"a later goal turn keeps the plain continuation"
-        (contains_sub ~sub:"Continue working toward this goal" text)
-  | Step.Admission.Budget_wind_down _ | Step.Admission.Queued _
-  | Step.Admission.Step_limit_wind_down _ | Step.Admission.Idle ->
-      fail "the goal should keep continuing after re-derivation"
 
 let env_rejects_invalid_scalars () =
   let make ?(max_steps = 1) ?(depth = 0) () =
     Step.Env.make ~catalog
       ~sandbox:(Sandbox.identity Sandbox.direct)
-      ~max_steps ~compaction_pressure_tokens:None ~continuation_turn_limit:None
+      ~max_steps ~compaction_pressure_tokens:None
       ~max_spawn_depth:1 ~max_exchanges:8 ~depth ()
   in
   ignore (make ());
@@ -1638,7 +1329,7 @@ let forged_plan_build_creates_no_provider_effect () =
   in
   let env =
     Step.Env.make ~catalog ~sandbox:identity ~max_steps:8
-      ~compaction_pressure_tokens:None ~continuation_turn_limit:None
+      ~compaction_pressure_tokens:None
       ~max_spawn_depth:1 ~max_exchanges:8 ~depth:0 ()
   in
   match
@@ -1944,8 +1635,7 @@ let mode_execution_binds_catalog_workspace_and_policy_together () =
   in
   let config _session ~latest_model:_ =
     Ok
-      (Agent.Config.make ~model ~policy:build_policy
-         ~continuation_turn_limit:None ())
+      (Agent.Config.make ~model ~policy:build_policy ())
   in
   let contract store turn =
     let session = Hashtbl.find store.sessions "root" in
@@ -2092,8 +1782,7 @@ let active_plan_recovery_uses_the_read_execution () =
   in
   let config _session ~latest_model:_ =
     Ok
-      (Agent.Config.make ~model:reconfigured_model ~policy:configured
-         ~continuation_turn_limit:None ())
+      (Agent.Config.make ~model:reconfigured_model ~policy:configured ())
   in
   with_engine ~script:default_script ~config ~execution_for_mode
     ~delegated_execution:(read_catalog, read_workspace, read_policy)
@@ -2152,8 +1841,7 @@ let delegated_recovery_uses_the_fixed_execution () =
   in
   let config _session ~latest_model:_ =
     Ok
-      (Agent.Config.make ~model ~policy:root_policy
-         ~continuation_turn_limit:None ())
+      (Agent.Config.make ~model ~policy:root_policy ())
   in
   with_engine ~script:default_script ~config ~execution_for_mode
     ~delegated_execution:
@@ -2451,8 +2139,8 @@ let plan_approval_reaches_the_build_request context () =
         |> List.find_opt (fun turn ->
             match Session.Turn.origin turn with
             | Session.Turn.Origin.Plan_build -> true
-            | Session.Turn.Origin.User | Session.Turn.Origin.Goal_continuation
-            | Session.Turn.Origin.Queued _ | Session.Turn.Origin.Triggered _
+            | Session.Turn.Origin.User | Session.Turn.Origin.Queued _
+            | Session.Turn.Origin.Triggered _
             | Session.Turn.Origin.Compaction
             | Session.Turn.Origin.Step_limit_wind_down ->
                 false)
@@ -2475,7 +2163,7 @@ let session_config_is_reloaded_at_each_turn_and_isolated_by_session () =
         (Hashtbl.find_opt reviews (Session.Id.to_string session))
         ~default:Mentat_permission.Review_behavior.Enforce
     in
-    Ok (Agent.Config.make ~model ~review ~continuation_turn_limit:None ())
+    Ok (Agent.Config.make ~model ~review ())
   in
   with_engine ~config (fun ~sw:_ ~client ~store ~engine:_ ->
       let run session turn =
@@ -2521,7 +2209,7 @@ let latest_model_reaches_config_resolution () =
   let observed = ref [] in
   let config _session ~latest_model =
     observed := latest_model :: !observed;
-    Ok (Agent.Config.make ~model ~continuation_turn_limit:None ())
+    Ok (Agent.Config.make ~model ())
   in
   with_engine ~config (fun ~sw:_ ~client ~store:_ ~engine:_ ->
       let run turn =
@@ -2880,152 +2568,6 @@ let a_queue_replacement_mints_distinct_entries_in_input_order () =
           failf "expected two replacement entries, got %d" (List.length entries)
       | None -> fail "the driver emitted no replacement queue fact")
 
-let a_goal_command_without_a_goal_is_not_found () =
-  with_engine (fun ~sw:_ ~client ~store:_ ~engine:_ ->
-      match
-        Client.submit client.c
-          (Protocol.Command.goal_pause ~session:(sid "root")
-             ~goal:(Session.Goal.Id.of_string "g"))
-      with
-      | Error (Protocol.Error.Goal_not_found session) ->
-          equal string ~msg:"the session with no goal is named" "root"
-            (Session.Id.to_string session)
-      | Ok () -> fail "a goal command on a session with no goal must fail"
-      | Error e -> failf "wrong error: %a" Protocol.Error.pp e)
-
-let a_stale_goal_command_is_not_current () =
-  (* Declare a goal through the update_goal verb (once), then pause a different
-     id. A latch — not a transcript-length count — guards against re-declaring:
-     [Request.messages] is the user-input list, which does not grow across a
-     turn's provider calls. *)
-  let script =
-    let declared = ref false in
-    capped_script ~cap:6
-      ( Ports.script @@ fun _request ->
-        if !declared then Ok (plain_response "done")
-        else begin
-          declared := true;
-          Ok
-            (tool_call_response ~name:"update_goal"
-               ~input:
-                 (json_object
-                    [
-                      ("action", Json.string "declare");
-                      ("objective", Json.string "ship it");
-                    ])
-               "declaring")
-        end )
-  in
-  (* Bound goal continuations: an active goal otherwise re-admits a continuation
-     turn after every clean settle, so an unbounded limit never goes idle. *)
-  let config _ ~latest_model:_ =
-    Ok (Agent.Config.make ~model ~continuation_turn_limit:(Some 1) ())
-  in
-  with_engine ~script ~config (fun ~sw:_ ~client ~store:_ ~engine:_ ->
-      submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t-goal") "go");
-      let pairs = drain_committed (follow_ok client (sid "root")) in
-      is_true ~msg:"the goal was declared"
-        (has_fact
-           (function Protocol.Fact.Journal_goal _ -> true | _ -> false)
-           pairs);
-      match
-        Client.submit client.c
-          (Protocol.Command.goal_pause ~session:(sid "root")
-             ~goal:(Session.Goal.Id.of_string "not-the-declared-goal"))
-      with
-      | Error (Protocol.Error.Goal_is_not_current goal) ->
-          equal string ~msg:"the stale goal id is named" "not-the-declared-goal"
-            (Session.Goal.Id.to_string goal)
-      | Ok () -> fail "a stale goal id must be rejected as not-current"
-      | Error e -> failf "wrong error: %a" Protocol.Error.pp e)
-
-let an_illegal_goal_transition_is_reported_structurally () =
-  let declared = ref false in
-  let script =
-    capped_script ~cap:6
-      ( Ports.script @@ fun _request ->
-        if !declared then Ok (plain_response "done")
-        else begin
-          declared := true;
-          Ok
-            (tool_call_response ~name:"update_goal"
-               ~input:
-                 (json_object
-                    [
-                      ("action", Json.string "declare");
-                      ("objective", Json.string "ship it");
-                    ])
-               "declaring")
-        end )
-  in
-  let config _ ~latest_model:_ =
-    Ok (Agent.Config.make ~model ~continuation_turn_limit:(Some 1) ())
-  in
-  with_engine ~script ~config (fun ~sw:_ ~client ~store ~engine:_ ->
-      submit_ok client
-        (prompt ~session:(sid "root") ~turn:(tid "t-illegal-goal") "go");
-      ignore (drain_committed (follow_ok client (sid "root")));
-      let goal =
-        let session = Hashtbl.find store.sessions "root" in
-        match Session.State.goal (Session.state session) with
-        | Some goal -> Session.Goal.id goal
-        | None -> fail "the update_goal call did not declare its goal"
-      in
-      let pause () = Protocol.Command.goal_pause ~session:(sid "root") ~goal in
-      submit_ok client (pause ());
-      match Client.submit client.c (pause ()) with
-      | Error (Protocol.Error.Goal_transition_not_allowed found) ->
-          is_true ~msg:"the illegal transition names the current goal"
-            (Session.Goal.Id.equal found goal)
-      | Ok () -> fail "pausing an already paused goal must be rejected"
-      | Error e -> failf "wrong error: %a" Protocol.Error.pp e)
-
-let a_prompt_declares_a_goal_at_admission () =
-  let script =
-    capped_script ~cap:4
-      (Ports.script @@ fun _request -> Ok (plain_response "done"))
-  in
-  (* One continuation, so the goal runs its declaring turn and its single
-     continuation, then the session idles with the goal still live — the
-     boundary at which a second declaration is rejected. *)
-  let config _ ~latest_model:_ =
-    Ok (Agent.Config.make ~model ~continuation_turn_limit:(Some 1) ())
-  in
-  let goal_prompt turn objective =
-    match
-      Protocol.Command.prompt ~session:(sid "root") ~turn:(tid turn)
-        ~input:[ Llm.Content.text "go" ]
-        ~goal:{ Protocol.Command.objective; token_budget = None }
-        ()
-    with
-    | Ok c -> c
-    | Error e -> failf "goal prompt: %s" (Protocol.Command.Invalid.message e)
-  in
-  with_engine ~script ~config (fun ~sw:_ ~client ~store ~engine:_ ->
-      submit_ok client (goal_prompt "t-goal" "Port the parser");
-      let pairs = drain_n_settled 2 (follow_ok client (sid "root")) in
-      (* The goal is minted engine-side and declared before the turn settles. *)
-      is_true ~msg:"the goal declaration crosses the feed"
-        (has_fact
-           (function
-             | Protocol.Fact.Journal_goal
-                 (Session.Goal.Update.Declare { objective; _ }) ->
-                 String.equal objective "Port the parser"
-             | _ -> false)
-           pairs);
-      (match
-         Session.State.goal (Session.state (Hashtbl.find store.sessions "root"))
-       with
-      | Some goal ->
-          is_true ~msg:"the session carries the declared goal"
-            (String.equal (Session.Goal.objective goal) "Port the parser")
-      | None -> fail "the prompt did not declare its goal");
-      (* A second goal on a session whose goal is still live fails admission. *)
-      match Client.submit client.c (goal_prompt "t-goal-2" "Another") with
-      | Error (Protocol.Error.Goal_transition_not_allowed _) -> ()
-      | Ok () -> fail "a second goal declaration must be rejected"
-      | Error e -> failf "wrong error: %a" Protocol.Error.pp e)
-
 let an_interrupt_admits_the_queued_correction () =
   (* Only the first provider call — the turn being interrupted — hangs; the
      queued correction's call completes. A whole-request content match cannot
@@ -3090,7 +2632,6 @@ let an_interrupt_admits_the_queued_correction () =
                  match Session.Turn.origin turn with
                  | Session.Turn.Origin.Queued _ -> true
                  | Session.Turn.Origin.User
-                 | Session.Turn.Origin.Goal_continuation
                  | Session.Turn.Origin.Triggered _
                  | Session.Turn.Origin.Plan_build
                  | Session.Turn.Origin.Compaction
@@ -3530,52 +3071,11 @@ let the_resume_notice_frames_the_reissued_summary () =
               "the reissued request frames the summary with the resume notice"
             (request_contains request "compacted to save context"))
 
-(* A budgeted goal runs to budget exhaustion: the engine admits one wind-down
-   turn carrying the budget-limit notice, records the budget-limited transition,
-   and then idles — it does not loop admitting further wind-downs. *)
-let a_budgeted_goal_winds_down_then_stops_budget_limited () =
-  let saw_notice = ref false in
-  let script =
-    Ports.script @@ fun request ->
-    if request_contains request "token budget has been reached" then
-      saw_notice := true;
-    Ok (usage_response ~tokens:100 "worked")
-  in
-  let config _ ~latest_model:_ =
-    Ok (Agent.Config.make ~model ~continuation_turn_limit:None ())
-  in
-  let goal_prompt =
-    match
-      Protocol.Command.prompt ~session:(sid "root") ~turn:(tid "t-goal")
-        ~input:[ Llm.Content.text "go" ]
-        ~goal:
-          { Protocol.Command.objective = "Ship it"; token_budget = Some 100 }
-        ()
-    with
-    | Ok c -> c
-    | Error e -> failf "goal prompt: %s" (Protocol.Command.Invalid.message e)
-  in
-  with_engine ~script ~config (fun ~sw:_ ~client ~store ~engine:_ ->
-      submit_ok client goal_prompt;
-      (* The declaring turn, one budgeted continuation, then the wind-down; the
-         wind-down leaves the goal budget-limited, so admission then idles. *)
-      let _ = drain_n_settled 3 (follow_ok client (sid "root")) in
-      is_true ~msg:"the wind-down turn carried the budget-limit notice"
-        !saw_notice;
-      match
-        Session.State.goal (Session.state (Hashtbl.find store.sessions "root"))
-      with
-      | Some goal ->
-          is_true ~msg:"the goal stops budget-limited"
-            (Session.Goal.Status.equal (Session.Goal.status goal)
-               Session.Goal.Status.Budget_limited)
-      | None -> fail "the budgeted goal vanished")
-
 (* A turn that spends its step budget is wound down rather than dropped where it
-   stood: the engine admits one wrap-up turn carrying the step-limit notice,
-   with no goal in play. Every model answer here is another tool call, so the
-   wind-down spends its own budget too — and the turn after it is the user's,
-   which is what proves the wind-down cannot admit a wind-down of its own. *)
+   stood: the engine admits one wrap-up turn carrying the step-limit notice.
+   Every model answer here is another tool call, so the wind-down spends its
+   own budget too — and the turn after it is the user's, which is what proves
+   the wind-down cannot admit a wind-down of its own. *)
 let a_step_limited_turn_winds_down_once_then_stops () =
   let saw_notice = ref false in
   let calls = ref 0 in
@@ -3600,7 +3100,7 @@ let a_step_limited_turn_winds_down_once_then_stops () =
   (* One step per turn: the boundary after the first tool settles ends the turn
      rather than issuing a second request. *)
   let config _ ~latest_model:_ =
-    Ok (Agent.Config.make ~model ~max_steps:1 ~continuation_turn_limit:None ())
+    Ok (Agent.Config.make ~model ~max_steps:1 ())
   in
   let origins store =
     Session.State.turns (Session.state (Hashtbl.find store.sessions "root"))
@@ -3682,7 +3182,7 @@ let context_pressure_compaction_records_the_before_projection () =
   in
   let config _ ~latest_model:_ =
     Ok
-      (Agent.Config.make ~model ~continuation_turn_limit:None
+      (Agent.Config.make ~model
          ~compaction_pressure_tokens:1 ())
   in
   with_engine ~script ~config (fun ~sw:_ ~client ~store ~engine:_ ->
@@ -3727,7 +3227,7 @@ let context_pressure_compacts_without_provider_usage () =
   in
   let config _ ~latest_model:_ =
     Ok
-      (Agent.Config.make ~model ~continuation_turn_limit:None
+      (Agent.Config.make ~model
          ~compaction_pressure_tokens:100 ())
   in
   with_engine ~script ~config (fun ~sw:_ ~client ~store ~engine:_ ->
@@ -3770,7 +3270,7 @@ let a_length_stop_at_pressure_compacts_and_retries () =
   in
   let config _ ~latest_model:_ =
     Ok
-      (Agent.Config.make ~model ~continuation_turn_limit:None
+      (Agent.Config.make ~model
          ~compaction_pressure_tokens:500 ())
   in
   with_engine ~script ~config (fun ~sw:_ ~client ~store ~engine:_ ->
@@ -3811,7 +3311,7 @@ let a_repeat_length_stop_completes_after_one_recovery () =
   in
   let config _ ~latest_model:_ =
     Ok
-      (Agent.Config.make ~model ~continuation_turn_limit:None
+      (Agent.Config.make ~model
          ~compaction_pressure_tokens:500 ())
   in
   with_engine ~script ~config (fun ~sw:_ ~client ~store ~engine:_ ->
@@ -3898,7 +3398,7 @@ let a_pressure_summary_keeps_a_verbatim_tail () =
   in
   let config _ ~latest_model:_ =
     Ok
-      (Agent.Config.make ~model ~continuation_turn_limit:None
+      (Agent.Config.make ~model
          ~compaction_pressure_tokens:100 ())
   in
   with_engine ~script ~config (fun ~sw:_ ~client ~store ~engine:_ ->
@@ -3955,7 +3455,7 @@ let an_oversized_tail_falls_back_to_a_full_summary () =
   in
   let config _ ~latest_model:_ =
     Ok
-      (Agent.Config.make ~model ~continuation_turn_limit:None
+      (Agent.Config.make ~model
          ~compaction_pressure_tokens:100 ())
   in
   with_engine ~script ~config (fun ~sw:_ ~client ~store ~engine:_ ->
@@ -4005,7 +3505,7 @@ let a_second_compaction_advances_the_boundary_behind_the_tail () =
   in
   let config _ ~latest_model:_ =
     Ok
-      (Agent.Config.make ~model ~continuation_turn_limit:None
+      (Agent.Config.make ~model
          ~compaction_pressure_tokens:100 ())
   in
   with_engine ~script ~config (fun ~sw:_ ~client ~store ~engine:_ ->
@@ -4233,8 +3733,7 @@ let a_delegated_session_uses_the_fixed_execution () =
   in
   let config _session ~latest_model:_ =
     Ok
-      (Agent.Config.make ~model ~policy:configured_policy
-         ~continuation_turn_limit:None ())
+      (Agent.Config.make ~model ~policy:configured_policy ())
   in
   let execution_for_mode ~configured ~model:_ ~sealed_declarations:_ _mode =
     (root_catalog, root_workspace, configured.Agent.Config.policy)
@@ -4398,8 +3897,7 @@ let a_generic_delegate_runs_a_write_tool () =
   in
   let config _session ~latest_model:_ =
     Ok
-      (Agent.Config.make ~model ~policy:write_policy
-         ~continuation_turn_limit:None ())
+      (Agent.Config.make ~model ~policy:write_policy ())
   in
   with_engine ~script:(capped_script ~cap:8 script) ~config
     ~delegated_execution:(write_catalog, child_workspace, write_policy)
@@ -4511,7 +4009,7 @@ let a_spawn_at_the_depth_cap_fails_the_call_not_the_turn () =
   with_engine ~script:(spawn_script ())
     ~config:(fun _ ~latest_model:_ ->
       Ok
-        (Agent.Config.make ~model ~continuation_turn_limit:None
+        (Agent.Config.make ~model
            ~max_spawn_depth:1 ()))
     (fun ~sw:_ ~client ~store:_ ~engine:_ ->
       submit_ok client
@@ -5023,7 +4521,7 @@ let an_observation_outlives_the_turn_that_could_not_state_it () =
   (* One step: the model answers once, and the boundary after its tool settles
      ends the turn rather than issuing a second request. *)
   let config _session ~latest_model:_ =
-    Ok (Agent.Config.make ~model ~max_steps:1 ~continuation_turn_limit:None ())
+    Ok (Agent.Config.make ~model ~max_steps:1 ())
   in
   let workspace =
     workspace_noticing_on_drain ~on_drain:2
@@ -5161,8 +4659,7 @@ let branch_flows_copy_the_mutation_ledger () =
   let config _session ~latest_model:_ =
     Ok
       (Agent.Config.make ~model
-         ~policy:(Policy.make [ Policy.Rule.allow_all_dangerously ])
-         ~continuation_turn_limit:None ())
+         ~policy:(Policy.make [ Policy.Rule.allow_all_dangerously ]) ())
   in
   let catalog =
     match Catalog.make ~verbs:all_verbs [ trivial_tool ~name:"edit" () ] with
@@ -5265,8 +4762,7 @@ let recovery_takes_a_fresh_capture_not_the_pre_crash_one () =
   in
   let config _session ~latest_model:_ =
     Ok
-      (Agent.Config.make ~model ~policy:!configured_policy
-         ~continuation_turn_limit:None ())
+      (Agent.Config.make ~model ~policy:!configured_policy ())
   in
   let catalog =
     match Catalog.make ~verbs:all_verbs [ trivial_tool ~name:"edit" () ] with
@@ -5355,8 +4851,7 @@ let recovery_checkpoint_availability_law ~replayed ~available () =
   let config _session ~latest_model:_ =
     Ok
       (Agent.Config.make ~model
-         ~policy:(Policy.make [ Policy.Rule.allow_all_dangerously ])
-         ~continuation_turn_limit:None ())
+         ~policy:(Policy.make [ Policy.Rule.allow_all_dangerously ]) ())
   in
   let catalog =
     match Catalog.make ~verbs:all_verbs [ trivial_tool ~name:"edit" () ] with
@@ -6486,8 +5981,6 @@ let () =
           test "engine verbs reject unknown input members"
             engine_verbs_reject_unknown_input_members;
           test "spawn rejects an unknown role" spawn_rejects_an_unknown_role;
-          test "update_goal budget requires a safe JSON integer"
-            update_goal_budget_requires_a_safe_json_integer;
           test "engine verb declaration drift blocks dispatch"
             engine_verb_declaration_drift_blocks_dispatch;
         ];
@@ -6497,16 +5990,8 @@ let () =
             config_defaults_are_the_documented_ones;
           test "config rejects non-positive knobs"
             config_rejects_non_positive_knobs;
-          test "admission depends only on the continuation-limit scalar"
-            admission_depends_on_the_continuation_limit_scalar;
-          test "a budget-exhausted goal winds down with the budget notice"
-            a_budget_exhausted_goal_winds_down_with_the_budget_notice;
-          test "a step-limited turn winds down once with no goal"
-            a_step_limited_turn_winds_down_once_with_no_goal;
-          test "a step-limited goal turn winds down then resumes"
-            a_step_limited_goal_turn_winds_down_then_resumes;
-          test "an edited objective leads the next goal turn with the notice"
-            an_edited_objective_leads_the_next_goal_turn_with_the_update_notice;
+          test "a step-limited turn winds down once"
+            a_step_limited_turn_winds_down_once;
           test "env rejects invalid scalars" env_rejects_invalid_scalars;
           test "step protocol errors fold to Internal"
             error_folds_step_protocol_cases_to_internal;
@@ -6595,14 +6080,6 @@ let () =
             a_queue_entry_is_admitted_at_the_idle_boundary;
           test "a queue replacement mints distinct entries in input order"
             a_queue_replacement_mints_distinct_entries_in_input_order;
-          test "a goal command without a goal is Goal_not_found"
-            a_goal_command_without_a_goal_is_not_found;
-          test "a stale goal command is Goal_is_not_current"
-            a_stale_goal_command_is_not_current;
-          test "an illegal goal transition is Goal_transition_not_allowed"
-            an_illegal_goal_transition_is_reported_structurally;
-          test "a prompt declares a goal at admission"
-            a_prompt_declares_a_goal_at_admission;
           test "an interrupt admits the queued correction"
             an_interrupt_admits_the_queued_correction;
         ];
@@ -6645,8 +6122,6 @@ let () =
             overflow_compacts_once_and_retries;
           test "the resume notice frames the reissued summary"
             the_resume_notice_frames_the_reissued_summary;
-          test "a budgeted goal winds down then stops budget-limited"
-            a_budgeted_goal_winds_down_then_stops_budget_limited;
           test "a step-limited turn winds down once then stops"
             a_step_limited_turn_winds_down_once_then_stops;
           test "context overflow recovery is bounded per turn"

@@ -37,8 +37,6 @@ type t = private {
           leaves in place: the most recent turns that fit it stay behind the
           summary rather than in it. [None] disables automatic compaction, and
           with it the tail. *)
-  continuation_turn_limit : int option;
-      (** Maximum goal-continuation turns per goal; [None] is unlimited. *)
   max_spawn_depth : int;
       (** Delegation depth cap: a session at this depth cannot spawn. *)
   max_exchanges : int;
@@ -55,7 +53,6 @@ val make :
   ?denial_message:(Mentat_permission.Policy.Denial.t -> string) ->
   max_steps:int ->
   compaction_pressure_tokens:int option ->
-  continuation_turn_limit:int option ->
   max_spawn_depth:int ->
   max_exchanges:int ->
   depth:int ->
@@ -69,5 +66,5 @@ val make :
     defaults to a stable generic message.
 
     Raises [Invalid_argument] if [max_steps], [compaction_pressure_tokens],
-    [continuation_turn_limit], [max_spawn_depth], or [max_exchanges] is not
-    positive, or [depth] is negative. *)
+    [max_spawn_depth], or [max_exchanges] is not positive, or [depth] is
+    negative. *)

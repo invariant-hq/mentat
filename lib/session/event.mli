@@ -70,7 +70,6 @@ type t = private
           is unrepresentable — a crash mid-summary instead leaves that claim
           open for ordinary ambiguous recovery. *)
   | Tasks_replaced of Task.Board.t  (** The task board was replaced whole. *)
-  | Goal_updated of Goal.Update.t  (** The goal lifecycle advanced. *)
   | Delegation_recorded of Delegation.t
       (** A subagent delegation edge was recorded. *)
   | Delegations_detached
@@ -138,9 +137,6 @@ val compaction_installed : Compaction.t -> t
 
 val tasks_replaced : Task.Board.t -> t
 (** [tasks_replaced board] records a whole-board replacement. *)
-
-val goal_updated : Goal.Update.t -> t
-(** [goal_updated update] records a goal lifecycle update. *)
 
 val delegation_recorded : Delegation.t -> t
 (** [delegation_recorded edge] records a delegation edge. *)

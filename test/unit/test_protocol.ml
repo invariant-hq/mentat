@@ -209,7 +209,6 @@ let prepared_payload text =
 let sandbox_identity = Sandbox.identity Sandbox.direct
 let turn_id id = Session.Turn.Id.of_string id
 let queue_id id = Session.Queue.Id.of_string id
-let goal_id id = Session.Goal.Id.of_string id
 let session_id id = Session.Id.of_string id
 
 let make_contract ?(mode = Session.Contract.Mode.Build) ?(model = model)
@@ -432,8 +431,8 @@ let change_value =
    every fact family and every non-projecting event: a user turn with a
    no-change read, a two-file write, an ambiguous claim that recorded
    changes, an unattended denial, the staged pair, a rejection append, and
-   queue/board/delegation facts; a goal declaration; a goal-continuation
-   turn with a mid-turn compaction; a queued turn that is interrupted; a
+   queue/board/delegation facts; a triggered turn with a mid-turn
+   compaction; a queued turn that is interrupted; a
    turn whose provider call fails; and a turn whose provider call settles
    ambiguously at recovery. Each step pairs a session event with the
    mutation events durable before it commits (ordering), so the suite can
@@ -558,7 +557,10 @@ let journey () =
       ()
   in
   let t2 =
-    turn ~id:"turn-2" ~origin:Session.Turn.Origin.Goal_continuation
+    turn ~id:"turn-2"
+      ~origin:
+        (Session.Turn.Origin.triggered ~charter:"nightly" ~digest:"d0"
+           ~key:"k0")
       ~input:Session.Turn.Input.continue
       ~contract:(make_contract ~declarations ())
       ()
@@ -650,19 +652,14 @@ let journey () =
       ([], Event.provider_requested p2);
       ([], respond ~usage:(usage ~input:30 ~output:9) p2 "All done.");
       ([], finish t1);
-      (* Goal declared between turns. *)
-      ( [],
-        Event.goal_updated
-          (Session.Goal.Update.declare ~id:(goal_id "goal-1")
-             ~objective:"Ship the refactor" ~token_budget:1000 ()) );
-      (* Turn 2: goal continuation with a mid-turn compaction. *)
+      (* Turn 2: triggered admission with a mid-turn compaction. *)
       ([], Event.turn_started t2);
       ([], Event.provider_requested p3);
       ([], respond ~usage:(usage ~input:100 ~output:50) p3 "Working on it.");
       ([], Event.provider_requested p4);
       ([], Event.compaction_installed compaction);
       ([], Event.provider_requested p5);
-      ([], respond ~usage:(usage ~input:40 ~output:10) p5 "Goal advanced.");
+      ([], respond ~usage:(usage ~input:40 ~output:10) p5 "Task advanced.");
       ([], finish t2);
       (* Turn 3: queued admission, then an interrupt. *)
       ([], Event.turn_started t3);
@@ -762,8 +759,6 @@ let expected_tags =
     "journal.delegation";
     "turn.assistant";
     "turn.finished";
-    (* between turns *)
-    "journal.goal";
     (* turn 2 *)
     "turn.started";
     "turn.assistant";
@@ -850,7 +845,7 @@ let projection_group =
           let facts = List.map snd (project_all j) in
           equal (list string) ~msg:"projected tag sequence" expected_tags
             (List.map fact_tag facts);
-          equal int ~msg:"event count" 46 (List.length (session_events j)));
+          equal int ~msg:"event count" 45 (List.length (session_events j)));
       test "a known provider failure preserves its owner error before terminal"
         (fun () ->
           let j = journey () in
@@ -1459,10 +1454,6 @@ let all_facts =
     ("decision.requested", Protocol.Fact.Decision_requested fix_decision);
     ("decision.resolved", Protocol.Fact.Decision_resolved fix_resolution);
     ("journal.tasks", Protocol.Fact.Journal_task_board fix_board);
-    ( "journal.goal",
-      Protocol.Fact.Journal_goal
-        (Session.Goal.Update.declare ~id:(goal_id "goal-c")
-           ~objective:"Chart everything" ()) );
     ("journal.delegation", Protocol.Fact.Journal_delegation fix_edge);
     ( "journal.queue",
       Protocol.Fact.Journal_queue
@@ -1571,7 +1562,6 @@ let all_progress =
   ]
 
 let fix_session_id = session_id "session-c"
-let fix_goal_id = goal_id "goal-c"
 
 let all_commands =
   [
@@ -1604,18 +1594,6 @@ let all_commands =
                [ Llm.Content.text "Then this." ];
              ]) );
     ("clear_queued", Protocol.Command.clear_queued ~session:fix_session_id);
-    ( "goal.pause",
-      Protocol.Command.goal_pause ~session:fix_session_id ~goal:fix_goal_id );
-    ( "goal.edit",
-      ok_or "goal_edit"
-        (Protocol.Command.goal_edit ~session:fix_session_id ~goal:fix_goal_id
-           ~objective:"Ship it") );
-    ( "goal.resume",
-      ok_or "goal_resume"
-        (Protocol.Command.goal_resume ~session:fix_session_id ~goal:fix_goal_id
-           ~budget:500 ()) );
-    ( "goal.clear",
-      Protocol.Command.goal_clear ~session:fix_session_id ~goal:fix_goal_id );
   ]
 
 let all_errors =
@@ -1637,10 +1615,6 @@ let all_errors =
     ( "already_resolved",
       Protocol.Error.Already_resolved
         (Session.Decision.Requested.id fix_decision) );
-    ("goal_not_found", Protocol.Error.Goal_not_found fix_session_id);
-    ("goal_is_not_current", Protocol.Error.Goal_is_not_current fix_goal_id);
-    ( "goal_transition_not_allowed",
-      Protocol.Error.Goal_transition_not_allowed fix_goal_id );
     ("invalid_title", Protocol.Error.Invalid_title);
     ("invalid_api_key", Protocol.Error.Invalid_api_key);
     ("archived", Protocol.Error.Archived fix_session_id);
@@ -1875,50 +1849,55 @@ let command_codec_group =
               equal command_value ~msg:(tag ^ ": round-trip") command
                 (decode Protocol.Command.jsont json))
             all_commands);
-      test "a prompt carries an optional goal declaration round-trip" (fun () ->
-          (* Goal-at-start rides the prompt payload (no create verb); the wire
-             tag stays [prompt], the optional [goal] member carries the
-             objective and optional token budget, and an absent goal decodes as
-             none — the backward-compatible codec addition. *)
-          let with_goal =
-            ok_or "prompt.goal"
-              (Protocol.Command.prompt ~session:fix_session_id
-                 ~turn:(turn_id "turn-goal")
-                 ~input:[ Llm.Content.text "Pursue." ]
-                 ~goal:
-                   {
-                     Protocol.Command.objective = "Port the parser";
-                     token_budget = Some 200_000;
-                   }
-                 ())
+      test "retired goal vocabulary is a loud decode error" (fun () ->
+          (* Goals were retired outright: the tags never decode again, and a
+             payload that carries them stops loading rather than being
+             silently dropped. *)
+          List.iter
+            (fun tag ->
+              assert_decode_error ("retired command tag " ^ tag)
+                Protocol.Command.jsont
+                (json_object
+                   [
+                     ("v", Json.int 1);
+                     ("type", Json.string tag);
+                     ("session", Json.string "session-c");
+                     ("goal", Json.string "goal-c");
+                   ]))
+            [ "goal.pause"; "goal.edit"; "goal.resume"; "goal.clear" ];
+          assert_decode_error "retired fact tag journal.goal"
+            Protocol.Fact.jsont
+            (json_object
+               [
+                 ("v", Json.int 1);
+                 ("type", Json.string "journal.goal");
+                 ( "update",
+                   json_object
+                     [
+                       ("type", Json.string "declare");
+                       ("id", Json.string "goal-c");
+                       ("objective", Json.string "Chart everything");
+                     ] );
+               ]);
+          List.iter
+            (fun (tag, payload) ->
+              assert_decode_error ("retired error tag " ^ tag)
+                Protocol.Error.jsont
+                (json_object
+                   (("v", Json.int 1) :: ("type", Json.string tag) :: payload)))
+            [
+              ("goal_not_found", [ ("session", Json.string "session-c") ]);
+              ("goal_is_not_current", [ ("goal", Json.string "goal-c") ]);
+              ("goal_transition_not_allowed", [ ("goal", Json.string "goal-c") ]);
+            ];
+          let prompt =
+            encode Protocol.Command.jsont (List.assoc "prompt" all_commands)
           in
-          let json = encode Protocol.Command.jsont with_goal in
-          assert_v_and_tag ~msg:"prompt.goal" "prompt" json;
-          equal command_value ~msg:"prompt.goal round-trip" with_goal
-            (decode Protocol.Command.jsont json);
-          let no_budget =
-            ok_or "prompt.goal_no_budget"
-              (Protocol.Command.prompt ~session:fix_session_id
-                 ~turn:(turn_id "turn-goal2")
-                 ~input:[ Llm.Content.text "Pursue." ]
-                 ~goal:
-                   {
-                     Protocol.Command.objective = "Finish";
-                     token_budget = None;
-                   }
-                 ())
-          in
-          equal command_value ~msg:"prompt.goal_no_budget round-trip" no_budget
-            (decode Protocol.Command.jsont
-               (encode Protocol.Command.jsont no_budget));
-          (* An empty objective is rejected by the constructor. *)
-          is_true ~msg:"empty goal objective rejected"
-            (Result.is_error
-               (Protocol.Command.prompt ~session:fix_session_id
-                  ~turn:(turn_id "turn-goal3")
-                  ~input:[ Llm.Content.text "x" ]
-                  ~goal:{ Protocol.Command.objective = ""; token_budget = None }
-                  ())));
+          assert_decode_error "prompt with the retired goal member"
+            Protocol.Command.jsont
+            (add_member "goal"
+               (json_object [ ("objective", Json.string "Port the parser") ])
+               prompt));
       test "a prompt carries optional trigger provenance round-trip" (fun () ->
           (* Trigger provenance rides the prompt payload: the wire tag stays
              [prompt], the optional [triggered] member carries charter, digest,
@@ -1970,15 +1949,15 @@ let command_codec_group =
           let prompt =
             encode Protocol.Command.jsont (List.assoc "prompt" all_commands)
           in
-          assert_decode_error "prompt with a goal objective"
+          assert_decode_error "prompt with an interrupt reason"
             Protocol.Command.jsont
-            (add_member "objective" (Json.string "Ship it") prompt);
-          let edit =
-            encode Protocol.Command.jsont (List.assoc "goal.edit" all_commands)
+            (add_member "reason" (Json.string "stop") prompt);
+          let interrupt =
+            encode Protocol.Command.jsont (List.assoc "interrupt" all_commands)
           in
-          assert_decode_error "goal.edit with a turn member"
+          assert_decode_error "interrupt with a turn member"
             Protocol.Command.jsont
-            (add_member "turn" (Json.string "turn-x") edit));
+            (add_member "turn" (Json.string "turn-x") interrupt));
     ]
 
 let command_parity_group =
@@ -2084,38 +2063,6 @@ let command_parity_group =
                       ("digest", Json.string "0f9a4c1d2e3b4a5f");
                       ("key", Json.string "delivery-42");
                     ])));
-      test "goal_edit rejects an empty objective" (fun () ->
-          parity ~msg:"empty objective"
-            ~constructor:(fun () ->
-              Protocol.Command.goal_edit ~session:fix_session_id
-                ~goal:fix_goal_id ~objective:"")
-            ~tag:"goal.edit"
-            ~corrupt:(set_member "objective" (Json.string "")));
-      test "goal_resume rejects a negative budget" (fun () ->
-          parity ~msg:"negative budget"
-            ~constructor:(fun () ->
-              Protocol.Command.goal_resume ~session:fix_session_id
-                ~goal:fix_goal_id ~budget:(-1) ())
-            ~tag:"goal.resume"
-            ~corrupt:(set_member "budget" (Json.int (-1))));
-      prop "goal_edit accepts and round-trips any non-empty objective"
-        Gen.(
-          let+ c = char_range 'a' 'z'
-          and+ rest = string_of ~size:(int_range 0 12) (char_range 'a' 'z') in
-          String.make 1 c ^ rest)
-        (fun objective ->
-          match
-            Protocol.Command.goal_edit ~session:fix_session_id ~goal:fix_goal_id
-              ~objective
-          with
-          | Error _ -> fail "goal_edit rejected a non-empty objective"
-          | Ok command ->
-              is_true
-                (Json.equal
-                   (encode Protocol.Command.jsont command)
-                   (encode Protocol.Command.jsont
-                      (decode Protocol.Command.jsont
-                         (encode Protocol.Command.jsont command)))));
       prop "prompt accepts any positive step cap" (Gen.int_range 1 500)
         (fun max_steps ->
           match

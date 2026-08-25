@@ -793,7 +793,6 @@ let fragment ~resolve_media (opts : Options.t) position fact =
       block ~fact:"decision.resolved" ~seq
         [ decision_resolution_block resolved ]
   | Journal_task_board board -> task_board_card ~seq board
-  | Journal_goal _ -> Html.empty
   | Journal_delegation delegation ->
       let label =
         match Mentat_session.Delegation.description delegation with

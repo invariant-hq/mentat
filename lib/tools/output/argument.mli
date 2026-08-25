@@ -50,7 +50,6 @@ val headline : tool:string -> input:Jsont.json -> string option
     - [spawn]: the [description] when present, else the [task].
     - [wait]: the waited-for [children], comma-joined.
     - [send_message], [follow_up]: the recipient [child].
-    - [update_goal]: the [objective] when present, else the [action].
 
     [None] is returned for:
 

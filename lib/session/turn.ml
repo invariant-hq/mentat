@@ -23,7 +23,6 @@ module Id =
 module Origin = struct
   type t =
     | User
-    | Goal_continuation
     | Queued of Queue.Id.t
     | Triggered of { charter : string; digest : string; key : string }
     | Plan_build
@@ -43,7 +42,6 @@ module Origin = struct
   let equal a b =
     match (a, b) with
     | User, User -> true
-    | Goal_continuation, Goal_continuation -> true
     | Queued a, Queued b -> Queue.Id.equal a b
     | Triggered a, Triggered b ->
         String.equal a.charter b.charter
@@ -52,14 +50,13 @@ module Origin = struct
     | Plan_build, Plan_build -> true
     | Compaction, Compaction -> true
     | Step_limit_wind_down, Step_limit_wind_down -> true
-    | ( ( User | Goal_continuation | Queued _ | Triggered _ | Plan_build
-        | Compaction | Step_limit_wind_down ),
+    | ( ( User | Queued _ | Triggered _ | Plan_build | Compaction
+        | Step_limit_wind_down ),
         _ ) ->
         false
 
   let pp ppf = function
     | User -> Format.pp_print_string ppf "user"
-    | Goal_continuation -> Format.pp_print_string ppf "goal-continuation"
     | Queued id -> Format.fprintf ppf "queued(%a)" Queue.Id.pp id
     | Triggered { charter; digest; key } ->
         Format.fprintf ppf "triggered(%s@%s:%s)" charter digest key
@@ -73,17 +70,11 @@ module Origin = struct
       |> Jsont.Object.error_unknown |> Jsont.Object.finish
       |> Jsont.Object.Case.map "user" ~dec:Fun.id
     in
-    let goal_case =
-      Jsont.Object.map ~kind:"goal-continuation origin" Goal_continuation
-      |> Jsont.Object.error_unknown |> Jsont.Object.finish
-      |> Jsont.Object.Case.map "goal_continuation" ~dec:Fun.id
-    in
     let queued_case =
       Jsont.Object.map ~kind:"queued origin" (fun id -> Queued id)
       |> Jsont.Object.mem "entry" Queue.Id.jsont ~enc:(function
         | Queued id -> id
-        | User | Goal_continuation | Triggered _ | Plan_build | Compaction
-        | Step_limit_wind_down ->
+        | User | Triggered _ | Plan_build | Compaction | Step_limit_wind_down ->
             assert false)
       |> Jsont.Object.error_unknown |> Jsont.Object.finish
       |> Jsont.Object.Case.map "queued" ~dec:Fun.id
@@ -93,18 +84,15 @@ module Origin = struct
           decode_invalid_arg (fun () -> triggered ~charter ~digest ~key))
       |> Jsont.Object.mem "charter" Jsont.string ~enc:(function
         | Triggered { charter; _ } -> charter
-        | User | Goal_continuation | Queued _ | Plan_build | Compaction
-        | Step_limit_wind_down ->
+        | User | Queued _ | Plan_build | Compaction | Step_limit_wind_down ->
             assert false)
       |> Jsont.Object.mem "digest" Jsont.string ~enc:(function
         | Triggered { digest; _ } -> digest
-        | User | Goal_continuation | Queued _ | Plan_build | Compaction
-        | Step_limit_wind_down ->
+        | User | Queued _ | Plan_build | Compaction | Step_limit_wind_down ->
             assert false)
       |> Jsont.Object.mem "key" Jsont.string ~enc:(function
         | Triggered { key; _ } -> key
-        | User | Goal_continuation | Queued _ | Plan_build | Compaction
-        | Step_limit_wind_down ->
+        | User | Queued _ | Plan_build | Compaction | Step_limit_wind_down ->
             assert false)
       |> Jsont.Object.error_unknown |> Jsont.Object.finish
       |> Jsont.Object.Case.map "triggered" ~dec:Fun.id
@@ -128,7 +116,6 @@ module Origin = struct
       List.map Jsont.Object.Case.make
         [
           user_case;
-          goal_case;
           queued_case;
           triggered_case;
           plan_case;
@@ -138,7 +125,6 @@ module Origin = struct
     in
     let enc_case = function
       | User as origin -> Jsont.Object.Case.value user_case origin
-      | Goal_continuation as origin -> Jsont.Object.Case.value goal_case origin
       | Queued _ as origin -> Jsont.Object.Case.value queued_case origin
       | Triggered _ as origin -> Jsont.Object.Case.value triggered_case origin
       | Plan_build as origin -> Jsont.Object.Case.value plan_case origin

@@ -49,8 +49,8 @@
     narrowed to one fenced session (the fence guard and CAS document live inside
     the closures — the driver never sees a revision), and {!type:hooks} is the
     scheduler seam. The driver appends session events only through the step,
-    plus the three driver-owned facts (interrupt request, queue, goal), all
-    validated by the session's checked constructors and replay. *)
+    plus the two driver-owned facts (interrupt request, queue), all validated
+    by the session's checked constructors and replay. *)
 
 type io = {
   session_id : Mentat_session.Id.t;  (** The fenced session. *)
@@ -232,7 +232,7 @@ val start : t -> unit
     the hooks resolve drivers: the first drive fires hooks that look [t] up. An
     active loaded session first runs [Step.recover]: open claims settle
     Ambiguous and the drive continues. An idle loaded session first runs
-    admission directly, preserving queued/goal recovery without constructing a
+    admission directly, preserving queued recovery without constructing a
     speculative Build execution. *)
 
 val hub : t -> Feed.Hub.t

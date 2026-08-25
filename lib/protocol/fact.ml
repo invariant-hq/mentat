@@ -65,7 +65,6 @@ type t =
   | Decision_requested of Mentat_session.Decision.Requested.t
   | Decision_resolved of Mentat_session.Decision.Resolved.t
   | Journal_task_board of Mentat_session.Task.Board.t
-  | Journal_goal of Mentat_session.Goal.Update.t
   | Journal_delegation of Mentat_session.Delegation.t
   | Journal_queue of Mentat_session.Queue.Update.t
   | Compaction of Mentat_session.Compaction.t
@@ -109,7 +108,6 @@ let equal a b =
       Mentat_session.Decision.Resolved.equal a b
   | Journal_task_board a, Journal_task_board b ->
       Mentat_session.Task.Board.equal a b
-  | Journal_goal a, Journal_goal b -> Mentat_session.Goal.Update.equal a b
   | Journal_delegation a, Journal_delegation b ->
       Mentat_session.Delegation.equal a b
   | Journal_queue a, Journal_queue b -> Mentat_session.Queue.Update.equal a b
@@ -123,7 +121,7 @@ let equal a b =
       | Turn_provider_failed _ | Turn_message _ | Turn_settled _
       | Tool_started _ | Tool_prepared _ | Tool_returned _ | Tool_ambiguous _
       | Decision_requested _ | Decision_resolved _ | Journal_task_board _
-      | Journal_goal _ | Journal_delegation _ | Journal_queue _ | Compaction _
+      | Journal_delegation _ | Journal_queue _ | Compaction _
       | Workspace_notice _ | Undo _ ),
       _ ) ->
       false
@@ -158,7 +156,6 @@ let pp ppf t =
       tagged "decision.resolved" Mentat_session.Decision.Id.pp
         (Mentat_session.Decision.Resolved.id resolution)
   | Journal_task_board _ -> tag "journal.tasks"
-  | Journal_goal _ -> tag "journal.goal"
   | Journal_delegation _ -> tag "journal.delegation"
   | Journal_queue _ -> tag "journal.queue"
   | Compaction _ -> tag "compaction.installed"
@@ -324,12 +321,6 @@ let jsont =
       (fun board -> Journal_task_board board)
       (function Journal_task_board board -> board | _ -> assert false)
   in
-  let journal_goal_case =
-    single "journal-goal fact" "journal.goal" "update"
-      Mentat_session.Goal.Update.jsont
-      (fun update -> Journal_goal update)
-      (function Journal_goal update -> update | _ -> assert false)
-  in
   let journal_delegation_case =
     single "journal-delegation fact" "journal.delegation" "edge"
       Mentat_session.Delegation.jsont
@@ -385,7 +376,6 @@ let jsont =
         decision_requested_case;
         decision_resolved_case;
         journal_tasks_case;
-        journal_goal_case;
         journal_delegation_case;
         journal_queue_case;
         compaction_case;
@@ -411,7 +401,6 @@ let jsont =
     | Decision_resolved _ as f ->
         Jsont.Object.Case.value decision_resolved_case f
     | Journal_task_board _ as f -> Jsont.Object.Case.value journal_tasks_case f
-    | Journal_goal _ as f -> Jsont.Object.Case.value journal_goal_case f
     | Journal_delegation _ as f ->
         Jsont.Object.Case.value journal_delegation_case f
     | Journal_queue _ as f -> Jsont.Object.Case.value journal_queue_case f

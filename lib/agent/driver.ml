@@ -282,7 +282,6 @@ let build_env t ~context_prelude ~workspace catalog cfg ~max_steps =
     ~prelude:context_prelude
     ~max_steps:(Option.value max_steps ~default:cfg.Config.max_steps)
     ~compaction_pressure_tokens:cfg.Config.compaction_pressure_tokens
-    ~continuation_turn_limit:cfg.Config.continuation_turn_limit
     ~max_spawn_depth:cfg.Config.max_spawn_depth
     ~max_exchanges:cfg.Config.max_exchanges ~depth:t.depth ()
 
@@ -474,26 +473,6 @@ let commit_metadata_committed t session' =
       t.session <- session;
       Ok ()
 
-(* The goal id a rejected goal transition names, for either a live-state or a
-   replay rejection. A declare-while-unfinished, an unknown target, or an illegal
-   transition all identify their goal, and all map to the one protocol
-   transition error. *)
-let goal_transition_id (store_error : Mentat_session.Error.t) =
-  let of_goal = function
-    | Mentat_session.State.Error.Goal.Illegal_transition { id; _ }
-    | Mentat_session.State.Error.Goal.Unfinished id
-    | Mentat_session.State.Error.Goal.Unknown id ->
-        id
-  in
-  match store_error with
-  | Mentat_session.Error.State (Mentat_session.State.Error.Goal g) ->
-      Some (of_goal g)
-  | Mentat_session.Error.Replay replay -> (
-      match Mentat_session.State.Replay_error.cause replay with
-      | Mentat_session.State.Error.Goal g -> Some (of_goal g)
-      | _ -> None)
-  | _ -> None
-
 let fault t e =
   t.phase <- Faulted e;
   (* A fault aborts the compaction drive before its turn can settle; its awaiting
@@ -585,11 +564,7 @@ and admission t =
               ~input:(Mentat_session.Turn.Input.plan_build approval)
               ~origin:Mentat_session.Turn.Origin.Plan_build
         | None -> (
-            match
-              Mentat_agent_step.next_admission
-                ~continuation_turn_limit:cfg.Config.continuation_turn_limit
-                (state t)
-            with
+            match Mentat_agent_step.next_admission (state t) with
             | Mentat_agent_step.Admission.Queued entry ->
                 start_build_turn t cfg
                   ~input:
@@ -598,24 +573,6 @@ and admission t =
                   ~origin:
                     (Mentat_session.Turn.Origin.Queued
                        (Mentat_session.Queue.Entry.id entry))
-            | Mentat_agent_step.Admission.Continuation input ->
-                start_build_turn t cfg ~input
-                  ~origin:Mentat_session.Turn.Origin.Goal_continuation
-            | Mentat_agent_step.Admission.Budget_wind_down { goal; input } -> (
-                (* Record the budget-limited transition before the wind-down turn
-                   so the goal leaves [Active] and admits no further
-                   continuation; then start the final goal-continuation turn. *)
-                match
-                  commit_events t
-                    [
-                      Mentat_session.Event.goal_updated
-                        (Mentat_session.Goal.Update.budget_limited ~id:goal);
-                    ]
-                with
-                | Error e -> fault t e
-                | Ok () ->
-                    start_build_turn t cfg ~input
-                      ~origin:Mentat_session.Turn.Origin.Goal_continuation)
             | Mentat_agent_step.Admission.Step_limit_wind_down input ->
                 start_build_turn t cfg ~input
                   ~origin:Mentat_session.Turn.Origin.Step_limit_wind_down
@@ -1188,13 +1145,12 @@ and handle_command t command ~mid_effect ~ack =
         options;
         mode;
         max_steps;
-        goal;
         triggered;
         output_schema;
         _;
       } ->
-      prompt t ~turn ~input ~options ~mode ~max_steps ~goal ~triggered
-        ~output_schema ~ack
+      prompt t ~turn ~input ~options ~mode ~max_steps ~triggered ~output_schema
+        ~ack
   | Mentat_protocol.Command.Answer_decision { decision; answer; _ } ->
       if mid_effect then
         ack (Error (Mentat_protocol.Error.Decision_not_pending decision))
@@ -1244,95 +1200,14 @@ and handle_command t command ~mid_effect ~ack =
         [
           Mentat_session.Event.queue_updated Mentat_session.Queue.Update.cleared;
         ]
-  | Mentat_protocol.Command.Goal_pause { goal; _ } ->
-      goal_command t ~goal ~ack (fun ~id ->
-          Mentat_session.Goal.Update.pause ~id)
-  | Mentat_protocol.Command.Goal_edit { goal; objective; _ } ->
-      goal_command t ~goal ~ack (fun ~id ->
-          Mentat_session.Goal.Update.edit ~id ~objective)
-  | Mentat_protocol.Command.Goal_resume { goal; budget; _ } ->
-      goal_command t ~goal ~ack (fun ~id ->
-          Mentat_session.Goal.Update.resume ~id ?token_budget:budget ())
-  | Mentat_protocol.Command.Goal_clear { goal; _ } ->
-      goal_command t ~goal ~ack (fun ~id ->
-          Mentat_session.Goal.Update.clear ~id)
-
-and goal_command t ~goal ~ack update_of =
-  (* A goal command names the goal it saw: the session must have a declared goal
-     ([Goal_not_found]), and it must be the current one ([Goal_is_not_current]),
-     since a goal is replaceable and a stale command must not act on its
-     successor. *)
-  let illegal_transition = function
-    | Mentat_session.Error.State
-        (Mentat_session.State.Error.Goal
-           (Mentat_session.State.Error.Goal.Illegal_transition { id; _ })) ->
-        Some id
-    | Mentat_session.Error.Replay replay -> (
-        match Mentat_session.State.Replay_error.cause replay with
-        | Mentat_session.State.Error.Goal
-            (Mentat_session.State.Error.Goal.Illegal_transition { id; _ }) ->
-            Some id
-        | _ -> None)
-    | _ -> None
-  in
-  match Mentat_session.State.goal (state t) with
-  | None -> ack (Error (Mentat_protocol.Error.Goal_not_found t.io.session_id))
-  | Some current -> (
-      let id = Mentat_session.Goal.id current in
-      if not (Mentat_session.Goal.Id.equal id goal) then
-        ack (Error (Mentat_protocol.Error.Goal_is_not_current goal))
-      else
-        match
-          commit_events t [ Mentat_session.Event.goal_updated (update_of ~id) ]
-        with
-        | Error (Error.Store (Ports.Store_error.Rejected error)) -> (
-            match illegal_transition error with
-            | Some id ->
-                ack
-                  (Error (Mentat_protocol.Error.Goal_transition_not_allowed id))
-            | None ->
-                ack
-                  (Error
-                     (unavailable
-                        (Error.Store (Ports.Store_error.Rejected error)))))
-        | Error e -> ack (Error (unavailable e))
-        | Ok () -> ack (Ok ()))
 
 and journal_commit t ~ack events =
   match commit_events t events with
   | Error e -> ack (Error (unavailable e))
   | Ok () -> ack (Ok ())
 
-(* A goal declared with the prompt is minted engine-side and appended before the
-   turn starts, so the model plans with the goal already in the journal (goals
-   are never client-minted). The id is deterministic in the turn — a
-   fixed [prompt-goal] tag, not a call id — so a retried prompt declares the same
-   goal. A declaration while a goal is still live is rejected and the turn is not
-   admitted, surfaced as the same transition error the standalone goal verbs use. *)
-and declare_prompt_goal t ~turn ~goal =
-  match goal with
-  | None -> Ok ()
-  | Some { Mentat_protocol.Command.objective; token_budget } -> (
-      let id =
-        Mentat_session.Goal.Id.of_string
-          ("goal-"
-          ^ Mentat_digest.key ~length:16 ~domain:"mentat.agent.goal.v1"
-              [ Mentat_session.Turn.Id.to_string turn; "prompt-goal" ])
-      in
-      let update =
-        Mentat_session.Goal.Update.declare ~id ~objective ?token_budget ()
-      in
-      match commit_events t [ Mentat_session.Event.goal_updated update ] with
-      | Ok () -> Ok ()
-      | Error (Error.Store (Ports.Store_error.Rejected store_error) as e) -> (
-          match goal_transition_id store_error with
-          | Some id ->
-              Error (Mentat_protocol.Error.Goal_transition_not_allowed id)
-          | None -> Error (unavailable e))
-      | Error e -> Error (unavailable e))
-
-and prompt t ~turn ~input ~options ~mode ~max_steps ~goal ~triggered
-    ~output_schema ~ack =
+and prompt t ~turn ~input ~options ~mode ~max_steps ~triggered ~output_schema
+    ~ack =
   (* The engine mints the turn input from the command's content after admission:
      [Command.Prompt] carries content, never the engine-only [Continue]. The
      content is non-empty by the command constructor's contract. Inline
@@ -1365,31 +1240,24 @@ and prompt t ~turn ~input ~options ~mode ~max_steps ~goal ~triggered
                     ~latest_model:(Mentat_session.State.latest_model (state t))
                 with
                 | Error d -> ack (Error (unavailable (Error.Configuration d)))
-                | Ok cfg -> (
-                    match declare_prompt_goal t ~turn ~goal with
-                    | Error e -> ack (Error e)
-                    | Ok () ->
-                        (* Trigger provenance is attribution, never authority:
-                           it selects the minted origin and changes nothing
-                           else about admission. *)
-                        let origin =
-                          match triggered with
-                          | None -> Mentat_session.Turn.Origin.User
-                          | Some
-                              { Mentat_protocol.Command.charter; digest; key }
-                            ->
-                              Mentat_session.Turn.Origin.triggered ~charter
-                                ~digest ~key
-                        in
-                        start_turn t cfg
-                          ~mode:
-                            (Option.value mode
-                               ~default:Mentat_session.Contract.Mode.Build)
-                          ~options ~max_steps ~id:turn ~input ~origin
-                          ~output_schema
-                          ~ack:(fun r ->
-                            ack (Result.map_error (fun e -> unavailable e) r))))
-          ))
+                | Ok cfg ->
+                    (* Trigger provenance is attribution, never authority: it
+                       selects the minted origin and changes nothing else
+                       about admission. *)
+                    let origin =
+                      match triggered with
+                      | None -> Mentat_session.Turn.Origin.User
+                      | Some { Mentat_protocol.Command.charter; digest; key } ->
+                          Mentat_session.Turn.Origin.triggered ~charter ~digest
+                            ~key
+                    in
+                    start_turn t cfg
+                      ~mode:
+                        (Option.value mode
+                           ~default:Mentat_session.Contract.Mode.Build)
+                      ~options ~max_steps ~id:turn ~input ~origin ~output_schema
+                      ~ack:(fun r ->
+                        ack (Result.map_error (fun e -> unavailable e) r)))))
 
 and answer_decision t ~decision ~answer ~by ~ack =
   match t.phase with
@@ -1802,7 +1670,7 @@ let serve t =
       let msg = next_msg t in
       contain t (fun () -> handle_any t msg ~mid_effect:false);
       (* The idle boundary: a command that landed on an idle session —
-         a queue entry, a goal resume — may make an admission available now
+         a queue entry — may make an admission available now
          rather than at a settle that already passed. It reaches the same
          adapter and hook code a settle does (a queued spawn attaches its
          child here), so it is contained identically. *)
@@ -1860,7 +1728,7 @@ let controller t =
       contain t (fun () ->
           match active_turn t with
           | None ->
-              (* Preserve crash-time queue/goal admission without speculatively
+              (* Preserve crash-time queue admission without speculatively
                  selecting a Build execution merely to recover an idle head. *)
               admission t
           | Some turn -> (

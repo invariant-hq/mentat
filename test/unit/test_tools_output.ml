@@ -1114,18 +1114,6 @@ let argument_projections =
       json_object
         [ ("child", Json.string "worker-2"); ("message", Json.string "more") ],
       Some "worker-2" );
-    ( "update goal objective",
-      "update_goal",
-      json_object
-        [
-          ("action", Json.string "declare");
-          ("objective", Json.string "Ship the header argument");
-        ],
-      Some "Ship the header argument" );
-    ( "update goal action fallback",
-      "update_goal",
-      json_object [ ("action", Json.string "clear") ],
-      Some "clear" );
     ( "apply patch has no member argument",
       "apply_patch",
       json_object [ ("patch", Json.string "*** Begin Patch\n*** End Patch\n") ],

@@ -12,9 +12,6 @@ type t =
   | Turn_id_reused of Mentat_session.Turn.Id.t
   | Decision_not_pending of Mentat_session.Decision.Id.t
   | Already_resolved of Mentat_session.Decision.Id.t
-  | Goal_not_found of Mentat_session.Id.t
-  | Goal_is_not_current of Mentat_session.Goal.Id.t
-  | Goal_transition_not_allowed of Mentat_session.Goal.Id.t
   | Invalid_title
   | Invalid_api_key
   | Archived of Mentat_session.Id.t
@@ -45,11 +42,6 @@ let equal a b =
       Mentat_session.Decision.Id.equal a b
   | Already_resolved a, Already_resolved b ->
       Mentat_session.Decision.Id.equal a b
-  | Goal_not_found a, Goal_not_found b -> Mentat_session.Id.equal a b
-  | Goal_is_not_current a, Goal_is_not_current b ->
-      Mentat_session.Goal.Id.equal a b
-  | Goal_transition_not_allowed a, Goal_transition_not_allowed b ->
-      Mentat_session.Goal.Id.equal a b
   | Invalid_title, Invalid_title | Invalid_api_key, Invalid_api_key -> true
   | Archived a, Archived b -> Mentat_session.Id.equal a b
   | Deleted a, Deleted b -> Mentat_session.Id.equal a b
@@ -59,8 +51,7 @@ let equal a b =
   | Unavailable a, Unavailable b -> Mentat_diagnostic.equal a b
   | ( ( Busy _ | Session_not_found _ | Invalid_position _ | No_active_turn _
       | Active_turn_exists _ | Turn_id_reused _ | Decision_not_pending _
-      | Already_resolved _ | Goal_not_found _ | Goal_is_not_current _
-      | Goal_transition_not_allowed _ | Invalid_title | Invalid_api_key
+      | Already_resolved _ | Invalid_title | Invalid_api_key
       | Archived _ | Deleted _ | Unknown_command _ | File_unresolved _
       | Unavailable _ ),
       _ ) ->
@@ -99,17 +90,6 @@ let diagnostic = function
       Mentat_diagnostic.make
         (strf "decision %a is already resolved" Mentat_session.Decision.Id.pp
            decision)
-  | Goal_not_found session ->
-      Mentat_diagnostic.make
-        (strf "session %a has no declared goal" Mentat_session.Id.pp session)
-  | Goal_is_not_current goal ->
-      Mentat_diagnostic.make
-        (strf "goal %a is not the session's current goal"
-           Mentat_session.Goal.Id.pp goal)
-  | Goal_transition_not_allowed goal ->
-      Mentat_diagnostic.make
-        (strf "the requested transition of goal %a is not allowed"
-           Mentat_session.Goal.Id.pp goal)
   | Invalid_title -> Mentat_diagnostic.make "title must not be empty"
   | Invalid_api_key -> Mentat_diagnostic.make "API key must not be empty"
   | Archived session ->
@@ -144,12 +124,6 @@ let jsont =
   let decision_only kind tag inj proj =
     Jsont.Object.map ~kind inj
     |> Jsont.Object.mem "decision" Mentat_session.Decision.Id.jsont ~enc:proj
-    |> Jsont.Object.error_unknown |> Jsont.Object.finish
-    |> Jsont.Object.Case.map tag ~dec:Fun.id
-  in
-  let goal_only kind tag inj proj =
-    Jsont.Object.map ~kind inj
-    |> Jsont.Object.mem "goal" Mentat_session.Goal.Id.jsont ~enc:proj
     |> Jsont.Object.error_unknown |> Jsont.Object.finish
     |> Jsont.Object.Case.map tag ~dec:Fun.id
   in
@@ -203,21 +177,6 @@ let jsont =
     decision_only "already-resolved error" "already_resolved"
       (fun decision -> Already_resolved decision)
       (function Already_resolved decision -> decision | _ -> assert false)
-  in
-  let goal_not_found_case =
-    session_only "goal-not-found error" "goal_not_found"
-      (fun session -> Goal_not_found session)
-      (function Goal_not_found session -> session | _ -> assert false)
-  in
-  let goal_is_not_current_case =
-    goal_only "goal-is-not-current error" "goal_is_not_current"
-      (fun goal -> Goal_is_not_current goal)
-      (function Goal_is_not_current goal -> goal | _ -> assert false)
-  in
-  let goal_transition_not_allowed_case =
-    goal_only "goal-transition-not-allowed error" "goal_transition_not_allowed"
-      (fun goal -> Goal_transition_not_allowed goal)
-      (function Goal_transition_not_allowed goal -> goal | _ -> assert false)
   in
   let invalid_title_case =
     Jsont.Object.map ~kind:"invalid-title error" Invalid_title
@@ -280,9 +239,6 @@ let jsont =
         turn_id_reused_case;
         decision_not_pending_case;
         already_resolved_case;
-        goal_not_found_case;
-        goal_is_not_current_case;
-        goal_transition_not_allowed_case;
         invalid_title_case;
         invalid_api_key_case;
         archived_case;
@@ -304,11 +260,6 @@ let jsont =
     | Decision_not_pending _ as e ->
         Jsont.Object.Case.value decision_not_pending_case e
     | Already_resolved _ as e -> Jsont.Object.Case.value already_resolved_case e
-    | Goal_not_found _ as e -> Jsont.Object.Case.value goal_not_found_case e
-    | Goal_is_not_current _ as e ->
-        Jsont.Object.Case.value goal_is_not_current_case e
-    | Goal_transition_not_allowed _ as e ->
-        Jsont.Object.Case.value goal_transition_not_allowed_case e
     | Invalid_title as e -> Jsont.Object.Case.value invalid_title_case e
     | Invalid_api_key as e -> Jsont.Object.Case.value invalid_api_key_case e
     | Archived _ as e -> Jsont.Object.Case.value archived_case e

@@ -45,14 +45,6 @@ type t =
           kind. *)
   | Already_resolved of Mentat_session.Decision.Id.t
       (** A later answer lost to the first valid one. *)
-  | Goal_not_found of Mentat_session.Id.t
-      (** A goal command targeted a session with no declared goal. *)
-  | Goal_is_not_current of Mentat_session.Goal.Id.t
-      (** A goal command named a goal that is not the session's current one — a
-          replaced or cleared goal the user never saw. *)
-  | Goal_transition_not_allowed of Mentat_session.Goal.Id.t
-      (** A goal command's transition is not valid for the goal's current
-          status. *)
   | Invalid_title
       (** A public client lifecycle flow received an empty title. Rejected
           before its driver responder runs. *)

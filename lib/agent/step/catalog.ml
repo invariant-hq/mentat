@@ -15,8 +15,6 @@ let json_list values = Jsont.Json.list values
 let string_schema =
   json_obj [ ("type", json_string "string"); ("minLength", Jsont.Json.int 1) ]
 
-let int_schema = json_obj [ ("type", json_string "integer") ]
-
 let enum_schema values =
   json_obj
     [
@@ -39,7 +37,6 @@ let object_schema ?(required = []) properties =
 module Verb = struct
   type t =
     | Todo_write
-    | Update_goal
     | Ask_user
     | Propose_plan
     | Spawn
@@ -50,7 +47,6 @@ module Verb = struct
   let reserved =
     [
       Todo_write;
-      Update_goal;
       Ask_user;
       Propose_plan;
       Spawn;
@@ -61,7 +57,6 @@ module Verb = struct
 
   let name = function
     | Todo_write -> "todo_write"
-    | Update_goal -> "update_goal"
     | Ask_user -> "ask_user"
     | Propose_plan -> "propose_plan"
     | Spawn -> "spawn"
@@ -71,7 +66,6 @@ module Verb = struct
 
   let description = function
     | Todo_write -> Mentat_prompts.Tools.todo_write
-    | Update_goal -> Mentat_prompts.Tools.update_goal
     | Ask_user -> Mentat_prompts.Tools.ask_user
     | Propose_plan -> Mentat_prompts.Tools.propose_plan
     | Spawn -> Mentat_prompts.Tools.spawn
@@ -95,25 +89,6 @@ module Verb = struct
                      );
                      ("priority", enum_schema [ "high"; "medium"; "low" ]);
                    ]) );
-          ]
-    | Update_goal ->
-        object_schema ~required:[ "action" ]
-          [
-            ( "action",
-              enum_schema
-                [
-                  "declare";
-                  "pause";
-                  "resume";
-                  "edit";
-                  "clear";
-                  "complete";
-                  "block";
-                ] );
-            ("objective", string_schema);
-            ("token_budget", int_schema);
-            ("summary", string_schema);
-            ("reason", string_schema);
           ]
     | Ask_user ->
         object_schema ~required:[ "prompt" ]

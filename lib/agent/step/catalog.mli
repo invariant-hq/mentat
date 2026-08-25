@@ -13,8 +13,8 @@
     Engine verbs are dispatch vocabulary, never executable tools: a verb call is
     evaluated by the step as a pure function of decoded input and session state.
     The verb spellings are stable: [spawn], [wait], [send_message], and
-    [follow_up] for delegation, [todo_write], [update_goal], [ask_user], and
-    [propose_plan] for the product-native verbs. *)
+    [follow_up] for delegation, [todo_write], [ask_user], and [propose_plan]
+    for the product-native verbs. *)
 
 (** {1:verbs Engine verbs} *)
 
@@ -22,7 +22,6 @@ module Verb : sig
   (** The type for the engine's built-in dispatch verbs. *)
   type t =
     | Todo_write  (** Replace the whole task board. *)
-    | Update_goal  (** Advance the goal lifecycle. *)
     | Ask_user  (** Park a reviewer question decision. *)
     | Propose_plan  (** Park a plan-proposal decision. *)
     | Spawn  (** Reserve and record a child delegation. *)

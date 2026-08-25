@@ -2,34 +2,13 @@
  (name main)
  (public_name mentat)
  (package mentat)
+ (flags (:standard -open Mentat_boot))
  (modules
-  output
-  exit_status
-  fs
-  argv
-  image_attach
-  image_clipboard
-  image_downscale
-  media_strip
-  user_dirs
-  log_setup
-  trust_store
-  config_io
-  session_meta
-  store_adapter
-  provider_adapter
-  workspace_notices
-  workspace_watch
-  workspace_adapter
-  dune_watch
-  dune_lint
-  tool_boot
-  review_git
-  composition
-  daemon
+  daemon_server
   auto_title
   session_locate
   session_html
+  image_clipboard
   cli_common
   cli_trust
   cli_sandbox
@@ -65,17 +44,13 @@
   jsont
   jsont.bytesrw
   logs
-  logs.threaded
   uri
+  mentat_boot
   mentat_diagnostic
   mentat_digest
   lpath
   mentat_edit
-  fswatch
   mentat_llm
-  mentat_ocaml
-  mentat_ocaml_dune_rpc
-  mentat_ocaml_toolchain
   mentat_permission
   mentat_workspace
   mentat_context
@@ -89,7 +64,6 @@
   mentat_provider
   mentat_config
   mentat_session
-  mentat_review
   mentat_store
   mentat_workspace_io
   mentat_sandbox
@@ -97,6 +71,5 @@
   mentat_mutation
   textdiff
   mentat_tool
-  mtime
   mentat_tools
   mentat_tui))

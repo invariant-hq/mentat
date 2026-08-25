@@ -2194,15 +2194,9 @@ let config_callback t ~product_rules :
              (Mentat_session.Id.to_string session))
           ~default:Mentat_permission.Review_behavior.Enforce
       in
-      (* [continuation_turn_limit] caps goal-driven continuation turns. Goals
-         are retired: every surface that could declare, complete, pause, or
-         clear one is gone, so only a legacy session with a live goal can
-         still consume this bound — it winds down in one continuation turn.
-         The parameter is deleted with the rest of the goal vocabulary. *)
       Ok
         (Engine_config.make ~model ~options ~policy ~review ?max_steps
-           ?compaction_pressure_tokens ~continuation_turn_limit:(Some 1)
-           ~max_spawn_depth ~max_exchanges ())
+           ?compaction_pressure_tokens ~max_spawn_depth ~max_exchanges ())
 
 (* The Build editor-tool family decision, declared once here (the composition
    root owns product policy) and consumed by the real assembly below and by the

@@ -345,12 +345,13 @@
   eio_main
   unix))
 
-; The review-git projection lives in bin/ (executable-side adapter, RFC 0009);
-; its source is copied in so its pure closure-injected unit tests keep running
-; as a fast unit suite without linking the executable.
+; The review-git projection lives in bin/boot (executable-side adapter, RFC
+; 0009); its source is copied in so its pure closure-injected unit tests keep
+; running as a fast unit suite without linking the boot library's engine
+; closure.
 
 (copy_files
- (files ../../bin/review_git.{ml,mli}))
+ (files ../../bin/boot/review_git.{ml,mli}))
 
 (test
  (name test_review_git)

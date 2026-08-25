@@ -57,7 +57,6 @@ module Origin : sig
   (** The type for why a turn was admitted. *)
   type t =
     | User  (** A user prompt started the turn. *)
-    | Goal_continuation  (** The engine continued an active goal. *)
     | Queued of Queue.Id.t
         (** The turn admits queued entry [id]; admission consumes it. *)
     | Triggered of { charter : string; digest : string; key : string }
@@ -73,17 +72,15 @@ module Origin : sig
         (** A user-requested manual compaction. The turn accepts only
             {!Input.Continue}, issues exactly one summary provider call,
             installs the compaction fact, and settles — it records no user
-            speech, is transparent to goal continuation, and its turn-boundary
-            facts are not projected (only its [Compaction] fact is). Automatic
+            speech, and its turn-boundary facts are not projected (only its
+            [Compaction] fact is). Automatic
             compaction never uses this origin: it is a prelude within the
             requesting turn. *)
     | Step_limit_wind_down
         (** The one wrap-up turn the engine admits after a turn settled
             {!Outcome.Step_limit}: it asks the model to park what is in flight
             and state where the work stands. A turn carrying this origin never
-            admits another wind-down, so the mechanism cannot repeat, and it is
-            not a goal turn — it neither spends the goal's budget nor consumes
-            its continuation allowance. *)
+            admits another wind-down, so the mechanism cannot repeat. *)
 
   val triggered : charter:string -> digest:string -> key:string -> t
   (** [triggered ~charter ~digest ~key] is {!Triggered} with every member

@@ -6,14 +6,13 @@
 (** Durable sessions and pure replay state — the journal.
 
     [mentat.session] owns the sole durable truth of a conversation. A session is
-    an ordered sequence of eighteen inert {!Event.t} facts, and everything a
+    an ordered sequence of seventeen inert {!Event.t} facts, and everything a
     reader needs is a pure fold of that sequence: {!State.t} reconstructs the
     transcript, the single open suspension, the decisions, and the product
     boards deterministically, with no clock, randomness, or IO — byte-identical
     events replay to equal states. The library also defines the sealed turn
     {!Contract.t} and the domain vocabularies whose facts live in the journal —
-    decisions, plans, tasks, goals, delegations, the next-turn queue, and
-    compaction.
+    decisions, plans, tasks, delegations, the next-turn queue, and compaction.
 
     {b What the journal deliberately does not own.} Execution belongs to the
     engine ([mentat.session.run]): this library records that a provider call or
@@ -74,9 +73,6 @@ module Decision = Decision
 
 module Task = Task
 (** The durable task board. *)
-
-module Goal = Goal
-(** Session goals. *)
 
 module Delegation = Delegation
 (** Subagent delegation edges. *)
@@ -175,8 +171,8 @@ val make :
 (** [make ~id ~metadata ~events] is a session reconstructed from saved parts, or
     [Error (Replay e)] if [events] is not a valid replay. Fork metadata must
     name an in-range copied prefix, and the events immediately after that prefix
-    must contain the entire reset suffix generated from its queue, goal, and
-    live delegation projections. Any missing or different reset event, root
+    must contain the entire reset suffix generated from its queue and live
+    delegation projections. Any missing or different reset event, root
     detachment, or later detachment returns its structured branch error. *)
 
 val id : t -> Id.t
@@ -412,9 +408,6 @@ module Session_view : sig
   (** [last_text t] is the session-wide latest model prose ({!State.final_text})
       — the drill-in's "last activity", distinct from {!Summary.preview}. *)
 
-  val goal : t -> Goal.t option
-  (** [goal t] is the current goal projection, if a goal is declared. *)
-
   val metrics : t -> Metrics.t
   (** [metrics t] is the raw session spend and activity. A context-window fill
       percentage needs the model's provider-owned context limit and is computed
@@ -504,8 +497,7 @@ val fork :
   (t, Error.t) result
 (** [fork ~id ?title ~cwd ~created_at t] is a new active session with [t]'s
     events as a copied prefix plus a branch reset suffix: a
-    {!Queue.Update.Cleared} when the prefix's queue is non-empty, a goal
-    {!Goal.Update.Pause} when the goal is pausable, and
+    {!Queue.Update.Cleared} when the prefix's queue is non-empty, and
     {!Event.Delegations_detached} when the prefix owns delegated children. The
     branch retains historical child calls and results but starts with no live
     child ownership. Its lineage points to [t] with [copied_events] set to the

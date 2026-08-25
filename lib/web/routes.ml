@@ -48,8 +48,7 @@ let status_of_error (error : Mentat_protocol.Error.t) =
   | File_unresolved _ ->
       400
   | Busy _ | Active_turn_exists _ | Turn_id_reused _ | No_active_turn _
-  | Decision_not_pending _ | Already_resolved _ | Goal_not_found _
-  | Goal_is_not_current _ | Goal_transition_not_allowed _ ->
+  | Decision_not_pending _ | Already_resolved _ ->
       409
   | Unavailable _ -> 503
 

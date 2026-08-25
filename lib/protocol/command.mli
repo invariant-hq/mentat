@@ -3,23 +3,20 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(** Session intents — the ten-verb command sum.
+(** Session intents — the six-verb command sum.
 
     A command is admitted against one session and completes as a committed fact
     on that session's feed; that membership test is why the sum is exactly the
-    ten verbs below and nothing else. They group presentationally by completion
-    owner — conversation verbs complete as turn, decision, or queue facts, goal
-    verbs as the one goal journal fact — but the type is one flat sum: the
-    grouping carries no operation and the engine's command-to- action table
-    matches every verb anyway. Frontends use the validating constructors and
-    never match the private sum. Completions arrive on the feed with their
-    natural correlation id (turn id, decision id) — no receipt vocabulary
-    exists. {!prompt} runs from a [Turn_started] to a [Turn_settled];
-    {!answer_decision} yields a [Decision_resolved] and its consequents;
-    {!interrupt} yields the forced settlements (a [Turn_settled] with an
-    [Interrupted] outcome, any ambiguous or interrupted tool result) while the
-    durable interrupt request itself projects to no fact; the queue verbs
-    complete as a [Journal_queue] and the goal verbs as a [Journal_goal].
+    six verbs below and nothing else. The type is one flat sum: the engine's
+    command-to-action table matches every verb anyway. Frontends use the
+    validating constructors and never match the private sum. Completions arrive
+    on the feed with their natural correlation id (turn id, decision id) — no
+    receipt vocabulary exists. {!prompt} runs from a [Turn_started] to a
+    [Turn_settled]; {!answer_decision} yields a [Decision_resolved] and its
+    consequents; {!interrupt} yields the forced settlements (a [Turn_settled]
+    with an [Interrupted] outcome, any ambiguous or interrupted tool result)
+    while the durable interrupt request itself projects to no fact; the queue
+    verbs complete as a [Journal_queue].
 
     {b Commands carry no principal.} The answering principal is named only when
     a decision is resolved, never on the intent itself.
@@ -35,8 +32,8 @@
     {!Mentat_session.Turn.Input.User} after admission. The engine-only
     {!Mentat_session.Turn.Input.Continue} and
     {!Mentat_session.Turn.Input.Plan_build} are deliberately not command-
-    constructible: goal continuation and exact approved-plan admission are
-    engine policy, not client intents. *)
+    constructible: exact approved-plan admission is engine policy, not a client
+    intent. *)
 
 (** {1:invalid Construction failures} *)
 
@@ -57,9 +54,6 @@ module Invalid : sig
         (** {!replace_queued} was given no replacement entries. *)
     | Empty_queue_entry of int
         (** Entry at the zero-based index was an empty content list. *)
-    | Empty_goal_objective  (** {!goal_edit}'s [objective] was empty. *)
-    | Negative_goal_budget of int
-        (** {!goal_resume}'s [budget] was negative. *)
     | Empty_triggered_member of string
         (** {!prompt}'s [triggered] had the named member empty. *)
     | Output_schema_not_object
@@ -79,12 +73,6 @@ end
 
 (** {1:commands Commands} *)
 
-type goal = { objective : string; token_budget : int option }
-(** A goal declared at turn start. Carried on {!Prompt} rather than a create
-    verb: goals are minted engine-side, so the client requests a declaration and
-    the engine mints the id at admission. [objective] is non-empty;
-    [token_budget], when present, is non-negative. *)
-
 type triggered = { charter : string; digest : string; key : string }
 (** Trigger provenance declared at turn start: the charter name, the sealed
     charter-content digest, and the trigger key a trigger host acted on. When
@@ -103,11 +91,6 @@ type t = private
       options : Mentat_llm.Request.Options.t option;
       mode : Mentat_session.Contract.Mode.t option;
       max_steps : int option;
-      goal : goal option;
-          (** An optional goal to declare with this turn. When present, the
-              engine mints the goal id at admission and appends the declaration
-              before the model plans; a second declaration on a session with a
-              live goal fails admission. *)
       triggered : triggered option;
           (** Optional trigger provenance. When present, the engine mints the
               turn's origin as {!Mentat_session.Turn.Origin.Triggered}; absent,
@@ -143,27 +126,6 @@ type t = private
       inputs : Mentat_llm.Content.t list list;
     }  (** Replaces the pending queue with the ordered non-empty [inputs]. *)
   | Clear_queued of { session : Mentat_session.Id.t }
-  | Goal_pause of {
-      session : Mentat_session.Id.t;
-      goal : Mentat_session.Goal.Id.t;
-    }
-  | Goal_edit of {
-      session : Mentat_session.Id.t;
-      goal : Mentat_session.Goal.Id.t;
-      objective : string;
-    }
-  | Goal_resume of {
-      session : Mentat_session.Id.t;
-      goal : Mentat_session.Goal.Id.t;
-      budget : int option;
-    }
-  | Goal_clear of {
-      session : Mentat_session.Id.t;
-      goal : Mentat_session.Goal.Id.t;
-    }
-      (** Goal verbs carry the {!Mentat_session.Goal.Id.t} they act on: a goal
-          is replaceable, so a delayed command must name the goal the user saw,
-          or the engine answers {!Error.Goal_is_not_current}. *)
 
 (** {1:constructors Constructors}
 
@@ -178,18 +140,15 @@ val prompt :
   ?options:Mentat_llm.Request.Options.t ->
   ?mode:Mentat_session.Contract.Mode.t ->
   ?max_steps:int ->
-  ?goal:goal ->
   ?triggered:triggered ->
   ?output_schema:Jsont.json ->
   unit ->
   (t, Invalid.t) result
 (** [prompt ~session ~turn ~input ()] is a prompt command, or a failure if
     [input] is empty ({!Invalid.Empty_prompt_input}), [max_steps] is present and
-    not positive ({!Invalid.Non_positive_max_steps}), [goal]'s objective is
-    empty ({!Invalid.Empty_goal_objective}), [goal]'s token budget is negative
-    ({!Invalid.Negative_goal_budget}), [triggered] has an empty member
-    ({!Invalid.Empty_triggered_member}), or [output_schema] is present but not a
-    JSON object ({!Invalid.Output_schema_not_object}). *)
+    not positive ({!Invalid.Non_positive_max_steps}), [triggered] has an empty
+    member ({!Invalid.Empty_triggered_member}), or [output_schema] is present
+    but not a JSON object ({!Invalid.Output_schema_not_object}). *)
 
 val answer_decision :
   session:Mentat_session.Id.t ->
@@ -224,32 +183,6 @@ val replace_queued :
 
 val clear_queued : session:Mentat_session.Id.t -> t
 (** [clear_queued ~session] empties the pending queue. *)
-
-val goal_pause :
-  session:Mentat_session.Id.t -> goal:Mentat_session.Goal.Id.t -> t
-(** [goal_pause ~session ~goal] pauses [goal]. *)
-
-val goal_edit :
-  session:Mentat_session.Id.t ->
-  goal:Mentat_session.Goal.Id.t ->
-  objective:string ->
-  (t, Invalid.t) result
-(** [goal_edit ~session ~goal ~objective] edits [goal]'s objective, or
-    {!Invalid.Empty_goal_objective} if [objective] is empty. *)
-
-val goal_resume :
-  session:Mentat_session.Id.t ->
-  goal:Mentat_session.Goal.Id.t ->
-  ?budget:int ->
-  unit ->
-  (t, Invalid.t) result
-(** [goal_resume ~session ~goal ?budget ()] resumes [goal], optionally resetting
-    its token budget, or {!Invalid.Negative_goal_budget} if [budget] is
-    negative. *)
-
-val goal_clear :
-  session:Mentat_session.Id.t -> goal:Mentat_session.Goal.Id.t -> t
-(** [goal_clear ~session ~goal] clears [goal]. *)
 
 (** {1:queries Queries} *)
 

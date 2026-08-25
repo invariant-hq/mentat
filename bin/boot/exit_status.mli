@@ -77,7 +77,7 @@ val of_protocol_error :
 (** [of_protocol_error e] maps a client operation error onto the contract:
     caller/protocol misuse ([Invalid_position], [Turn_id_reused],
     [No_active_turn], [Active_turn_exists], [Decision_not_pending],
-    [Already_resolved], [Goal_*]) is a {!Usage_error}; everything else ([Busy],
+    [Already_resolved]) is a {!Usage_error}; everything else ([Busy],
     [Session_not_found], [Archived], [Deleted], [Unavailable]) is a
     {!Runtime_error}. Rendering is always [Error.diagnostic].
 

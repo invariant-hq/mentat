@@ -28,9 +28,9 @@
     later one. A notice is an external observation, not a projection of the
     transcript, so storing it does not violate the
     derived-facts-are-never-stored law, which binds only genuinely-derived
-    facts. Engine-authored prelude items — goal reminders, subagent parent
-    messages — are {e not} notices: the engine constructs none of these and
-    carries them as the step's own prelude input.
+    facts. Engine-authored prelude items — subagent parent messages — are
+    {e not} notices: the engine constructs none of these and carries them as
+    the step's own prelude input.
 
     Notices are pure data and live in this pure library because both notice
     consumers are pure: the engine names the type through the [WORKSPACE] port

@@ -18,7 +18,6 @@ module Session_turn = Turn
 module Session_tool_claim = Tool_claim
 module Session_decision = Decision
 module Session_compaction = Compaction
-module Session_goal = Goal
 module Session_delegation = Delegation
 module Session_queue = Queue
 
@@ -86,13 +85,6 @@ module Error = struct
       | Dropped_pending_call of { call_id : string }
   end
 
-  module Goal = struct
-    type t =
-      | Unfinished of Goal.Id.t
-      | Unknown of Goal.Id.t
-      | Illegal_transition of { id : Goal.Id.t; from_status : string }
-  end
-
   module Delegation = struct
     type t =
       | Duplicate of Delegation.Id.t
@@ -109,7 +101,6 @@ module Error = struct
     | Tool_claim of Tool_claim.t
     | Decision of Decision.t
     | Compaction of Compaction.t
-    | Goal of Goal.t
     | Delegation of Delegation.t
     | Queue of Queue.t
     | Undo of Undo.t
@@ -213,17 +204,6 @@ module Error = struct
            view"
           call_id
 
-  let goal_message = function
-    | Goal.Unfinished id ->
-        Format.asprintf "goal declare while unfinished: %a" Session_goal.Id.pp
-          id
-    | Goal.Unknown id ->
-        Format.asprintf "goal update targets unknown goal: %a"
-          Session_goal.Id.pp id
-    | Goal.Illegal_transition { id; from_status } ->
-        Format.asprintf "illegal goal transition from %s: %a" from_status
-          Session_goal.Id.pp id
-
   let delegation_message = function
     | Delegation.Duplicate id ->
         Format.asprintf "duplicate delegation id: %a" Session_delegation.Id.pp
@@ -257,7 +237,6 @@ module Error = struct
     | Tool_claim error -> tool_claim_message error
     | Decision error -> decision_message error
     | Compaction error -> compaction_message error
-    | Goal error -> goal_message error
     | Delegation error -> delegation_message error
     | Queue error -> queue_message error
     | Undo error -> undo_message error
@@ -320,22 +299,6 @@ type suspension =
   | Tool of Tool_claim.Started.t
   | Decision of Decision.Requested.t
 
-type goal_state = {
-  id : Goal.Id.t;
-  objective : string;
-  status : Goal.Status.t;
-  token_budget : int option;
-  declared_after : int;
-      (* Number of turns already started when this goal was declared. Goal
-         accounting folds only over turns after this point, so a later goal never
-         inherits an earlier goal's continuation spend. *)
-  objective_edited_after : int option;
-      (* Number of turns already started when this goal's objective was last
-         edited, or [None] since the last declaration. A goal-continuation turn
-         started at or after this point re-enters on the edited objective, so the
-         edit is announced only until such a turn exists. *)
-}
-
 type t = {
   full : Transcript.t;
   latest_compaction : Compaction.t option;
@@ -379,7 +342,6 @@ type t = {
   decisions : decision_record Decision_map.t;
   grants : Policy.Grants.t;
   permission_rules : Policy.Rule.t list;
-  goal : goal_state option;
   board : Task.Board.t;
   queue : Queue.Entry.t list;
   enqueued_ever : Queue_id_set.t;
@@ -412,7 +374,6 @@ let empty =
     decisions = Decision_map.empty;
     grants = Policy.Grants.empty;
     permission_rules = [];
-    goal = None;
     board = Task.Board.empty;
     queue = [];
     enqueued_ever = Queue_id_set.empty;
@@ -621,48 +582,6 @@ let enqueue_recorded id t = Queue_id_set.mem id t.enqueued_ever
 let delegations t = List.rev t.delegations_rev
 let suspension t = t.suspension
 
-let goal t =
-  Option.map
-    (fun g ->
-      (* Only turns started after this goal's declaration contribute to its
-         accounting: drop the prefix that predates it. *)
-      let window = List.drop g.declared_after (List.rev t.turn_order_rev) in
-      let continuation_turns, tokens_used =
-        List.fold_left
-          (fun (count, tokens) id ->
-            match Turn_map.find_opt id t.turns with
-            | Some r when Turn.origin r.turn = Turn.Origin.Goal_continuation ->
-                (count + 1, tokens + r.usage_total)
-            | Some _ | None -> (count, tokens))
-          (0, 0) window
-      in
-      Goal.make ~id:g.id ~objective:g.objective ~status:g.status
-        ~token_budget:g.token_budget ~tokens_used ~continuation_turns)
-    t.goal
-
-let goal_objective_edit_pending t =
-  match t.goal with
-  | None -> false
-  | Some g -> (
-      Goal.Status.equal g.status Goal.Status.Active
-      &&
-      match g.objective_edited_after with
-      | None -> false
-      | Some edited_after ->
-          (* No goal-continuation turn has re-entered since the edit: every turn
-             started at or after the edit epoch is a non-continuation turn. *)
-          List.drop edited_after (List.rev t.turn_order_rev)
-          |> List.for_all (fun id ->
-              match Turn_map.find_opt id t.turns with
-              | Some r -> (
-                  match Turn.origin r.turn with
-                  | Turn.Origin.Goal_continuation -> false
-                  | Turn.Origin.User | Turn.Origin.Queued _
-                  | Turn.Origin.Triggered _ | Turn.Origin.Plan_build
-                  | Turn.Origin.Compaction | Turn.Origin.Step_limit_wind_down ->
-                      true)
-              | None -> true))
-
 let tool_claims t =
   List.filter_map
     (fun id ->
@@ -683,7 +602,6 @@ let provider_error e = Error (Error.Provider e)
 let tool_claim_error e = Error (Error.Tool_claim e)
 let decision_error e = Error (Error.Decision e)
 let compaction_error e = Error (Error.Compaction e)
-let goal_error e = Error (Error.Goal e)
 let delegation_error e = Error (Error.Delegation e)
 let queue_error e = Error (Error.Queue e)
 let undo_error e = Error (Error.Undo e)
@@ -744,8 +662,7 @@ let apply_turn_started turn t =
               | None -> turn_error (Error.Turn.Not_plan_build id))
           | Turn.Origin.Plan_build, (Turn.Input.User _ | Turn.Input.Continue) ->
               turn_error (Error.Turn.Plan_build_mismatch id)
-          | ( ( Turn.Origin.User | Turn.Origin.Goal_continuation
-              | Turn.Origin.Queued _ | Turn.Origin.Triggered _
+          | ( ( Turn.Origin.User | Turn.Origin.Queued _ | Turn.Origin.Triggered _
               | Turn.Origin.Compaction | Turn.Origin.Step_limit_wind_down ),
               Turn.Input.Plan_build _ ) ->
               turn_error (Error.Turn.Unexpected_plan_build_input id)
@@ -768,8 +685,8 @@ let apply_turn_started turn t =
                         t.queue;
                   }
               else turn_error (Error.Turn.Unknown_queue_entry entry)
-          | ( ( Turn.Origin.User | Turn.Origin.Goal_continuation
-              | Turn.Origin.Triggered _ | Turn.Origin.Step_limit_wind_down ),
+          | ( ( Turn.Origin.User | Turn.Origin.Triggered _
+              | Turn.Origin.Step_limit_wind_down ),
               (Turn.Input.User _ | Turn.Input.Continue) ) ->
               Ok t
         in
@@ -1427,105 +1344,6 @@ let apply_compaction_installed compaction t =
 
 let apply_tasks_replaced board t = Ok { t with board }
 
-let goal_status_message = function
-  | Goal.Status.Active -> "active"
-  | Goal.Status.Paused -> "paused"
-  | Goal.Status.Blocked _ -> "blocked"
-  | Goal.Status.Budget_limited -> "budget-limited"
-  | Goal.Status.Completed _ -> "completed"
-  | Goal.Status.Cleared -> "cleared"
-
-let apply_goal_updated update t =
-  match update with
-  | Goal.Update.Declare { id; objective; token_budget } -> (
-      match t.goal with
-      | Some g when not (Goal.Status.is_terminal g.status) ->
-          goal_error (Error.Goal.Unfinished g.id)
-      | Some _ | None ->
-          Ok
-            {
-              t with
-              goal =
-                Some
-                  {
-                    id;
-                    objective;
-                    status = Goal.Status.Active;
-                    token_budget;
-                    declared_after = List.length t.turn_order_rev;
-                    objective_edited_after = None;
-                  };
-            })
-  | Goal.Update.Pause _ | Goal.Update.Resume _ | Goal.Update.Edit _
-  | Goal.Update.Clear _ | Goal.Update.Complete _ | Goal.Update.Block _
-  | Goal.Update.Budget_limited _ -> (
-      let target = Goal.Update.id update in
-      match t.goal with
-      | None -> goal_error (Error.Goal.Unknown target)
-      | Some g when not (Goal.Id.equal g.id target) ->
-          goal_error (Error.Goal.Unknown target)
-      | Some g -> (
-          let illegal () =
-            goal_error
-              (Error.Goal.Illegal_transition
-                 { id = g.id; from_status = goal_status_message g.status })
-          in
-          let updated status = Ok { t with goal = Some { g with status } } in
-          let non_terminal () = not (Goal.Status.is_terminal g.status) in
-          match update with
-          | Goal.Update.Pause _ -> (
-              match g.status with
-              | Goal.Status.Active -> updated Goal.Status.Paused
-              | _ -> illegal ())
-          | Goal.Update.Resume { token_budget; _ } -> (
-              match g.status with
-              | Goal.Status.Paused | Goal.Status.Blocked _
-              | Goal.Status.Budget_limited ->
-                  let token_budget =
-                    match token_budget with
-                    | Some _ -> token_budget
-                    | None -> g.token_budget
-                  in
-                  Ok
-                    {
-                      t with
-                      goal =
-                        Some
-                          { g with status = Goal.Status.Active; token_budget };
-                    }
-              | _ -> illegal ())
-          | Goal.Update.Edit { objective; _ } ->
-              if non_terminal () then
-                Ok
-                  {
-                    t with
-                    goal =
-                      Some
-                        {
-                          g with
-                          objective;
-                          objective_edited_after =
-                            Some (List.length t.turn_order_rev);
-                        };
-                  }
-              else illegal ()
-          | Goal.Update.Clear _ ->
-              if non_terminal () then updated Goal.Status.Cleared
-              else illegal ()
-          | Goal.Update.Complete { summary; _ } ->
-              if non_terminal () then
-                updated (Goal.Status.Completed { summary })
-              else illegal ()
-          | Goal.Update.Block { reason; _ } -> (
-              match g.status with
-              | Goal.Status.Active -> updated (Goal.Status.Blocked { reason })
-              | _ -> illegal ())
-          | Goal.Update.Budget_limited _ -> (
-              match g.status with
-              | Goal.Status.Active -> updated Goal.Status.Budget_limited
-              | _ -> illegal ())
-          | Goal.Update.Declare _ -> assert false))
-
 let apply_delegation_recorded edge t =
   match require_active_turn t with
   | Error _ as e -> e
@@ -1633,7 +1451,6 @@ let apply_step event t =
   | Event.Compaction_installed compaction ->
       apply_compaction_installed compaction t
   | Event.Tasks_replaced board -> apply_tasks_replaced board t
-  | Event.Goal_updated update -> apply_goal_updated update t
   | Event.Delegation_recorded edge -> apply_delegation_recorded edge t
   | Event.Delegations_detached -> apply_delegations_detached t
   | Event.Queue_updated update -> apply_queue_updated update t
@@ -1658,7 +1475,7 @@ let interrupt_admits = function
       false
   | Event.Turn_started _ | Event.Provider_requested _ | Event.Tool_claimed _
   | Event.Decision_requested _ | Event.Compaction_installed _
-  | Event.Tasks_replaced _ | Event.Goal_updated _ | Event.Delegation_recorded _
+  | Event.Tasks_replaced _ | Event.Delegation_recorded _
   | Event.Delegations_detached | Event.Queue_updated _
   | Event.Workspace_notice _ | Event.Undo_updated _ ->
       false

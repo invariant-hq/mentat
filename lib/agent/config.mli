@@ -31,10 +31,6 @@ type t = private {
   compaction_pressure_tokens : int option;
       (** Projected replay tokens above which a request boundary compacts;
           [None] disables automatic compaction. *)
-  continuation_turn_limit : int option;
-      (** Maximum goal-continuation turns per goal; [None] is unlimited. No
-          default: the caller must choose, so an unbounded goal is an explicit
-          decision, never an accidental runaway. *)
   max_spawn_depth : int;
       (** Delegation depth cap: a session at this depth cannot spawn. *)
   max_exchanges : int;
@@ -50,21 +46,17 @@ val make :
   ?review:Mentat_permission.Review_behavior.t ->
   ?max_steps:int ->
   ?compaction_pressure_tokens:int ->
-  continuation_turn_limit:int option ->
   ?max_spawn_depth:int ->
   ?max_exchanges:int ->
   unit ->
   t
-(** [make ~model ~continuation_turn_limit ()] is a resolved configuration.
+(** [make ~model ()] is a resolved configuration.
 
-    [continuation_turn_limit] is mandatory — [None] for an unbounded goal is a
-    deliberate choice, never a default. [options] defaults to
-    {!Mentat_llm.Request.Options.default}; [policy] to
+    [options] defaults to {!Mentat_llm.Request.Options.default}; [policy] to
     {!Mentat_permission.Policy.default}; [review] to
     {!Mentat_permission.Review_behavior.Enforce}; [max_steps] to [500];
     [compaction_pressure_tokens] to [None]; [max_spawn_depth] to [1];
     [max_exchanges] to [8].
 
     Raises [Invalid_argument] if [max_steps], [compaction_pressure_tokens],
-    [continuation_turn_limit], [max_spawn_depth], or [max_exchanges] is not
-    positive. *)
+    [max_spawn_depth], or [max_exchanges] is not positive. *)

@@ -69,8 +69,7 @@ let of_protocol_error ?(daemon_live = fun () -> false) e =
   match (e : E.t) with
   | E.Invalid_position _ | E.Turn_id_reused _ | E.No_active_turn _
   | E.Active_turn_exists _ | E.Decision_not_pending _ | E.Already_resolved _
-  | E.Goal_not_found _ | E.Goal_is_not_current _
-  | E.Goal_transition_not_allowed _ | E.Invalid_title | E.Invalid_api_key ->
+  | E.Invalid_title | E.Invalid_api_key ->
       Usage_error rendered
   | E.Busy _ ->
       (* A Busy against a live daemon: the daemon holds the fence, so point the

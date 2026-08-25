@@ -15,18 +15,18 @@
     The firewall: every event the step emits goes through the session's checked
     constructors and is validated by [State.apply] before the step returns — the
     step never hand-builds an event beyond what the session API mints, and the
-    driver appends nothing beyond the three driver-owned facts (interrupt
-    request, queue, goal), each minted by the same checked constructors and
+    driver appends nothing beyond the two driver-owned facts (interrupt
+    request, queue), each minted by the same checked constructors and
     validated by the same replay. Journal verbs, permission review, decision
     routing, admission, and compaction policy are all evaluated here; the driver
     only ever sees the action sum.
 
     Determinism: claim and decision identifiers derive inside the session
     library's constructors from stable inputs the step supplies, and the child
-    session and goal identifiers the step itself mints are digests of stable
-    inputs (the source turn and call); the step mints no entropy, reads no
-    clock, and performs no IO — the library's dependency set contains no effect
-    library. *)
+    session identifiers the step itself mints are digests of stable inputs (the
+    source turn and call); the step mints no entropy, reads no clock, and
+    performs no IO — the library's dependency set contains no effect library.
+*)
 
 module Catalog = Catalog
 (** The one dispatch surface. *)
@@ -203,47 +203,22 @@ module Admission : sig
   type t =
     | Queued of Mentat_session.Queue.Entry.t
         (** Admit this queued entry; admission consumes it. *)
-    | Continuation of Mentat_session.Turn.Input.t
-        (** Admit a goal-continuation turn with this input. *)
-    | Budget_wind_down of {
-        goal : Mentat_session.Goal.Id.t;
-        input : Mentat_session.Turn.Input.t;
-      }
-        (** The active goal's token budget is exhausted. The driver records the
-            {!Mentat_session.Goal.Update.budget_limited} transition for [goal]
-            and then admits one final goal-continuation wind-down turn with
-            [input]; the now budget-limited goal admits no further continuation.
-        *)
     | Step_limit_wind_down of Mentat_session.Turn.Input.t
         (** The last turn settled {!Mentat_session.Turn.Outcome.Step_limit}. The
             driver admits one wrap-up turn with [input] under the
             {!Mentat_session.Turn.Origin.Step_limit_wind_down} origin, which is
             what keeps a wind-down that spends its own budget from admitting
-            another. Independent of the goal: it is admitted with no goal, with
-            a goal whose continuation is exhausted, and between two turns of a
-            goal that then continues normally. *)
+            another. *)
     | Idle  (** Nothing to admit; park. *)
 end
 
-val next_admission :
-  continuation_turn_limit:int option -> Mentat_session.State.t -> Admission.t
-(** [next_admission ~continuation_turn_limit state] is what the driver admits at
-    an idle boundary: Queued beats a goal turn beats a step-limit wind-down
-    beats Idle. The driver consumes a pending exact plan approval as a
-    [Plan_build] Build turn before consulting this, so the effective admission
-    order is Plan_build, then Queued, then a goal turn, then a step-limit
-    wind-down, then Idle. A goal turn is admissible only when the state is idle
-    with an empty queue, the last settle was clean ([Completed] or
-    [Step_limit]), the goal is active, and [continuation_turn_limit] allows. The
-    goal turn is [Budget_wind_down] when the goal's budget is exhausted (a final
-    wind-down), otherwise [Continuation]; a continuation whose objective was
-    edited since the last goal turn carries the objective-updated notice
-    ({!Mentat_session.State.goal_objective_edit_pending}). A
-    [Step_limit_wind_down] displaces that continuation for exactly one turn and
-    is also admitted where no goal turn is: the goal's own budget notice, which
-    subsumes it and parks the goal, still wins. Pure; the driver enacts it by
-    calling {!start} with the origin the arm names and a host-minted id,
-    recording the budget-limited transition first for a [Budget_wind_down]. *)
+val next_admission : Mentat_session.State.t -> Admission.t
+(** [next_admission state] is what the driver admits at an idle boundary: Queued
+    beats a step-limit wind-down beats Idle. The driver consumes a pending exact
+    plan approval as a [Plan_build] Build turn before consulting this, so the
+    effective admission order is Plan_build, then Queued, then a step-limit
+    wind-down, then Idle. Pure; the driver enacts it by calling {!start} with
+    the origin the arm names and a host-minted id. *)
 
 (** {1:entry Entry points} *)
 
@@ -301,8 +276,8 @@ val compact :
     without a fact, exactly like any provider claim. The summary reason is
     {!Mentat_session.Compaction.Reason.User_requested}.
 
-    A compaction turn is transparent to goal continuation ({!next_admission}
-    skips it) and projects only the [Compaction] fact it installs, never its own
+    A compaction turn is transparent to admission ({!next_admission} skips it)
+    and projects only the [Compaction] fact it installs, never its own
     turn-boundary facts. This keeps the manual and automatic paths one path:
     nothing about the automatic prelude changes.
 

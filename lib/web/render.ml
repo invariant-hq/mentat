@@ -1017,7 +1017,6 @@ let fact ~now acc position f =
       match active_id acc.phase with
       | None -> Error Error.No_active_turn
       | Some _ -> Ok (acc, [ notice_workspace ~id notice ]))
-  | Fact.Journal_goal _ -> Ok (acc, [])
   | Fact.Journal_queue update -> Ok ({ acc with queue = Some update }, [])
   | Fact.Undo { update; dropped_turns; _ } -> (
       (* An armed undo boundary renders a seam; a released one clears it. *)

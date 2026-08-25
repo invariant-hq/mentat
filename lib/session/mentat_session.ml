@@ -16,7 +16,6 @@ module Question = Question
 module Plan = Plan
 module Decision = Decision
 module Task = Task
-module Goal = Goal
 module Delegation = Delegation
 module Queue = Queue
 module Compaction = Compaction
@@ -100,18 +99,12 @@ let reset_suffix prefix =
         | [] -> []
         | _ :: _ -> [ Event.queue_updated Queue.Update.cleared ]
       in
-      let goal_suffix =
-        match State.goal state with
-        | Some goal when Goal.Status.pausable (Goal.status goal) ->
-            [ Event.goal_updated (Goal.Update.pause ~id:(Goal.id goal)) ]
-        | Some _ | None -> []
-      in
       let delegation_suffix =
         match State.delegations state with
         | [] -> []
         | _ :: _ -> [ Event.delegations_detached ]
       in
-      Ok (queue_suffix @ goal_suffix @ delegation_suffix)
+      Ok (queue_suffix @ delegation_suffix)
 
 let copied_events metadata =
   match Metadata.fork metadata with
@@ -453,7 +446,7 @@ let event_content_lists (event : Event.t) =
   | Event.Interrupt_requested _ | Event.Turn_finished _
   | Event.Provider_requested _ | Event.Provider_settled _ | Event.Tool_claimed _
   | Event.Decision_requested _ | Event.Decision_resolved _
-  | Event.Compaction_installed _ | Event.Tasks_replaced _ | Event.Goal_updated _
+  | Event.Compaction_installed _ | Event.Tasks_replaced _
   | Event.Delegation_recorded _ | Event.Delegations_detached
   | Event.Workspace_notice _ | Event.Undo_updated _ ->
       []
@@ -587,9 +580,8 @@ let jsont =
 
 (* A manual-compaction turn is an internal mechanism, not conversational work: it
    is transparent to every session projection. Its turn-boundary facts are
-   suppressed on the feed, it does not drive goal continuation,
-   and it does not count as a round or contribute its outcome/mode/usage-as-a-turn
-   to the summary and view projections below. *)
+   suppressed on the feed, and it does not count as a round or contribute its
+   outcome/mode/usage-as-a-turn to the summary and view projections below. *)
 let is_compaction_turn turn =
   Turn.Origin.equal (Turn.origin turn) Turn.Origin.Compaction
 
@@ -795,7 +787,7 @@ let metrics session =
         | Event.Message_appended _ | Event.Provider_requested _
         | Event.Tool_claimed _ | Event.Tool_settled _
         | Event.Decision_requested _ | Event.Tasks_replaced _
-        | Event.Goal_updated _ | Event.Delegation_recorded _
+        | Event.Delegation_recorded _
         | Event.Delegations_detached | Event.Queue_updated _
         | Event.Workspace_notice _ | Event.Undo_updated _ ->
             (usage, responses, turns, rejections, denials, compaction_ids))
@@ -1091,7 +1083,6 @@ module Session_view = struct
     waiting : Waiting.t option;
     workflow_mode : Contract.Mode.t option;
     last_text : string option;
-    goal : Goal.t option;
     metrics : Metrics.t;
   }
 
@@ -1131,7 +1122,6 @@ module Session_view = struct
       waiting = waiting_of_state state;
       workflow_mode = workflow_mode_of_state state;
       last_text = State.final_text state;
-      goal = State.goal state;
       metrics = metrics session;
     }
 
@@ -1141,7 +1131,6 @@ module Session_view = struct
   let waiting t = t.waiting
   let workflow_mode t = t.workflow_mode
   let last_text t = t.last_text
-  let goal t = t.goal
   let metrics t = t.metrics
 
   let equal a b =
@@ -1151,7 +1140,6 @@ module Session_view = struct
     && Option.equal Waiting.equal a.waiting b.waiting
     && Option.equal Contract.Mode.equal a.workflow_mode b.workflow_mode
     && Option.equal String.equal a.last_text b.last_text
-    && Option.equal Goal.equal a.goal b.goal
     && Metrics.equal a.metrics b.metrics
 
   let pp ppf t =
@@ -1173,7 +1161,6 @@ module Session_view = struct
         waiting
         workflow_mode
         last_text
-        goal
         metrics
       ->
         {
@@ -1183,7 +1170,6 @@ module Session_view = struct
           waiting;
           workflow_mode;
           last_text;
-          goal;
           metrics;
         })
     |> Jsont.Object.mem "summary" Summary.jsont ~enc:(fun t -> t.summary)
@@ -1195,7 +1181,6 @@ module Session_view = struct
     |> Jsont.Object.opt_mem "workflow_mode" Contract.Mode.jsont ~enc:(fun t ->
         t.workflow_mode)
     |> Jsont.Object.opt_mem "last_text" Jsont.string ~enc:(fun t -> t.last_text)
-    |> Jsont.Object.opt_mem "goal" Goal.jsont ~enc:(fun t -> t.goal)
     |> Jsont.Object.mem "metrics" Metrics.jsont ~enc:(fun t -> t.metrics)
     |> Jsont.Object.error_unknown |> Jsont.Object.finish
 end

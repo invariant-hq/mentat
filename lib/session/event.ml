@@ -20,7 +20,6 @@ type t =
   | Decision_resolved of Decision.Resolved.t
   | Compaction_installed of Compaction.t
   | Tasks_replaced of Task.Board.t
-  | Goal_updated of Goal.Update.t
   | Delegation_recorded of Delegation.t
   | Delegations_detached
   | Queue_updated of Queue.Update.t
@@ -58,7 +57,6 @@ let decision_requested request = Decision_requested request
 let decision_resolved resolution = Decision_resolved resolution
 let compaction_installed compaction = Compaction_installed compaction
 let tasks_replaced board = Tasks_replaced board
-let goal_updated update = Goal_updated update
 let delegation_recorded edge = Delegation_recorded edge
 let delegations_detached = Delegations_detached
 let queue_updated update = Queue_updated update
@@ -82,7 +80,6 @@ let equal a b =
   | Decision_resolved a, Decision_resolved b -> Decision.Resolved.equal a b
   | Compaction_installed a, Compaction_installed b -> Compaction.equal a b
   | Tasks_replaced a, Tasks_replaced b -> Task.Board.equal a b
-  | Goal_updated a, Goal_updated b -> Goal.Update.equal a b
   | Delegation_recorded a, Delegation_recorded b -> Delegation.equal a b
   | Delegations_detached, Delegations_detached -> true
   | Queue_updated a, Queue_updated b -> Queue.Update.equal a b
@@ -100,7 +97,6 @@ let equal a b =
   | Decision_resolved _, _
   | Compaction_installed _, _
   | Tasks_replaced _, _
-  | Goal_updated _, _
   | Delegation_recorded _, _
   | Delegations_detached, _
   | Queue_updated _, _
@@ -142,8 +138,6 @@ let pp ppf = function
       Format.fprintf ppf "compaction-installed(%a)" Compaction.pp compaction
   | Tasks_replaced board ->
       Format.fprintf ppf "tasks-replaced(%a)" Task.Board.pp board
-  | Goal_updated update ->
-      Format.fprintf ppf "goal-updated(%a)" Goal.Update.pp update
   | Delegation_recorded edge ->
       Format.fprintf ppf "delegation-recorded(%a)" Delegation.pp edge
   | Delegations_detached -> Format.pp_print_string ppf "delegations-detached"
@@ -244,11 +238,6 @@ let jsont =
       (fun board -> Tasks_replaced board)
       (function Tasks_replaced board -> board | _ -> assert false)
   in
-  let goal_updated_case =
-    single "goal-updated event" "goal_updated" "update" Goal.Update.jsont
-      (fun update -> Goal_updated update)
-      (function Goal_updated update -> update | _ -> assert false)
-  in
   let delegation_recorded_case =
     single "delegation-recorded event" "delegation_recorded" "edge"
       Delegation.jsont
@@ -290,7 +279,6 @@ let jsont =
         decision_resolved_case;
         compaction_installed_case;
         tasks_replaced_case;
-        goal_updated_case;
         delegation_recorded_case;
         delegations_detached_case;
         queue_updated_case;
@@ -316,7 +304,6 @@ let jsont =
     | Compaction_installed _ as e ->
         Jsont.Object.Case.value compaction_installed_case e
     | Tasks_replaced _ as e -> Jsont.Object.Case.value tasks_replaced_case e
-    | Goal_updated _ as e -> Jsont.Object.Case.value goal_updated_case e
     | Delegation_recorded _ as e ->
         Jsont.Object.Case.value delegation_recorded_case e
     | Delegations_detached as e ->

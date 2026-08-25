@@ -159,51 +159,6 @@ let todo_input_jsont =
       i.tasks)
   |> Jsont.Object.error_unknown |> Jsont.Object.finish
 
-type goal_input = {
-  goal_action : string;
-  goal_objective : string option;
-  goal_token_budget : int option;
-  goal_summary : string option;
-  goal_reason : string option;
-}
-
-let goal_input_jsont =
-  let max_input_integer =
-    Float.min 9_007_199_254_740_991. (float_of_int Int.max_int)
-  in
-  let exact_integer =
-    let decode = function
-      | Jsont.Number (value, _)
-        when Float.is_integer value && Float.abs value <= max_input_integer ->
-          int_of_float value
-      | Jsont.Number _ | Jsont.Null _ | Jsont.Bool _ | Jsont.String _
-      | Jsont.Array _ | Jsont.Object _ ->
-          Jsont.Error.msg Jsont.Meta.none
-            "expected an integer in JSON's safe integer range"
-    in
-    Jsont.map ~kind:"integer" ~dec:decode
-      ~enc:(fun value -> Jsont.Json.int value)
-      Jsont.json
-  in
-  Jsont.Object.map ~kind:"update_goal"
-    (fun
-      goal_action goal_objective goal_token_budget goal_summary goal_reason ->
-      {
-        goal_action;
-        goal_objective;
-        goal_token_budget;
-        goal_summary;
-        goal_reason;
-      })
-  |> Jsont.Object.mem "action" Jsont.string ~enc:(fun i -> i.goal_action)
-  |> Jsont.Object.opt_mem "objective" Jsont.string ~enc:(fun i ->
-      i.goal_objective)
-  |> Jsont.Object.opt_mem "token_budget" exact_integer ~enc:(fun i ->
-      i.goal_token_budget)
-  |> Jsont.Object.opt_mem "summary" Jsont.string ~enc:(fun i -> i.goal_summary)
-  |> Jsont.Object.opt_mem "reason" Jsont.string ~enc:(fun i -> i.goal_reason)
-  |> Jsont.Object.error_unknown |> Jsont.Object.finish
-
 type ask_input = { ask_prompt : string; ask_choices : string list option }
 
 let ask_input_jsont =
@@ -521,80 +476,6 @@ let eval_todo_write session call input =
               (Printf.sprintf "Task board replaced (%d tasks)."
                  (List.length items)))
 
-let eval_update_goal session state turn_id call input =
-  let fail text = failure (error_result call text) in
-  let current () =
-    match Mentat_session.State.goal state with
-    | Some goal -> Ok (Mentat_session.Goal.id goal)
-    | None -> Error "no goal is declared"
-  in
-  let budget_ok =
-    match input.goal_token_budget with Some b when b < 0 -> false | _ -> true
-  in
-  if not budget_ok then fail "token_budget must be non-negative"
-  else
-    let update =
-      match input.goal_action with
-      | "declare" -> (
-          match Option.bind input.goal_objective non_empty with
-          | None -> Error "declare requires a non-empty objective"
-          | Some objective ->
-              let id =
-                Mentat_session.Goal.Id.of_string
-                  ("goal-"
-                  ^ Mentat_digest.key ~length:16 ~domain:"mentat.agent.goal.v1"
-                      [
-                        Mentat_session.Turn.Id.to_string turn_id;
-                        Mentat_llm.Tool.Call.id call;
-                      ])
-              in
-              Ok
-                (Mentat_session.Goal.Update.declare ~id ~objective
-                   ?token_budget:input.goal_token_budget ()))
-      | "pause" ->
-          Result.map
-            (fun id -> Mentat_session.Goal.Update.pause ~id)
-            (current ())
-      | "resume" ->
-          Result.map
-            (fun id ->
-              Mentat_session.Goal.Update.resume ~id
-                ?token_budget:input.goal_token_budget ())
-            (current ())
-      | "edit" -> (
-          match Option.bind input.goal_objective non_empty with
-          | None -> Error "edit requires a non-empty objective"
-          | Some objective ->
-              Result.map
-                (fun id -> Mentat_session.Goal.Update.edit ~id ~objective)
-                (current ()))
-      | "clear" ->
-          Result.map
-            (fun id -> Mentat_session.Goal.Update.clear ~id)
-            (current ())
-      | "complete" ->
-          Result.map
-            (fun id ->
-              Mentat_session.Goal.Update.complete ~id
-                ?summary:(Option.bind input.goal_summary non_empty)
-                ())
-            (current ())
-      | "block" ->
-          Result.map
-            (fun id ->
-              Mentat_session.Goal.Update.block ~id
-                ?reason:(Option.bind input.goal_reason non_empty)
-                ())
-            (current ())
-      | action -> Error ("unknown goal action: " ^ action)
-    in
-    match update with
-    | Error text -> fail text
-    | Ok update ->
-        verb_delta session call
-          [ Mentat_session.Event.goal_updated update ]
-          ~receipt:"Goal updated."
-
 let eval_ask_user turn_id call input =
   match
     Mentat_session.Question.make ~prompt:input.ask_prompt
@@ -738,9 +619,6 @@ let eval_verb env session state turn_id call verb =
   match (verb : Catalog.Verb.t) with
   | Catalog.Verb.Todo_write ->
       decode_verb_input todo_input_jsont call (eval_todo_write session call)
-  | Catalog.Verb.Update_goal ->
-      decode_verb_input goal_input_jsont call
-        (eval_update_goal session state turn_id call)
   | Catalog.Verb.Ask_user ->
       decode_verb_input ask_input_jsont call (eval_ask_user turn_id call)
   | Catalog.Verb.Propose_plan ->
@@ -1522,7 +1400,6 @@ let install_summary env id ~summary ~reason ~summarized_upto ?usage session =
             ]
             (Step.Settled { turn = turn_id; outcome })
       | Mentat_session.Turn.Origin.User
-      | Mentat_session.Turn.Origin.Goal_continuation
       | Mentat_session.Turn.Origin.Queued _
       | Mentat_session.Turn.Origin.Triggered _
       | Mentat_session.Turn.Origin.Plan_build
@@ -2019,11 +1896,6 @@ let recover env session =
 module Admission = struct
   type t =
     | Queued of Mentat_session.Queue.Entry.t
-    | Continuation of Mentat_session.Turn.Input.t
-    | Budget_wind_down of {
-        goal : Mentat_session.Goal.Id.t;
-        input : Mentat_session.Turn.Input.t;
-      }
     | Step_limit_wind_down of Mentat_session.Turn.Input.t
     | Idle
 end
@@ -2039,25 +1911,11 @@ let last_work_turn state =
            (Mentat_session.Turn.origin turn)
            Mentat_session.Turn.Origin.Compaction))
 
-let last_work_outcome state =
-  Option.bind (last_work_turn state) (fun last ->
-      Mentat_session.State.turn_outcome (Mentat_session.Turn.id last) state)
-
-let last_settle_clean state =
-  match last_work_outcome state with
-  | Some Mentat_session.Turn.Outcome.Completed
-  | Some Mentat_session.Turn.Outcome.Step_limit ->
-      true
-  | Some (Mentat_session.Turn.Outcome.Interrupted _)
-  | Some (Mentat_session.Turn.Outcome.Failed _)
-  | None ->
-      false
-
 (* A turn that spent its step budget stopped mid-work with nothing said about
-   where it stands. One wrap-up turn is owed, whatever the goal state — the step
-   limit is a runaway backstop, not a decision that the work is over. The
-   wind-down turn carries [Step_limit_wind_down], which is what stops a
-   wind-down that spends its own budget from admitting another one. *)
+   where it stands. One wrap-up turn is owed — the step limit is a runaway
+   backstop, not a decision that the work is over. The wind-down turn carries
+   [Step_limit_wind_down], which is what stops a wind-down that spends its own
+   budget from admitting another one. *)
 let step_limit_wind_down_due state =
   match last_work_turn state with
   | None -> false
@@ -2080,57 +1938,12 @@ let step_limit_wind_down =
   Admission.Step_limit_wind_down
     (Mentat_session.Turn.Input.user_text Mentat_prompts.Turn.step_limit)
 
-let next_admission ~continuation_turn_limit state =
+let next_admission state =
   match Mentat_session.State.active_turn state with
   | Some _ -> Admission.Idle
   | None -> (
       match Mentat_session.State.pending_queue state with
       | entry :: _ -> Admission.Queued entry
-      | [] -> (
-          match Mentat_session.State.goal state with
-          | Some goal
-            when last_settle_clean state
-                 && Mentat_session.Goal.Status.equal
-                      (Mentat_session.Goal.status goal)
-                      Mentat_session.Goal.Status.Active
-                 &&
-                 match continuation_turn_limit with
-                 | Some limit ->
-                     Mentat_session.Goal.continuation_turns goal < limit
-                 | None -> true -> (
-              match Mentat_session.Goal.remaining_tokens goal with
-              | Some 0 ->
-                  (* Budget exhausted: one wind-down turn carrying the
-                     budget-limit notice, after which the driver marks the goal
-                     budget-limited and it admits no further continuation. *)
-                  Admission.Budget_wind_down
-                    {
-                      goal = Mentat_session.Goal.id goal;
-                      input =
-                        Mentat_session.Turn.Input.user_text
-                          Mentat_prompts.Goals.budget_limit;
-                    }
-              | (Some _ | None) when step_limit_wind_down_due state ->
-                  (* The goal outlives the wind-down: it stays active and its
-                     continuation resumes on the turn after. *)
-                  step_limit_wind_down
-              | Some _ | None ->
-                  let continuation =
-                    Mentat_prompts.Goals.continuation ^ " "
-                    ^ Mentat_session.Goal.objective goal
-                  in
-                  (* A first goal turn re-entering on a freshly edited objective
-                     leads with the objective-updated notice so requirements are
-                     re-derived from the new wording. *)
-                  let text =
-                    if Mentat_session.State.goal_objective_edit_pending state
-                    then
-                      Mentat_prompts.Goals.objective_updated ^ " "
-                      ^ continuation
-                    else continuation
-                  in
-                  Admission.Continuation
-                    (Mentat_session.Turn.Input.user_text text))
-          | Some _ | None ->
-              if step_limit_wind_down_due state then step_limit_wind_down
-              else Admission.Idle))
+      | [] ->
+          if step_limit_wind_down_due state then step_limit_wind_down
+          else Admission.Idle)
