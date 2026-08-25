@@ -169,8 +169,9 @@ val make :
 (** [make workspace_io ~clock ~merlin_program ~dune_program ~ocamlfind_program
      ~opam_switch_prefix ()] is the immutable OCaml-docs tool definition.
 
-    [dune_lock_held] reports whether a supervised build watch currently holds
-    Dune's build lock (default: never). While it does, name queries — which
+    [dune_lock_held] reports whether a build watch — supervised or foreign —
+    currently holds Dune's build lock (default: never). While it does, name
+    queries — which
     resolve the project universe through [dune describe workspace] — fail
     [`Unavailable] with text naming the lock and the Merlin-backed
     alternatives, never Dune's own lock advice; path queries are unaffected.
