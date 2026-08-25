@@ -1388,14 +1388,21 @@ let dune_watch_supervisor t capability ~mode ~instance =
    mirrors the watch's ladder: the dune lane must be live at all (the
    trigger is the observer's readings — auto or observe alike, since a
    foreign watch's green settle is as good as our own), the
-   [dune.lint_command] knob non-empty, and the command's program resolvable
-   on the sealed child PATH — probed once at construction, exactly as the
-   watch probes dune, so the linter found is the project's own,
-   version-matched to the compiler that wrote the artifacts it reads. A
-   missing linter is a normal state, not a broken expectation: the lane
-   stays silently lint-absent, and doctor is where the reason lives.
-   Creation is pure; {!Dune_lint.engage} is the caller's, at the first
-   drain. *)
+   [dune.lint_command] knob non-empty, and the command reachable — in
+   either of the two worlds a project keeps its linter in. A program that
+   resolves on the sealed child PATH runs directly (the opam world; no
+   dune in the lint path). One that does not is reached through
+   [dune exec] (the dune-pkg world: a dev-dependency's binary lives in the
+   lock universe, not on the PATH — and may not be built yet, which
+   [dune exec] also answers by building it). Either way the resolution
+   goes through the project's own environment, so the linter found is
+   version-matched to the compiler that wrote the artifacts it reads. With
+   neither the program nor dune reachable there is no runner at all;
+   whether the reached command actually exists is the first run's answer
+   ({!Dune_lint}), never a parse of anything. A missing linter is a normal
+   state: the lane stays silently lint-absent, and doctor is where the
+   reason lives. Creation is pure; {!Dune_lint.engage} is the caller's, at
+   the first drain. *)
 let dune_lint_runner t capability ~instance =
   match t.dune_lint with
   | Some runner -> Some runner
@@ -1403,9 +1410,19 @@ let dune_lint_runner t capability ~instance =
       match Cfg.Resolved.get Cfg.Field.dune_lint_command t.config with
       | [] -> None
       | program :: _ as command -> (
-          match Mentat_workspace_io.child_program capability program with
+          let command =
+            match Mentat_workspace_io.child_program capability program with
+            | Some _ -> Some command
+            | None -> (
+                match
+                  Mentat_workspace_io.child_program capability "dune"
+                with
+                | Some _ -> Some ([ "dune"; "exec"; "--" ] @ command)
+                | None -> None)
+          in
+          match command with
           | None -> None
-          | Some _ ->
+          | Some command ->
               let runner =
                 Dune_lint.make ~rpc:instance ~capability
                   ~mono:(Eio.Stdenv.mono_clock t.shared.stdenv)

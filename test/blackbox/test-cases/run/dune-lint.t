@@ -48,22 +48,64 @@ nothing.
   $ wc -l < fake-litany-argv | tr -d ' '
   2
 
-A missing linter is a normal state: with the command's program gone from
-PATH, no runner exists, nothing is stated about lint, and the build lane is
-untouched.
+A linter off the PATH is reached through dune exec — the dune-pkg world,
+where a dev-dependency's binary lives in the lock universe: the gate falls
+back to the dune exec prefix, and the shim resolves the target from its
+fake lock bin.
 
   $ rm fake-bin/litany fake-litany-argv
-  $ printf failing > dune-state
+  $ mkdir -p fake-lock-bin
+  $ cat > fake-lock-bin/litany <<'SH'
+  > #!/bin/sh
+  > echo "$@" >> "$PWD/fake-litany-argv"
+  > cat "$PWD/lint-output" 2>/dev/null
+  > code=$(cat "$PWD/lint-exit" 2>/dev/null || echo 0)
+  > exit "$code"
+  > SH
+  $ chmod +x fake-lock-bin/litany
+  $ cat > lint-output <<'EOF'
+  > File "lib/inventory.ml", line 5, characters 17-40:
+  > Warning 12 [needless-list-length]: comparison through List.length is a needless emptiness test [needless-list-length]
+  > EOF
+  $ printf 1 > lint-exit
+  $ printf clean > dune-state
+  $ cat > lockbin.jsonl <<'JSONL'
+  > {"expect":{"body_contains":["lockbin prompt"]},"response":{"id":"k1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-k1","call_id":"call-k1","name":"shell","arguments":"{\"command\":\"for i in $(seq 100); do test -S _build/.rpc/dune && break; sleep 0.1; done; sleep 2\",\"description\":\"wait for the watch and the lint run\"}"}]}}
+  > {"expect":{"body_contains":["1 finding (1 new)"]},"response":{"id":"k2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"lock linted"}]}]}}
+  > JSONL
+  $ start_fake_openai lockbin.jsonl capture-lockbin port-lockbin
+  $ MENTAT_DUNE_WATCH=auto mentat run "lockbin prompt" --cwd "$PWD" --permission bypass --id lockbin-turn 2>/dev/null
+  lock linted
+  $ wait_fake_server
+  $ grep -c 'exec -- litany check' fake-dune-argv
+  1
+  $ cat fake-litany-argv
+  check
+
+A linter that resolves nowhere is dune's own answer — Program not found —
+and the lane goes off for the session after that one run: a second green
+settle triggers nothing, no findings are ever stated, and the build lane is
+untouched.
+
+  $ rm -f fake-lock-bin/litany fake-litany-argv fake-dune-argv
+  $ printf clean > dune-state
   $ cat > nolint.jsonl <<'JSONL'
-  > {"expect":{"body_contains":["nolint prompt"]},"response":{"id":"n1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-n1","call_id":"call-n1","name":"shell","arguments":"{\"command\":\"sleep 3\",\"description\":\"let the watch come up\"}"}]}}
-  > {"expect":{"body_contains":["Build failing (1 error: 1 new)"]},"response":{"id":"n2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"no linter"}]}]}}
+  > {"expect":{"body_contains":["nolint prompt"]},"response":{"id":"n1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-n1","call_id":"call-n1","name":"shell","arguments":"{\"command\":\"for i in $(seq 100); do test -S _build/.rpc/dune && break; sleep 0.1; done; sleep 2\",\"description\":\"wait for the watch and the doomed lint run\"}"}]}}
+  > {"expect":{"body_contains":["function_call_output","call-n1"]},"response":{"id":"n2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-n2","call_id":"call-n2","name":"shell","arguments":"{\"command\":\"printf failing > dune-state; sleep 1.5; printf clean > dune-state; sleep 2\",\"description\":\"force a second green settle\"}"}]}}
+  > {"expect":{"body_contains":["function_call_output","call-n2"]},"response":{"id":"n3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"no linter"}]}]}}
   > JSONL
   $ start_fake_openai nolint.jsonl capture-nolint port-nolint
   $ MENTAT_DUNE_WATCH=auto mentat run "nolint prompt" --cwd "$PWD" --permission bypass --id nolint-turn 2>/dev/null
   no linter
   $ wait_fake_server
+
+One doomed run, then silence: the not-found answer took the lane off, so
+the second green settle asked nothing.
+
+  $ grep -c 'exec -- litany check' fake-dune-argv
+  1
   $ test -f fake-litany-argv
   [1]
-  $ grep -c 'Lint' capture-nolint/request-2.json
+  $ grep -cE 'findings? \(' capture-nolint/request-3.json
   0
   [1]
