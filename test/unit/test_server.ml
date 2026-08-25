@@ -770,12 +770,10 @@ let edge_group =
           | _ -> fail "a too-long socket path must be refused before bind");
     ]
 
-(* [Bind.public] is the sole constructor accepting a non-loopback host, and it
-   cannot be built without the TLS × token × origin triple (property 7); that
-   guarantee is a compile fact of the type, not a runtime check, and [listen]
-   raises {!Server.Unsupported} on it in Stage 1. Both are exercised by the type
-   checker admitting this module, not by a runtime test that would need a real
-   TLS server configuration. *)
+(* [Bind] admits only local targets — a unix socket or the loopback interface;
+   a public (non-loopback) listener cannot be described at all (property 7).
+   That guarantee is a compile fact of the closed type, exercised by the type
+   checker admitting this module, not by a runtime test. *)
 
 let introspection_group =
   group "descriptor table"

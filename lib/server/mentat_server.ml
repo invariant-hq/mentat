@@ -76,25 +76,13 @@ end
 type bind =
   | Unix of { dir : Lpath.Abs.t }
   | Loopback of { port : int option; token : Token.t }
-  | Public of {
-      host : string;
-      port : int;
-      tls : Tls.Config.server;
-      token : Token.t;
-      origins : Origin.t list;
-    }
 
 module Bind = struct
   type t = bind
 
   let unix ~dir = Unix { dir }
   let loopback ~port ~token = Loopback { port; token }
-
-  let public ~host ~port ~tls ~token ~origins =
-    Public { host; port; tls; token; origins }
 end
-
-exception Unsupported of string
 
 let socket_name = "mentat.sock"
 
@@ -109,9 +97,9 @@ let unix_socket_path dir = Filename.concat (Lpath.Abs.to_string dir) socket_name
 type listener = {
   bind : bind;
   addr : Eio.Net.Sockaddr.stream option;
-      (* The address the socket bound to, captured for a loopback/public
-         listener so the daemon can name the browser URL and a test can dial an
-         ephemeral port; [None] for a unix socket, which carries no TCP port. *)
+      (* The address the socket bound to, captured for a loopback listener so
+         the daemon can name the browser URL and a test can dial an ephemeral
+         port; [None] for a unix socket, which carries no TCP port. *)
   run_server :
     stop:unit Eio.Promise.t ->
     on_error:(exn -> unit) ->
@@ -210,12 +198,6 @@ let listen ~sw ~net bind =
           (fun ~stop ~on_error server ->
             Cohttp_eio.Server.run ~stop ~on_error socket server);
       }
-  | Public _ ->
-      (* The type-level guarantee (a public bind needs the TLS × token × origin
-         triple) holds now; its listener lands in Stage 3. *)
-      raise
-        (Unsupported
-           "mentat_server: a public (non-loopback) listener lands in Stage 3")
 
 let port listener =
   match listener.addr with
@@ -287,7 +269,7 @@ let read_body body =
 let authorize bind request =
   match bind with
   | Unix _ -> Ok ()
-  | Loopback { token; _ } | Public { token; _ } -> (
+  | Loopback { token; _ } -> (
       let headers = Cohttp.Request.headers request in
       match Cohttp.Header.get headers "authorization" with
       | Some value
@@ -1153,8 +1135,6 @@ let make_ctx ~sw ~net ?workspace ?environment bind =
               environment;
               sw;
             })
-  | Public _ ->
-      Error (Error.Transport "connect to a public daemon lands in Stage 3")
 
 (* A client pinned to one already-dialed socket, so a handshake and the request
    that follows it ride the same TCP connection. cohttp's own client dials a

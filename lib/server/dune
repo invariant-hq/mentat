@@ -30,8 +30,6 @@
   unix
   cohttp
   cohttp-eio
-  tls
-  tls-eio
   cstruct
   ipaddr
   mirage-crypto-rng

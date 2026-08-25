@@ -23,8 +23,7 @@
     untouched: only the composition root consumes both directions.
 
     The unix-socket transport, the loopback browser edge ({!Web}), and the
-    parity harness all ship; the public bind constructor exists at the type
-    level but its TLS listener is a named future — {!listen} refuses it. *)
+    parity harness all ship. *)
 
 (** {1:tokens Connection tokens}
 
@@ -74,9 +73,11 @@ end
 
     [Bind] is the only way to describe a listener, for both this JSON wire and
     the future [mentat.web] browser surface. Each constructor carries everything
-    its safety requires, and the type admits a non-loopback address {b only}
-    paired with the TLS × token × origin-allowlist triple — so an open agent
-    port without those does not type-check. *)
+    its safety requires, and both bind the local machine only — a unix socket or
+    the loopback interface. A public (non-loopback) listener is deliberately
+    absent: if one ever lands it enters here as a new constructor carrying its
+    own safety requirements, so an open agent port without them can never
+    type-check. *)
 
 module Bind : sig
   type t
@@ -96,24 +97,7 @@ module Bind : sig
   val loopback : port:int option -> token:Token.t -> t
   (** [loopback ~port ~token] binds 127.0.0.1 only. [None] requests an ephemeral
       port (written to the discovery file). A token is required. *)
-
-  val public :
-    host:string ->
-    port:int ->
-    tls:Tls.Config.server ->
-    token:Token.t ->
-    origins:Origin.t list ->
-    t
-  (** [public ~host ~port ~tls ~token ~origins] is the only constructor
-      accepting a non-loopback host, and only with the full triple. Its listener
-      is a Stage-3 landing; {!listen} raises {!Unsupported} on it in Stage 1
-      (the type exists now). *)
 end
-
-exception Unsupported of string
-(** Raised by {!listen} for a {!Bind.public} target in Stage 1, naming the
-    Stage-3 landing. The type-level guarantee (a public bind needs the triple)
-    is unaffected. *)
 
 type listener
 (** The type for a bound, listening socket. *)
@@ -121,14 +105,12 @@ type listener
 val listen : sw:Eio.Switch.t -> net:_ Eio.Net.t -> Bind.t -> listener
 (** [listen ~sw ~net bind] creates and binds the socket [bind] describes, ready
     for {!serve}. It performs the 0700 directory and 0600 socket discipline for
-    a {!Bind.unix} target and refuses a {!Bind.public} target with
-    {!Unsupported} this stage. *)
+    a {!Bind.unix} target. *)
 
 val port : listener -> int option
-(** [port listener] is the TCP port a loopback (or public) [listener] bound —
-    the daemon reads it to name the browser URL when the bind requested an
-    ephemeral port. [None] for a {!Bind.unix} listener, which carries no port.
-*)
+(** [port listener] is the TCP port a loopback [listener] bound — the daemon
+    reads it to name the browser URL when the bind requested an ephemeral port.
+    [None] for a {!Bind.unix} listener, which carries no port. *)
 
 (** {1:serve Serving a driver over the wire} *)
 
