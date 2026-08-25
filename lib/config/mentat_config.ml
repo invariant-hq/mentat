@@ -227,6 +227,7 @@ let string_enum_of_string ~what ~spellings value =
 
 let tools_editor_spellings = [ "auto"; "apply-patch"; "string-replace" ]
 let workspace_tooling_spellings = [ "auto"; "on"; "off" ]
+let dune_watch_spellings = [ "auto"; "observe"; "off" ]
 let web_search_provider_spellings = [ "exa"; "parallel"; "off" ]
 let tui_diff_layout_spellings = [ "auto"; "unified"; "split" ]
 
@@ -243,6 +244,10 @@ let sandbox_env_inherit_of_string =
 let workspace_tooling_of_string =
   string_enum_of_string ~what:"workspace tooling mode"
     ~spellings:workspace_tooling_spellings
+
+let dune_watch_of_string =
+  string_enum_of_string ~what:"dune watch mode"
+    ~spellings:dune_watch_spellings
 
 let web_search_provider_of_string =
   string_enum_of_string ~what:"web search provider"
@@ -790,6 +795,9 @@ let workspace_tooling_codec =
   string_enum_codec ~spellings:workspace_tooling_spellings
     workspace_tooling_of_string
 
+let dune_watch_codec =
+  string_enum_codec ~spellings:dune_watch_spellings dune_watch_of_string
+
 let tui_diff_layout_codec =
   string_enum_codec ~spellings:tui_diff_layout_spellings
     tui_diff_layout_of_string
@@ -848,7 +856,8 @@ module Field = struct
     | Notices_fswatch : (bool, defaulted) t
     | Notices_cr_comments : (bool, defaulted) t
     | Notices_dune_diagnostics : (bool, defaulted) t
-    | Notices_dune_build : (bool, defaulted) t
+    | Dune_watch : (string, defaulted) t
+    | Dune_targets : (string list, defaulted) t
     | Workspace_tooling : (string, defaulted) t
     | Instructions_global : (bool, defaulted) t
     | Instructions_project : (bool, defaulted) t
@@ -917,7 +926,8 @@ module Field = struct
   let notices_fswatch = Notices_fswatch
   let notices_cr_comments = Notices_cr_comments
   let notices_dune_diagnostics = Notices_dune_diagnostics
-  let notices_dune_build = Notices_dune_build
+  let dune_watch = Dune_watch
+  let dune_targets = Dune_targets
   let workspace_tooling = Workspace_tooling
   let instructions_global = Instructions_global
   let instructions_project = Instructions_project
@@ -986,7 +996,8 @@ module Field = struct
     | Notices_fswatch -> "notices.fswatch"
     | Notices_cr_comments -> "notices.cr_comments"
     | Notices_dune_diagnostics -> "notices.dune_diagnostics"
-    | Notices_dune_build -> "notices.dune_build"
+    | Dune_watch -> "dune.watch"
+    | Dune_targets -> "dune.targets"
     | Workspace_tooling -> "workspace.tooling"
     | Instructions_global -> "instructions.global"
     | Instructions_project -> "instructions.project"
@@ -1075,7 +1086,7 @@ module Field = struct
     | Sandbox_writable_roots | Sandbox_network | Sandbox_env_inherit
     | Sandbox_env_exclude | Sandbox_env_include_only | Shell | Compaction_auto
     | Revert_merge | Notices_fswatch | Notices_cr_comments
-    | Notices_dune_diagnostics | Notices_dune_build | Workspace_tooling
+    | Notices_dune_diagnostics | Dune_watch | Dune_targets | Workspace_tooling
     | Instructions_global | Instructions_project | Instructions_claude_md
     | Instructions_project_max_bytes | Skills_enabled | Skills_builtin
     | Skills_project | Skills_compat | Skills_disabled | Skills_paths
@@ -1126,7 +1137,8 @@ module Field = struct
       Any Notices_fswatch;
       Any Notices_cr_comments;
       Any Notices_dune_diagnostics;
-      Any Notices_dune_build;
+      Any Dune_watch;
+      Any Dune_targets;
       Any Workspace_tooling;
       Any Instructions_global;
       Any Instructions_project;
@@ -1360,7 +1372,13 @@ module Field = struct
     | Notices_cr_comments -> defaulted bool_codec ~default:(builtin field true)
     | Notices_dune_diagnostics ->
         defaulted bool_codec ~default:(builtin field true)
-    | Notices_dune_build -> defaulted bool_codec ~default:(builtin field true)
+    | Dune_watch ->
+        defaulted dune_watch_codec ~shared:true
+          ~default:(builtin field "auto")
+          ~env:("MENTAT_DUNE_WATCH", dune_watch_of_string)
+    | Dune_targets ->
+        defaulted string_list_codec ~shared:true
+          ~default:(builtin field [ "@check" ])
     | Workspace_tooling ->
         defaulted workspace_tooling_codec ~shared:true
           ~default:(builtin field "auto")
