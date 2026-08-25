@@ -221,7 +221,18 @@ let start t =
                   ~env_override:[ ("XDG_RUNTIME_DIR", dir) ]
                   argv
               with
-              | Ok session -> Ok session
+              | Ok session ->
+                  (* Registered after the session's own teardown resources,
+                     so on a release that skipped the explicit {!stop} this
+                     hook still runs first (release hooks are LIFO) and the
+                     child dies on SIGTERM — its own exit handlers unlinking
+                     socket and private registry entry — never on the
+                     switch's SIGKILL backstop. Signalling a settled session
+                     is a no-op, so accumulated hooks from earlier lives cost
+                     nothing. *)
+                  Eio.Switch.on_release sw (fun () ->
+                      Command.Session.signal session);
+                  Ok session
               | Error error ->
                   Error (Format.asprintf "%a" Command.Error.pp error))))
 
@@ -301,7 +312,7 @@ and death t deaths ~reached ~cause =
     cycle t deaths
   end
 
-let shutdown t =
+let stop t =
   (match t.session with
   | Some session ->
       t.session <- None;
@@ -313,7 +324,7 @@ let engage t ~sw =
   if not t.engaged then begin
     t.engaged <- true;
     t.sw <- Some sw;
-    Eio.Switch.on_release sw (fun () -> shutdown t);
+    Eio.Switch.on_release sw (fun () -> stop t);
     Eio.Fiber.fork_daemon ~sw (fun () ->
         (match t.mode with
         | Mode.Observe -> set_state t No_server

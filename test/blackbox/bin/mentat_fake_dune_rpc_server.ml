@@ -30,8 +30,22 @@
 
    Usage: mentat_fake_dune_rpc_server --root DIR
             (--scenario failing|clean | --state-file PATH) --ready FILE
+            [--socket-at-root]
    Discovery shares the process XDG environment, so the caller must run it
-   under the same HOME/XDG_* as the mentat it should be visible to. *)
+   under the same HOME/XDG_* as the mentat it should be visible to.
+   [--socket-at-root] binds the socket at DIR/_build/.rpc/dune — where a real
+   watch serves — so a supervisor probing that pinned path finds it.
+
+   The binary doubles as a fake [dune] executable: invoked as
+   [dune build ...] (symlink it to a PATH entry named [dune]) it appends its
+   argv to [fake-dune-argv] in the cwd — the spawn marker a cram asserts —
+   consults [fake-dune-mode] in the cwd ([exit:N] dies at once, [exit-once:N]
+   dies once and rewrites itself to [serve], [serve] is the default), then
+   serves the watch protocol: registry entry under its own XDG_RUNTIME_DIR
+   (the private directory a supervisor hands it), socket at
+   [_build/.rpc/dune], dynamic state from [dune-state] in the cwd. A shim
+   spawned while that socket already answers prints one line and exits 0,
+   exactly as dune forwards one build to a lock holder and exits. *)
 
 module Drpc = Dune_rpc.Private
 module Conv = Drpc.Conv
@@ -350,33 +364,17 @@ let serve mode fd =
 let realpath path =
   match Unix.realpath path with p -> p | exception Unix.Unix_error _ -> path
 
-let () =
-  Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
-  let root = ref "" and scenario = ref "failing" in
-  let state_file = ref "" and ready = ref "" in
-  let spec =
-    [
-      ("--root", Arg.Set_string root, "workspace root the endpoint advertises");
-      ( "--scenario",
-        Arg.String
-          (function
-          | ("failing" | "clean") as s -> scenario := s
-          | other -> raise (Arg.Bad ("unknown scenario: " ^ other))),
-        "failing|clean" );
-      ( "--state-file",
-        Arg.Set_string state_file,
-        "dynamic state file (clean|failing|error2), re-read on a tick" );
-      ("--ready", Arg.Set_string ready, "file to touch once listening");
-    ]
-  in
-  Arg.parse spec
-    (fun a -> raise (Arg.Bad ("unexpected argument: " ^ a)))
-    "mentat_fake_dune_rpc_server";
-  if String.equal !root "" then failwith "--root is required";
-  let root = realpath !root in
-  let mode =
-    if String.equal !state_file "" then Static !scenario
-    else Dynamic (realpath !state_file)
+(* Serve [mode] forever: register [socket] (an absolute path) in the registry
+   this process's own XDG environment designates, bind it -- via [bind_in]
+   when the absolute path would overflow sun_path: chdir there and bind the
+   basename -- and answer one connection at a time. mentat holds one
+   long-poll connection; probes connect, handshake, and close. *)
+let serve_forever ~mode ~root ~socket ~bind_in ~ready =
+  (* [bind_in] chdirs below, so a relative ready path is pinned to the
+     caller's directory first. *)
+  let ready =
+    if String.equal ready "" || Filename.is_relative ready = false then ready
+    else Filename.concat (Unix.getcwd ()) ready
   in
   (match mode with
   | Dynamic path ->
@@ -385,25 +383,27 @@ let () =
       | None -> current_state := "clean");
       ignore (Thread.create ticker path)
   | Static _ -> ());
-  (* A short socket path under [/tmp]: a Unix socket cannot bind a long path (the
-     ~104-byte sun_path limit), which rules out both the cram's deep [$PWD] and
-     macOS's [/var/folders/...] [$TMPDIR]. The client discovers the path from the
-     registry regardless of where it lives. *)
-  let socket = Filename.temp_file ~temp_dir:"/tmp" "mentat-fake-rpc-" ".sock" in
-  Unix.unlink socket;
   let registry_file = advertise ~root ~socket in
   let listen = Unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
-  Unix.bind listen (Unix.ADDR_UNIX socket);
+  let bind_path =
+    match bind_in with
+    | None -> socket
+    | Some dir ->
+        Unix.chdir dir;
+        Filename.basename socket
+  in
+  (try Unix.unlink bind_path with Unix.Unix_error _ -> ());
+  Unix.bind listen (Unix.ADDR_UNIX bind_path);
   Unix.listen listen 8;
   let cleanup () =
-    (try Unix.unlink socket with Unix.Unix_error _ -> ());
+    (try Unix.unlink bind_path with Unix.Unix_error _ -> ());
     try Unix.unlink registry_file with Unix.Unix_error _ -> ()
   in
   at_exit cleanup;
   List.iter
     (fun signal -> Sys.set_signal signal (Sys.Signal_handle (fun _ -> exit 0)))
     [ Sys.sigterm; Sys.sigint ];
-  if not (String.equal !ready "") then write_file !ready "ready\n";
+  if not (String.equal ready "") then write_file ready "ready\n";
   let rec accept_loop () =
     let fd, _ = Unix.accept listen in
     serve mode fd;
@@ -411,3 +411,106 @@ let () =
     accept_loop ()
   in
   accept_loop ()
+
+let append_line path line =
+  let out = open_out_gen [ Open_append; Open_creat; Open_binary ] 0o644 path in
+  output_string out (line ^ "\n");
+  close_out out
+
+(* The fake-dune shim: see the module comment. cwd is the workspace root --
+   exactly how a supervisor spawns [dune build --root . --watch]. *)
+let run_as_dune () =
+  let root = Unix.getcwd () in
+  append_line
+    (Filename.concat root "fake-dune-argv")
+    (String.concat " " (List.tl (Array.to_list Sys.argv)));
+  let mode_file = Filename.concat root "fake-dune-mode" in
+  let directive =
+    match read_state_file mode_file with Some line -> line | None -> "serve"
+  in
+  match String.split_on_char ':' directive with
+  | [ "exit"; code ] -> exit (int_of_string code)
+  | [ "exit-once"; code ] ->
+      write_file mode_file "serve\n";
+      exit (int_of_string code)
+  | _ ->
+      let sock_dir = Filename.concat root "_build/.rpc" in
+      let socket = Filename.concat sock_dir "dune" in
+      mkdir_p sock_dir;
+      let occupied =
+        let probe = Unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+        Fun.protect
+          ~finally:(fun () ->
+            try Unix.close probe with Unix.Unix_error _ -> ())
+          (fun () ->
+            Unix.chdir sock_dir;
+            match Unix.connect probe (Unix.ADDR_UNIX "dune") with
+            | () -> true
+            | exception Unix.Unix_error _ -> false)
+      in
+      if occupied then begin
+        print_string "forwarded one build to the running server\n";
+        exit 0
+      end;
+      let state_file = Filename.concat root "dune-state" in
+      if not (Sys.file_exists state_file) then write_file state_file "clean\n";
+      serve_forever ~mode:(Dynamic state_file) ~root ~socket
+        ~bind_in:(Some sock_dir) ~ready:""
+
+let () =
+  Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
+  if Array.length Sys.argv > 1 && String.equal Sys.argv.(1) "build" then
+    run_as_dune ()
+  else begin
+    let root = ref "" and scenario = ref "failing" in
+    let state_file = ref "" and ready = ref "" in
+    let socket_at_root = ref false in
+    let spec =
+      [
+        ( "--root",
+          Arg.Set_string root,
+          "workspace root the endpoint advertises" );
+        ( "--scenario",
+          Arg.String
+            (function
+            | ("failing" | "clean") as s -> scenario := s
+            | other -> raise (Arg.Bad ("unknown scenario: " ^ other))),
+          "failing|clean" );
+        ( "--state-file",
+          Arg.Set_string state_file,
+          "dynamic state file (clean|failing|error2), re-read on a tick" );
+        ("--ready", Arg.Set_string ready, "file to touch once listening");
+        ( "--socket-at-root",
+          Arg.Set socket_at_root,
+          "bind the socket at ROOT/_build/.rpc/dune, where a real watch \
+           serves" );
+      ]
+    in
+    Arg.parse spec
+      (fun a -> raise (Arg.Bad ("unexpected argument: " ^ a)))
+      "mentat_fake_dune_rpc_server";
+    if String.equal !root "" then failwith "--root is required";
+    let root = realpath !root in
+    let mode =
+      if String.equal !state_file "" then Static !scenario
+      else Dynamic (realpath !state_file)
+    in
+    if !socket_at_root then begin
+      let sock_dir = Filename.concat root "_build/.rpc" in
+      mkdir_p sock_dir;
+      serve_forever ~mode ~root
+        ~socket:(Filename.concat sock_dir "dune")
+        ~bind_in:(Some sock_dir) ~ready:!ready
+    end
+    else begin
+      (* A short socket path under [/tmp]: a Unix socket cannot bind a long
+         path (the ~104-byte sun_path limit), which rules out both the cram's
+         deep [$PWD] and macOS's [/var/folders/...] [$TMPDIR]. The client
+         discovers the path from the registry regardless of where it lives. *)
+      let socket =
+        Filename.temp_file ~temp_dir:"/tmp" "mentat-fake-rpc-" ".sock"
+      in
+      Unix.unlink socket;
+      serve_forever ~mode ~root ~socket ~bind_in:None ~ready:!ready
+    end
+  end

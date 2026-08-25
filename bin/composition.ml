@@ -461,6 +461,13 @@ let instance shared ~sw ~cwd ~overrides ?environment ?review_base () :
    them down so the switch can close instead of blocking on idle drivers. The
    registry calls this before closing an evicted instance's switch. *)
 let shutdown t =
+  (* The watch first, before the instance switch releases: an explicit
+     SIGTERM lets dune's own exit handlers unlink its socket and private
+     registry entry, where the switch's teardown of still-running children
+     would SIGKILL past them. *)
+  (match t.dune_watch with
+  | Some supervisor -> Dune_watch.stop supervisor
+  | None -> ());
   match t.engine with Some engine -> Engine.shutdown engine | None -> ()
 
 let retained_hub_count t =
