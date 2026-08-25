@@ -1644,12 +1644,43 @@ module Command = struct
     let since t = Mtime.span t.started_at (Eio.Time.Mono.now t.clock)
   end
 
-  let start_session t ~sw ?cwd argv =
+  (* Per-session overrides over the one private environment. The capability's
+     environment is constructed once and served byte-for-byte to every launch;
+     a supervised session that needs a binding of its own — a build watch's
+     private [XDG_RUNTIME_DIR] — gets it applied here, to this child alone,
+     never to the capability. An override replaces any binding of the same
+     name and otherwise appends. *)
+  let override_environment environment overrides =
+    match overrides with
+    | [] -> environment
+    | overrides ->
+        List.iter
+          (fun (name, value) ->
+            if
+              String.equal name "" || String.contains name '='
+              || String.contains name '\000' || String.contains value '\000'
+            then invalid_arg "start_session: malformed environment override")
+          overrides;
+        let overridden binding =
+          List.exists
+            (fun (name, _) ->
+              String.starts_with ~prefix:(name ^ "=") binding)
+            overrides
+        in
+        let kept =
+          List.filter
+            (fun binding -> not (overridden binding))
+            (Array.to_list environment)
+        in
+        Array.of_list
+          (kept @ List.map (fun (name, value) -> name ^ "=" ^ value) overrides)
+
+  let start_session t ~sw ?cwd ?(env_override = []) argv =
     let* prepared = prepare t ~sandbox:t.sandbox ~cwd argv in
+    let env = override_environment prepared.child_environment env_override in
     match
-      Session.launch ~sw ~proc_mgr:t.proc_mgr ~fs:t.fs
-        ~env:prepared.child_environment ~mono:t.mono ~cwd:prepared.cwd
-        ~executable:prepared.executable prepared.lowered
+      Session.launch ~sw ~proc_mgr:t.proc_mgr ~fs:t.fs ~env ~mono:t.mono
+        ~cwd:prepared.cwd ~executable:prepared.executable prepared.lowered
     with
     | session -> Ok session
     | exception exn when is_launch_failure exn -> Error (launch_failure exn)

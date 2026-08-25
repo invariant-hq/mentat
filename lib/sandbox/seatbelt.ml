@@ -183,6 +183,16 @@ let base_policy =
   (local-name "com.apple.cfprefsd.agent"))
 (allow user-preference-read)|}
 
+(* The FSEvents session with fseventsd. A confined [dune build --watch] (and
+   any other file watcher using the FSEvents framework) opens its event
+   stream through this mach service; without the lookup the framework's
+   [FSEventStreamStart] fails and dune aborts at startup with
+   "Fsevents.start: failed to start". The service only delivers change
+   notifications for paths — event payloads carry path names and flags, never
+   file data — so the reads the policy denies stay denied. *)
+let fsevents_policy =
+  {|(allow mach-lookup (global-name "com.apple.FSEvents"))|}
+
 (* Ported from the Codex reference agent's seatbelt_network_policy.sbpl:
    platform services TLS, DNS, and network configuration need beyond raw
    socket access when the policy enables network. *)
@@ -338,6 +348,7 @@ let sbpl policy =
       @ [
           ancestor_rule params;
           unix_socket_policy params;
+          fsevents_policy;
           network_section policy;
           agent_socket_denial;
         ])

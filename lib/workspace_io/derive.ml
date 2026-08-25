@@ -669,6 +669,30 @@ let existing_entry root name =
 let protected_meta_paths root =
   List.filter_map (existing_entry root) Mentat_workspace.protected_meta_names
 
+(* The session-run directory. A supervised build watch is spawned with a
+   private [XDG_RUNTIME_DIR] at [<primary>/.mentat/run/<session>], and dune
+   creates and writes its registry entry beneath it at server start — so the
+   confined watch must be able to write under [.mentat/run] even though the
+   [.mentat] carveout keeps the rest of the project's own directory read-only
+   to confined commands. The grant is derived exactly when the carveout that
+   would otherwise deny it is: when [.mentat] already exists. A workspace
+   without [.mentat] needs neither — the primary write clause covers whatever
+   a supervisor creates there. The directory is materialized here because the
+   Linux backend binds every clause path at spawn; a directory that cannot be
+   made simply yields no grant, and the watch's own startup failure is the
+   diagnostic. *)
+let session_run_dirs primary =
+  match existing_entry primary ".mentat" with
+  | None -> []
+  | Some meta -> (
+      match Lpath.Abs.add_component meta "run" with
+      | Error _ -> []
+      | Ok run -> (
+          match Unix.mkdir (Lpath.Abs.to_string run) 0o755 with
+          | () -> [ canonical run ]
+          | exception Unix.Unix_error (Unix.EEXIST, _, _) -> [ canonical run ]
+          | exception Unix.Unix_error _ -> []))
+
 let read_metadata_path path =
   let spelling = Lpath.Abs.to_string path in
   match open_in_bin spelling with
@@ -922,8 +946,10 @@ let run ~scoped ~lookup ~logical ~configured_reads ~configured_writes
     |> canonical_paths
   in
   let* denied = owned_directories mentat_dirs in
+  let session_writes = session_run_dirs primary in
   let writable_lattice =
     (primary :: configured_writes)
+    @ session_writes
     @ shared_temp_dirs ~lookup ~workspace_roots:scope_roots
     @ darwin_user_dirs ~lookup @ toolchain_writes
   in
@@ -978,7 +1004,7 @@ let run ~scoped ~lookup ~logical ~configured_reads ~configured_writes
   Ok
     {
       workspace_roots = roots;
-      writable = primary :: configured_writes;
+      writable = (primary :: configured_writes) @ session_writes;
       platform_writable = shared_temp_dirs ~lookup ~workspace_roots:scope_roots;
       toolchain_writable = darwin_user_dirs ~lookup @ toolchain_writes;
       readable;

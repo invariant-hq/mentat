@@ -416,7 +416,12 @@ let seatbelt_read_only_golden () =
   equal (list (pair string string)) ~msg:"no roots, no parameters" [] params;
   not_contains
     ~msg:"restricted network opens no INET boundary (no blanket outbound rule)"
-    ~sub:"(allow network-outbound)" text
+    ~sub:"(allow network-outbound)" text;
+  (* Every posture carries the FSEvents session: without it a confined
+     [dune build --watch] aborts at startup because its file watcher cannot
+     open the fseventsd stream. *)
+  contains ~msg:"FSEvents mach service is admitted"
+    ~sub:{|(allow mach-lookup (global-name "com.apple.FSEvents"))|} text
 
 (* The profile is one rule per clause in emission order, so what these pin is
    the resolution law rather than a layout: the clause that decides a path is
@@ -1471,9 +1476,11 @@ let identity_domain_and_framing () =
    writable [/work], protected [/work/.git], network restricted). The Seatbelt
    pin was re-minted when the profile gained the Unix-socket [network-bind]/
    [network-outbound] allow scoped to the writable roots (so build tools can
-   bind their RPC socket); the Bubblewrap pin was re-minted when [--proc] was
-   hoisted ahead of the clause mounts, so a clause naming [/proc] wins over the
-   procfs mount the way the resolution law says it must. *)
+   bind their RPC socket), and again when it gained the [com.apple.FSEvents]
+   mach-lookup (so a confined [dune build --watch]'s file watcher can start);
+   the Bubblewrap pin was re-minted when [--proc] was hoisted ahead of the
+   clause mounts, so a clause naming [/proc] wins over the procfs mount the
+   way the resolution law says it must. *)
 let identity_digest_pins () =
   equal string ~msg:"not_requested identity digest is byte-stable"
     "5eb60082fd887b2d9988623b099f340426ef07e65f11c7b6ecf81cf3d01dea47"
@@ -1493,7 +1500,7 @@ let identity_digest_pins () =
       ()
   in
   equal string ~msg:"seatbelt enforced identity digest golden"
-    "8e9cf4f282dd25f620a18d54eb6c2a82337d8009661da62696a97bbad762b5fe"
+    "4701dfe5e27041f434b58c65a98b2b6812f4a837589a42ae87ba98d66872c69a"
     (Digest.to_hex (Identity.digest (identity_of pinned_policy)));
   equal string ~msg:"bubblewrap enforced identity digest golden"
     "3c45f1b71d50ebc65eb0b88551cc2aec352f542c709ce094dd9f4d255204858a"
