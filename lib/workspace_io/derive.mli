@@ -26,7 +26,12 @@ type derived = {
       (** Each admitted logical root with its canonical directory, primary
           first, in admission order. These are the roots the resolver opens. *)
   writable : Lpath.Abs.t list;
-      (** The primary root and the validated configured writable roots. *)
+      (** The primary root, the validated configured writable roots, and — when
+          the primary root carries a [.mentat] directory — its materialized
+          [.mentat/run] session-run directory, granted back to write beneath
+          the read-only [.mentat] carveout so a supervised build watch spawned
+          with its private runtime directory there can create and write its
+          registry entry. *)
   platform_writable : Lpath.Abs.t list;
       (** Shared scratch space: [/tmp] on both platforms, and each of the
           temp-dir variables the child inherits that names an existing,

@@ -742,6 +742,7 @@ module Command : sig
     t ->
     sw:Eio.Switch.t ->
     ?cwd:Mentat_workspace.Path.t ->
+    ?env_override:(string * string) list ->
     string list ->
     (Session.t, Error.t) result
   (** [start_session t ~sw argv] spawns [argv] as a supervised background child
@@ -752,6 +753,17 @@ module Command : sig
       new process group, which {!Session.signal} reaches. Two drain daemons and
       a waiter fiber run under [sw]; releasing [sw] kills and reaps the child —
       the session's lifetime {e is} [sw].
+
+      [env_override] rebinds names in the private child environment for this
+      session's child alone: an override replaces any existing binding of the
+      same name and otherwise appends, and the capability's own environment is
+      untouched — every other launch still receives it byte-for-byte. It
+      exists for a supervised child that must be handed a private runtime
+      handle of its own, such as a build watch's session-scoped
+      [XDG_RUNTIME_DIR]; it is not a general configuration channel, and the
+      sandbox policy is not consulted about the values. Raises
+      [Invalid_argument] on an empty name, a name containing ['='], or a name
+      or value containing a NUL — a programmer error, never a launch outcome.
 
       The waiter and reaper are cancellation-safe fibers on Eio's own
       [Process.await]/[signal], never a systhread [waitpid] — a systhread

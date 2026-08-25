@@ -2328,6 +2328,37 @@ let session_captures_raw_bytes () =
     chunk.Session.stdout;
   equal int ~msg:"nothing was dropped" 0 chunk.Session.dropped
 
+(* [env_override] rebinds a name for one session's child alone: the override
+   session reads the injected value, and a plain session spawned from the same
+   capability still sees the private environment untouched. *)
+let session_env_override_is_per_session () =
+  with_direct "bg-env-override" @@ fun w ->
+  let mono = mono_of w in
+  let probe = [ "/bin/sh"; "-c"; {|printf '%s' "${XDG_RUNTIME_DIR:-ABSENT}"|} ] in
+  Eio.Switch.run @@ fun sw ->
+  let overridden =
+    match
+      Command.start_session w.io ~sw
+        ~env_override:[ ("XDG_RUNTIME_DIR", "/work/.mentat/run/session") ]
+        probe
+    with
+    | Ok session -> session
+    | Error e -> failf "start_session failed: %a" Command.Error.pp e
+  in
+  let chunk =
+    poll_read ~mono overridden ~ready:(fun c ->
+        match c.Session.status with Session.Running -> false | _ -> true)
+  in
+  equal string ~msg:"the override reaches the overridden session's child"
+    "/work/.mentat/run/session" chunk.Session.stdout;
+  let plain = start_bg w ~sw probe in
+  let chunk =
+    poll_read ~mono plain ~ready:(fun c ->
+        match c.Session.status with Session.Running -> false | _ -> true)
+  in
+  equal string ~msg:"a plain session still sees the private environment"
+    "ABSENT" chunk.Session.stdout
+
 (* A child that exits on its own flips [Running -> Exited status] through the
    waiter fiber, carrying the true exit code; the final output is readable. *)
 let session_self_exit_flips_to_exited () =
@@ -2808,6 +2839,8 @@ let () =
         session_streams_are_independent;
       test "session captures raw bytes (ANSI, invalid UTF-8)"
         session_captures_raw_bytes;
+      test "an env override reaches one session's child alone"
+        session_env_override_is_per_session;
       test "a self-exit flips the session to Exited via the waiter"
         session_self_exit_flips_to_exited;
       test "signal terminates the session and is idempotent"
