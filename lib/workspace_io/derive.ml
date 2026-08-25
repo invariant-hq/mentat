@@ -678,20 +678,28 @@ let protected_meta_paths root =
    would otherwise deny it is: when [.mentat] already exists. A workspace
    without [.mentat] needs neither — the primary write clause covers whatever
    a supervisor creates there. The directory is materialized here because the
-   Linux backend binds every clause path at spawn; a directory that cannot be
-   made simply yields no grant, and the watch's own startup failure is the
-   diagnostic. *)
+   Linux backend binds every clause path at spawn.
+
+   Both components are repository content, so both are guarded the way every
+   materialized owned path is: [.mentat] must be a real directory this
+   account owns — a tracked symlink is never traversed — and the [run]
+   component goes through {!owned_directory}, whose [EEXIST] arm [lstat]s and
+   fails resolution closed on a planted entry, and whose lexical path is what
+   enters the writable lattice. Consulting [realpath] here would let a
+   repository ship [.mentat/run -> ~/.ssh] and turn a trusted clone into an
+   arbitrary host write grant for every confined command. *)
 let session_run_dirs primary =
   match existing_entry primary ".mentat" with
-  | None -> []
+  | None -> Ok []
   | Some meta -> (
-      match Lpath.Abs.add_component meta "run" with
-      | Error _ -> []
-      | Ok run -> (
-          match Unix.mkdir (Lpath.Abs.to_string run) 0o755 with
-          | () -> [ canonical run ]
-          | exception Unix.Unix_error (Unix.EEXIST, _, _) -> [ canonical run ]
-          | exception Unix.Unix_error _ -> []))
+      match Unix.lstat (Lpath.Abs.to_string meta) with
+      | { Unix.st_kind = Unix.S_DIR; st_uid; _ }
+        when st_uid = Unix.getuid () -> (
+          match Lpath.Abs.add_component meta "run" with
+          | Error _ -> Ok []
+          | Ok run -> Result.map Option.to_list (owned_directory run))
+      | _ -> Ok []
+      | exception Unix.Unix_error _ -> Ok [])
 
 let read_metadata_path path =
   let spelling = Lpath.Abs.to_string path in
@@ -946,7 +954,7 @@ let run ~scoped ~lookup ~logical ~configured_reads ~configured_writes
     |> canonical_paths
   in
   let* denied = owned_directories mentat_dirs in
-  let session_writes = session_run_dirs primary in
+  let* session_writes = session_run_dirs primary in
   let writable_lattice =
     (primary :: configured_writes)
     @ session_writes
