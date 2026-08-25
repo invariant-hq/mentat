@@ -163,9 +163,19 @@ val make :
   dune_program:string list ->
   ocamlfind_program:string list ->
   opam_switch_prefix:string option ->
+  ?dune_lock_held:(unit -> bool) ->
+  unit ->
   Mentat_tool.t
 (** [make workspace_io ~clock ~merlin_program ~dune_program ~ocamlfind_program
-     ~opam_switch_prefix] is the immutable OCaml-docs tool definition. It closes
+     ~opam_switch_prefix ()] is the immutable OCaml-docs tool definition.
+
+    [dune_lock_held] reports whether a supervised build watch currently holds
+    Dune's build lock (default: never). While it does, name queries — which
+    resolve the project universe through [dune describe workspace] — fail
+    [`Unavailable] with text naming the lock and the Merlin-backed
+    alternatives, never Dune's own lock advice; path queries are unaffected.
+
+    It closes
     the capability, monotonic clock, boot-resolved program prefixes, and
     optional switch prefix for the definition's lifetime, and projects command
     confinement once. Construction starts no process, observes no path, and

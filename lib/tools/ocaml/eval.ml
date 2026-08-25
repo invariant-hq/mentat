@@ -444,8 +444,20 @@ let run_setup workspace_io ~clock ~program ~started ~directory ~address
       | Supervision_failed _ ->
           result_of_output output)
 
-let run workspace_io ~clock ~program ~cancelled input =
+(* The refusal while a supervised build watch holds dune's build lock. The
+   setup command ([dune ocaml top .]) takes that lock and would fail with
+   dune's own advice — which suggests deleting [_build/.lock], exactly what a
+   caller must never do while a watch runs — so the tool answers honestly and
+   names the lock-free alternatives instead. *)
+let watch_lock_message =
+  "the build watch holds dune's build lock, and ocaml_eval needs `dune ocaml \
+   top`, which cannot run beside it; use ocaml_type_at, \
+   ocaml_find_definitions, or ocaml_docs path queries instead"
+
+let run workspace_io ~clock ~program ~dune_lock_held ~cancelled input =
   if cancelled () then interrupted ()
+  else if dune_lock_held () then
+    Mentat_tool.Result.failed `Unavailable watch_lock_message
   else
     let timeout_ms = Input.effective_timeout_ms input in
     if timeout_ms > max_timeout_ms then
@@ -482,12 +494,12 @@ let validate_program program =
          ^ " must not contain NUL"))
     program
 
-let make workspace_io ~clock ~program =
+let make workspace_io ~clock ~program ?(dune_lock_held = fun () -> false) () =
   validate_program program;
   let execution = Confinement.confined workspace_io in
   Mentat_tool.make ~name ~description:Mentat_prompts.Tools.ocaml_eval
     ~input:Input.contract ~output:encode_output
     ~permissions:(permissions execution)
     ~run:(fun ~cancelled input ->
-      run workspace_io ~clock ~program ~cancelled input)
+      run workspace_io ~clock ~program ~dune_lock_held ~cancelled input)
     ()
