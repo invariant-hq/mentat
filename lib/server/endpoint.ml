@@ -490,6 +490,18 @@ let dune_status : (unit, Mentat_workspace.Health.t) t =
           ());
   }
 
+let dune_control : (Codecs.dune_control, Mentat_workspace.Health.t) t =
+  {
+    name = "workspace.dune_control";
+    idempotency = By_value;
+    request = Codecs.dune_control;
+    response = Mentat_workspace.Health.jsont;
+    invoke =
+      (fun d { Codecs.dc_op } ->
+        d.Mentat_client.Driver.workspace
+          .Mentat_client.Driver.Workspace.dune_control ~op:dc_op);
+  }
+
 (* The whole single-shot table, packed for the dispatcher's by-name lookup. *)
 
 let table : any list =
@@ -529,6 +541,7 @@ let table : any list =
     Any review_compose;
     Any glance;
     Any dune_status;
+    Any dune_control;
   ]
 
 let name_of (Any d) = d.name

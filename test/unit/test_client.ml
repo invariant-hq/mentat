@@ -232,6 +232,8 @@ let default_workspace : Driver.Workspace.t =
   {
     Driver.Workspace.glance = (fun () -> fail "workspace glance: not scripted");
     dune = (fun () -> fail "workspace dune: not scripted");
+    dune_control =
+      (fun ~op:_ -> fail "workspace dune_control: not scripted");
   }
 
 let default_user_commands () = fail "user_commands: not scripted"
@@ -1676,6 +1678,7 @@ let reads_group =
                      {
                        Driver.Workspace.glance = (fun () -> raise_driver calls);
                        dune = (fun () -> raise_driver calls);
+                       dune_control = (fun ~op:_ -> raise_driver calls);
                      }
                    ())));
     ]

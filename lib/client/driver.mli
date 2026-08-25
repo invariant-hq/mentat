@@ -362,6 +362,16 @@ module Workspace : sig
             [glance] pairs with the worktree summary, without the git read, so
             a frontend may poll it on a tick while the watch is transitional.
             Backs {!Mentat_client.workspace_dune}. *)
+    dune_control :
+      op:[ `Restart | `Stop ] ->
+      (Mentat_workspace.Health.t, Mentat_protocol.Error.t) result;
+        (** [dune_control ~op] is the user's verb over the supervised build
+            watch: [`Restart] forgives a terminal state — gave up, a blocked
+            file watcher, a stop — and cycles a fresh watch from the probe;
+            [`Stop] ends supervision for the session. Both answer with the
+            status after the verb, so a frontend refreshes its row from the
+            reply; with no supervisor (the lane off) both are observations
+            only. Backs {!Mentat_client.workspace_dune_control}. *)
   }
 end
 

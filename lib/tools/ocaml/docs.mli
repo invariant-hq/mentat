@@ -163,18 +163,20 @@ val make :
   dune_program:string list ->
   ocamlfind_program:string list ->
   opam_switch_prefix:string option ->
-  ?dune_lock_held:(unit -> bool) ->
+  ?dune_lease:(unit -> [ `Free | `Held | `Leased of unit -> unit ]) ->
   unit ->
   Mentat_tool.t
 (** [make workspace_io ~clock ~merlin_program ~dune_program ~ocamlfind_program
      ~opam_switch_prefix ()] is the immutable OCaml-docs tool definition.
 
-    [dune_lock_held] reports whether a build watch — supervised or foreign —
-    currently holds Dune's build lock (default: never). While it does, name
-    queries — which
-    resolve the project universe through [dune describe workspace] — fail
-    [`Unavailable] with text naming the lock and the Merlin-backed
-    alternatives, never Dune's own lock advice; path queries are unaffected.
+    [dune_lease] is consulted when a name query resolves the project
+    universe through [dune describe workspace] (default: [`Free], run
+    as-is). [`Leased release] means a supervised watch was paused for the
+    command — it runs, and the lease returns via [release], failure
+    included. [`Held] means a foreign watch holds Dune's build lock: the
+    query fails [`Unavailable] with text naming the lock and the
+    Merlin-backed alternatives, never Dune's own lock advice. Path queries
+    never consult it.
 
     It closes
     the capability, monotonic clock, boot-resolved program prefixes, and

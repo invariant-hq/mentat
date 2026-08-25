@@ -18,13 +18,15 @@ branch is host-independent; the found branch lives in tooling.t.
   [WARN] toolchain: dune not found on PATH or opam switch
   [WARN] parity: no dune to compare (see toolchain)
   [WARN] project: no dune-project (OCaml tooling inactive)
+  [WARN] dune: no dune-project (OCaml tooling inactive)
+  [WARN] lint: lint rides the dune lane: no dune-project (OCaml tooling inactive)
   [PASS] diagnostics: $TESTCASE_ROOT/state/mentat (0 log(s), 0 crash report(s))
 
 The --json envelope carries the same nine checks as one deterministic line, with the
 warn level surfaced structurally — strictly more than the old `grep -o '"type"'`.
 
   $ MENTAT_MODEL=openai/gpt-5.6-sol mentat doctor --json | censor
-  {"schema_version":1,"type":"doctor","checks":[{"name":"config","level":"pass","detail":"resolved ($TESTCASE_ROOT/config/mentat/config.json)"},{"name":"storage","level":"pass","detail":"session store at $TESTCASE_ROOT/data/mentat"},{"name":"sessions","level":"pass","detail":"0 stored, 0 corrupt"},{"name":"trust","level":"pass","detail":"workspace trusted"},{"name":"auth","level":"warn","detail":"no connected provider; run `mentat auth login <provider>`"},{"name":"model","level":"pass","detail":"openai/gpt-5.6-sol"},{"name":"toolchain","level":"warn","detail":"dune not found on PATH or opam switch"},{"name":"parity","level":"warn","detail":"no dune to compare (see toolchain)"},{"name":"project","level":"warn","detail":"no dune-project (OCaml tooling inactive)"},{"name":"diagnostics","level":"pass","detail":"$TESTCASE_ROOT/state/mentat (0 log(s), 0 crash report(s))"}]}
+  {"schema_version":1,"type":"doctor","checks":[{"name":"config","level":"pass","detail":"resolved ($TESTCASE_ROOT/config/mentat/config.json)"},{"name":"storage","level":"pass","detail":"session store at $TESTCASE_ROOT/data/mentat"},{"name":"sessions","level":"pass","detail":"0 stored, 0 corrupt"},{"name":"trust","level":"pass","detail":"workspace trusted"},{"name":"auth","level":"warn","detail":"no connected provider; run `mentat auth login <provider>`"},{"name":"model","level":"pass","detail":"openai/gpt-5.6-sol"},{"name":"toolchain","level":"warn","detail":"dune not found on PATH or opam switch"},{"name":"parity","level":"warn","detail":"no dune to compare (see toolchain)"},{"name":"project","level":"warn","detail":"no dune-project (OCaml tooling inactive)"},{"name":"dune","level":"warn","detail":"no dune-project (OCaml tooling inactive)"},{"name":"lint","level":"warn","detail":"lint rides the dune lane: no dune-project (OCaml tooling inactive)"},{"name":"diagnostics","level":"pass","detail":"$TESTCASE_ROOT/state/mentat (0 log(s), 0 crash report(s))"}]}
 
 A present credential flips the auth check to [PASS] with the connected count; the run
 still never contacts the provider.
@@ -39,6 +41,8 @@ still never contacts the provider.
   [WARN] toolchain: dune not found on PATH or opam switch
   [WARN] parity: no dune to compare (see toolchain)
   [WARN] project: no dune-project (OCaml tooling inactive)
+  [WARN] dune: no dune-project (OCaml tooling inactive)
+  [WARN] lint: lint rides the dune lane: no dune-project (OCaml tooling inactive)
   [PASS] diagnostics: $TESTCASE_ROOT/state/mentat (0 log(s), 0 crash report(s))
 
 A provider-local credential-resolution failure remains a separate failed check
@@ -69,4 +73,6 @@ keeps the exit code at 0 (a warning is not a failure).
   [WARN] toolchain: dune not found on PATH or opam switch
   [WARN] parity: no dune to compare (see toolchain)
   [WARN] project: no dune-project (OCaml tooling inactive)
+  [WARN] dune: no dune-project (OCaml tooling inactive)
+  [WARN] lint: lint rides the dune lane: no dune-project (OCaml tooling inactive)
   [PASS] diagnostics: $TESTCASE_ROOT/state/mentat (0 log(s), 0 crash report(s))

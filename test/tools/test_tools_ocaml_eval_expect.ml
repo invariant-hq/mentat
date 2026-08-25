@@ -1139,12 +1139,12 @@ let%expect_test "constructor rejects invalid immutable program prefixes" =
     invocations: 0
     |}]
 
-let%expect_test "the tool refuses while a supervised watch holds dune's lock" =
+let%expect_test "the tool refuses while a foreign watch holds dune's lock" =
   with_world "watch-lock" @@ fun world ->
   let clock = Eio_mock.Clock.Mono.make () in
   let tool =
     Eval.make world.io ~clock ~program:[ "dune" ]
-      ~dune_lock_held:(fun () -> true)
+      ~dune_lease:(fun () -> `Held)
       ()
   in
   let result = run_call (decode_call tool (input "1 + 1")) in
@@ -1153,7 +1153,7 @@ let%expect_test "the tool refuses while a supervised watch holds dune's lock" =
   [%expect
     {|
     status: failed unavailable
-    message: a build watch holds dune's build lock, and ocaml_eval needs `dune ocaml top`, which cannot run beside it; use ocaml_type_at, ocaml_find_definitions, or ocaml_docs path queries instead
+    message: another session's build watch holds dune's build lock, and ocaml_eval needs `dune ocaml top`, which cannot run beside it; use ocaml_type_at, ocaml_find_definitions, or ocaml_docs path queries instead
     metadata: false
     invocations: 0
     |}]

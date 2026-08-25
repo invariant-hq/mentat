@@ -1190,7 +1190,7 @@ let%expect_test "name queries refuse while a supervised watch holds dune's lock"
       ~dune_program:[ world.base.fake; world.base.plan_dir; "dune" ]
       ~ocamlfind_program:[ world.base.fake; world.base.plan_dir; "ocamlfind" ]
       ~opam_switch_prefix:None
-      ~dune_lock_held:(fun () -> true)
+      ~dune_lease:(fun () -> `Held)
       ()
   in
   let result =
@@ -1204,7 +1204,7 @@ let%expect_test "name queries refuse while a supervised watch holds dune's lock"
   [%expect
     {|
     status: failed unavailable
-    message: a build watch holds dune's build lock, and the docs universe needs `dune describe`, which cannot run beside it; use ocaml_find_definitions or ocaml_type_at for name lookups, or query ocaml_docs by path
+    message: another session's build watch holds dune's build lock, and the docs universe needs `dune describe`, which cannot run beside it; use ocaml_find_definitions or ocaml_type_at for name lookups, or query ocaml_docs by path
     metadata: false
     invocations: dune=0 merlin=0
     |}]

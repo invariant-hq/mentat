@@ -57,6 +57,11 @@
  (package
   (name thumper)))
 
+(pin
+ (url "git+https://github.com/invariant-hq/litany.git")
+ (package
+  (name litany)))
+
 ; Windtrap 0.2.0 pre-release dogfood: pin the upstream repository until
 ; the release lands in the package repository.
 (pin
@@ -142,6 +147,8 @@
     :with-test
     (>= 0.2.0)))
   ; House benchmarking harness for the bench/ suites.
-  (thumper :with-test))
+  (thumper :with-test)
+  ; Linting
+  (litany :with-test))
  (tags
   (ai cli coding-agent developer-tools ocaml org:invariant-hq)))

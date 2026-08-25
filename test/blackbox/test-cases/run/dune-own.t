@@ -8,6 +8,7 @@ a foreign watch, never fought for. The quiet window is zero because the
 whole exchange is local and instantaneous.
 
   $ use_trusted_workspace
+  $ mentat config set dune.lint_command '[]' >/dev/null
   $ touch dune-project
   $ use_fake_dune
   $ export MENTAT_DUNE_RPC_QUIET_S=0

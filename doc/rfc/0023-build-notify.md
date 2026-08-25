@@ -468,12 +468,13 @@ Global_lock.lock_exn` and fail beside any watch.
 | tool | disposition |
 |---|---|
 | `ocaml_dune_describe` | **Deleted** — the tool (`lib/tools/ocaml/dune_describe.*`), its expect suite (`test/tools/test_tools_ocaml_dune_describe_expect.ml`), `lib/tools/output/ocaml/project.mli`, and its arms in `tool_distill.ml:37,373`, `argument.ml:164`, `catalog-and-boot.t`, `test_tools_dependency_laws.ml`, `test_tools_output.ml`. `Mentat_ocaml_dune_describe`'s pure normalizers stay for docs. `prompts/skills/ocaml-dune.md:148,279-283` stop recommending `dune describe`; `TODO.md:6` is removed. Re-entry when dune serves describe over RPC. |
-| `ocaml_docs` — `dune describe workspace` (`docs.ml:1853-1866`) | **Honest refusal** for name queries while a watch holds the lock: `the docs universe needs dune describe, which cannot run beside the build watch; use ocaml_find_definitions/ocaml_type_at`. Path queries are unaffected. The lease (slice E) serves it. |
-| `ocaml_eval` — `dune ocaml top .` (`eval.ml:406-415`) | Same refusal, same lease. Never dune's "delete `_build/.lock`" text. |
+| `ocaml_docs` — `dune describe workspace` | **Leased** past our own watch: the supervisor pauses the child (SIGTERM, daemon-scale grace), the one-shot runs where it was, and the machine respawns through the ordinary probe-first cycle — a one-shot still winding down is discovered, never fought. Leases nest; shutdown overrides a lost one. Only a **foreign** watch — not ours to pause — still earns the honest refusal for name queries: `another session's build watch holds dune's build lock…`; path queries never consult the lease. |
+| `ocaml_eval` — `dune ocaml top .` | Same lease, same foreign-only refusal. Never dune's "delete `_build/.lock`" text. |
 
-The refusal fires beside **any** watch — the health projection spans both
-owners, and the common lock holder is the user's own terminal `dune build
--w`, whose death by dune's delete-the-lock advice would be the costlier one.
+The refusal fires beside a **foreign** watch only — the common lock holder
+is the user's own terminal `dune build -w`, not ours to pause, and its
+death by dune's delete-the-lock advice would be the costlier one. Our own
+watch is never a refusal: the lease pauses it instead.
 
 The prompt's OCaml tooling section gains one sentence: *when a build watch
 is running (the dune status row), `dune build/test/exec/fmt/promote` forward
@@ -702,7 +703,7 @@ cram against `fswatch.t`'s 30 lines/scenario), not hoped.
 | B · own it | `bin/dune_watch.{ml,mli}` supervisor (~650 with docs), lazy spawn via `start_session`, probe-before-spawn, private `XDG_RUNTIME_DIR` + host mirror, stop-before-release; describe deleted (−1,780 incl. suite and ripple); docs/eval refusals (+80); skill/prompt text; `dune.watch`/`dune.targets` | ≈ +900 / −1,800 | first deliverable is the confinement spike: FSEvents under seatbelt (statically, no `mach-lookup` for `com.apple.FSEvents` is allowed — the allowance line, profile-wide per §11, is the deliverable), registry write under the private dir, socket from a confined child; the §3 self-test backs it at runtime |
 | C · hang | dune-command tool timeout → stall report → one verification flush → restart; first-flush confinement self-test; `dune.watch` notice; `MENTAT_DUNE_WATCH_FLUSH_S`; fake `hang`/`slow`/`hang-flush` mode directives | ≈ +230 | after B; insurance (the hang was old-dune); no periodic probe — the evidence path pays only on evidence |
 | D · lint | the green-settle runner (bounded confined one-shot, no dune in the loop), `ocamlc-loc` parse into the lint lane, `dune.lint_command` knob with the watch-shaped availability gate; classifier and marker convention deleted; no litany change; dogfood dev dep still owed (maintainer's relock) | ≈ +300 / −150 | after B (rides the instance); no upstream work |
-| E · commands + lease | `/dune restart|stop`, doctor lines, the watch lease serving docs and eval | ≈ +350 | after B |
+| E · commands + lease | `/dune restart|stop` (one `workspace.dune_control` endpoint, the row refreshed from the verb's answer), doctor's `dune` and `lint` rows (posture, reachability, and the off reasons), the watch lease (pause/park/resume on the supervisor, `Leased/Held/Free` at the tools' lock moment) | ≈ +350 | after B; the Leased bracket is pinned by the tools' foreign-refusal expects and the QA script — a hermetic lease cram needs a real one-shot beside a fake watch and is deliberately unpinned |
 
 **Sequencing.** A ships alone and is useful alone, with no sandbox question
 and nothing new holding the lock. B is not shippable without describe's

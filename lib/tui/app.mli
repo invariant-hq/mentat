@@ -279,6 +279,9 @@ type command =
           git read. Answered with {!workspace_dune_loaded}. Issued on a short
           tick while the watch is starting, building, or restarting, so the
           row follows the watch between turn boundaries. *)
+  | Dune_control of { request : request; op : [ `Restart | `Stop ] }
+      (** Drive the supervised build watch; answers through
+          {!workspace_dune_loaded} with the status after the verb. *)
   | Load_running_processes of {
       request : request;
       session : Mentat_session.Id.t;
