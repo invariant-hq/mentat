@@ -1205,6 +1205,16 @@ let issue_workspace_dune t =
   let request, t = fresh_request t in
   ({ t with dune_request = Some request }, Load_workspace_dune request)
 
+(* The glance and the status query travel together at the event moments: the
+   glance owns the worktree half, the dune query owns the row — one writer for
+   each fact, so a slow glance can never regress a fresher status. *)
+let issue_workspace_status t =
+  let t, glance = issue_workspace_glance t in
+  let t, dune = issue_workspace_dune t in
+  (t, [ glance; dune ])
+
+
+
 let issue_session_view session t =
   let request, t = fresh_request t in
   ( { t with session_view_request = Some (request, session) },
@@ -1802,9 +1812,9 @@ let fold_fact ~now fact t =
       | None -> (t, notify)
       | Some session ->
           let t, command = issue_session_view session t in
-          let t, glance = issue_workspace_glance t in
+          let t, glance = issue_workspace_status t in
           let t, running = issue_running_processes session t in
-          (t, [ command; glance; running ] @ notify))
+          (t, (command :: glance) @ [ running ] @ notify))
   | (Protocol.Fact.Journal_goal _ | Protocol.Fact.Turn_settled _) as settled
     -> (
       (* A settled turn notifies; a goal-journal fact rides the same view refresh
@@ -1819,9 +1829,9 @@ let fold_fact ~now fact t =
       | None -> (t, notify)
       | Some session ->
           let t, command = issue_session_view session t in
-          let t, glance = issue_workspace_glance t in
+          let t, glance = issue_workspace_status t in
           let t, running = issue_running_processes session t in
-          (t, [ command; glance; running ] @ notify))
+          (t, (command :: glance) @ [ running ] @ notify))
   | Protocol.Fact.Undo { update; _ } -> (
       (* The durable boundary drives the transcript seam and the model-view
          exclusion; the app only manages the composer. An [Armed] fact reloads
@@ -4128,8 +4138,7 @@ let load_workspace_glance_result request result t =
   guard_request t.glance_request request t @@ fun t ->
   let t = { t with glance_request = None } in
   match result with
-  | Ok value ->
-      ({ t with glance = Some value; dune_status = Some (snd value) }, [])
+  | Ok value -> ({ t with glance = Some value }, [])
   | Error _ -> (t, [])
 
 (* The status tick's fold: the same replace-on-success law over the dune half
@@ -4353,9 +4362,9 @@ let session_followed_result ~request ~session ~possibly_mutating t =
       in
       let t, view = issue_session_view session t in
       let t, decision = issue_pending_decision session t in
-      let t, glance = issue_workspace_glance t in
+      let t, glance = issue_workspace_status t in
       let t, running = issue_running_processes session t in
-      (t, retire @ [ view; decision; glance; running ])
+      (t, retire @ [ view; decision ] @ glance @ [ running ])
   | Some { pending_kind = Fork { parent }; _ } ->
       let _, t = take_pending request t in
       let t, retire = activate_session session t in
@@ -4370,9 +4379,9 @@ let session_followed_result ~request ~session ~possibly_mutating t =
       in
       let t, view = issue_session_view session t in
       let t, decision = issue_pending_decision session t in
-      let t, glance = issue_workspace_glance t in
+      let t, glance = issue_workspace_status t in
       let t, running = issue_running_processes session t in
-      (t, retire @ [ view; decision; glance; running ])
+      (t, retire @ [ view; decision ] @ glance @ [ running ])
   | Some { pending_kind = Rewind { source; _ }; _ } ->
       let _, t = take_pending request t in
       let t, retire = activate_session session t in
@@ -4387,9 +4396,9 @@ let session_followed_result ~request ~session ~possibly_mutating t =
       in
       let t, view = issue_session_view session t in
       let t, decision = issue_pending_decision session t in
-      let t, glance = issue_workspace_glance t in
+      let t, glance = issue_workspace_status t in
       let t, running = issue_running_processes session t in
-      (t, retire @ [ view; decision; glance; running ])
+      (t, retire @ [ view; decision ] @ glance @ [ running ])
   | Some { pending_kind = Start; _ } when Option.is_none t.active_session ->
       let t =
         {
@@ -4403,9 +4412,9 @@ let session_followed_result ~request ~session ~possibly_mutating t =
       in
       let t, view = issue_session_view session t in
       let t, decision = issue_pending_decision session t in
-      let t, glance = issue_workspace_glance t in
+      let t, glance = issue_workspace_status t in
       let t, running = issue_running_processes session t in
-      (t, [ view; decision; glance; running ])
+      (t, [ view; decision ] @ glance @ [ running ])
   | Some _ | None -> (t, [])
 
 let owns_main_feed ~session ~request t =
@@ -5535,26 +5544,16 @@ let workspace_tooling t =
   | Some status -> status
   | None -> Mentat_workspace.Health.Off Mentat_workspace.Health.Off.Disabled
 
-(* The watch is worth following on a tick only while it is between settled
-   states; at rest the event-driven glance moments are enough, and an absent
-   watch is not polled at all. *)
+(* The watch is worth following on a tick whenever one is live or coming up:
+   a settled row must still follow an editor save between turns (the rebuild
+   happens without any engine boundary), and a transitional one must resolve.
+   Only an absent watch is not polled — the glance moments cover attachment. *)
 let workspace_dune_transitional t =
   match workspace_tooling t with
   | Mentat_workspace.Health.Probing | Mentat_workspace.Health.Starting
-  | Mentat_workspace.Health.Restarting _ ->
+  | Mentat_workspace.Health.Restarting _ | Mentat_workspace.Health.Live _ ->
       true
-  | Mentat_workspace.Health.Live
-      {
-        phase =
-          ( Mentat_workspace.Health.Phase.Building
-          | Mentat_workspace.Health.Phase.Unresponsive );
-        _;
-      } ->
-      true
-  | Mentat_workspace.Health.Live
-      { phase = Mentat_workspace.Health.Phase.Settled _; _ }
-  | Mentat_workspace.Health.Off _ ->
-      false
+  | Mentat_workspace.Health.Off _ -> false
 
 let workspace_section t =
   Pane_sections.section ~label:"workspace"

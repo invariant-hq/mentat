@@ -483,7 +483,7 @@ let%expect_test "workspace section shows the worktree diff and dune verdict" =
     01 |                                                                                 │ workspace
     02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium                     │   worktree · 5 files · +40 −8
     03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-pane-a62e47f3                      │   session · 1 file · +2 −0
-    04 |                                                                                 │   dune · 2 errors
+    04 |                                                                                 │   dune · theirs · 2 errors
     05 | ❯ touch a file                                                                  │
     06 |                                                                                 │ context
     07 | ⏺ Edit                                                                          │   6,400 tokens
@@ -810,7 +810,7 @@ let%expect_test "a long transcript line never moves the fixed activity column" =
     {|
     01 |                                                                                                                                                                                │ workspace
     02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium                                                                                                                    │   worktree · 116 files · +2154 −88
-    03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-pa9e6e3b9b                                                                                                                        │   dune · clean
+    03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-pa9e6e3b9b                                                                                                                        │   dune · theirs · clean
     04 |                                                                                                                                                                                │
     05 | ❯ review the modules                                                                                                                                                           │
     06 |                                                                                                                                                                                │
@@ -864,7 +864,7 @@ let%expect_test "dune row renders warnings with lint, and a building watch" =
   Tui.print t;
   [%expect {|
     01 |                                                                                 │ workspace
-    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium                     │   dune · 2 warnings · 3 lint
+    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium                     │   dune · theirs · 2 warnings · 3 lint
     03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-pane-dun794b9825                   │
     04 |                                                                                 │
     05 | ❯ just answer                                                                   │
@@ -893,7 +893,7 @@ let%expect_test "dune row renders warnings with lint, and a building watch" =
   Tui.print t;
   [%expect {|
     01 |                                                                                 │ workspace
-    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium                     │   dune · building
+    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium                     │   dune · theirs · building
     03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-pane-dune-1d74279b                 │
     04 |                                                                                 │
     05 | ❯ just answer                                                                   │

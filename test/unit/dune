@@ -54,10 +54,12 @@
  (modules test_ocaml_dune_rpc)
  (libraries
   windtrap
+  mentat_ocaml
   mentat_ocaml_dune_rpc
   mentat_ocaml_toolchain
   mentat_workspace
   lpath
+  mtime
   eio
   eio_main
   unix))

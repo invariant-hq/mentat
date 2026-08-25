@@ -3,5 +3,5 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-module Diagnostic = Rpc.Diagnostic
+module Store = Store
 module Instance = Rpc.Instance

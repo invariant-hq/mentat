@@ -8,4 +8,6 @@ module Range = Range
 module Location = Location
 module Module_name = Module_name
 module Diagnostic = Diagnostic
+module Finding = Finding
+module Build_change = Build_change
 module Project = Project

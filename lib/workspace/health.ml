@@ -82,19 +82,35 @@ module Off = struct
     | Gave_up -> Format.pp_print_string ppf "gave up"
 end
 
+(* Why an owned watch is being respawned. *)
+module Restart = struct
+  type t = Exited of string | Hung
+
+  let equal (a : t) (b : t) =
+    match (a, b) with
+    | Exited a, Exited b -> String.equal a b
+    | Hung, Hung -> true
+    | (Exited _ | Hung), _ -> false
+
+  let pp ppf (t : t) =
+    match t with
+    | Exited description -> Format.fprintf ppf "exited(%s)" description
+    | Hung -> Format.pp_print_string ppf "hung"
+end
+
 type t =
   | Off of Off.t
   | Probing
   | Starting
   | Live of { owner : Owner.t; phase : Phase.t }
-  | Restarting of { cause : string }
+  | Restarting of Restart.t
 
 let equal (a : t) (b : t) =
   match (a, b) with
   | Off a, Off b -> Off.equal a b
   | Probing, Probing | Starting, Starting -> true
   | Live a, Live b -> Owner.equal a.owner b.owner && Phase.equal a.phase b.phase
-  | Restarting a, Restarting b -> String.equal a.cause b.cause
+  | Restarting a, Restarting b -> Restart.equal a b
   | (Off _ | Probing | Starting | Live _ | Restarting _), _ -> false
 
 let pp ppf (t : t) =
@@ -104,118 +120,154 @@ let pp ppf (t : t) =
   | Starting -> Format.pp_print_string ppf "starting"
   | Live { owner; phase } ->
       Format.fprintf ppf "live(%a, %a)" Owner.pp owner Phase.pp phase
-  | Restarting { cause } -> Format.fprintf ppf "restarting(%s)" cause
+  | Restarting cause -> Format.fprintf ppf "restarting(%a)" Restart.pp cause
 
-(* The status crosses the wire as one flat object: a closed [state] tag and
-   the payload members every state defaults except its own. The tag enum
-   rejects an unknown state loudly, so reconstruction is total; a [Failing]
-   verdict is any settled state whose severity counts are not both zero. *)
-let state_jsont =
-  Jsont.enum ~kind:"workspace watch state"
+(* The status crosses the wire as a tagged case object: every member present
+   is meaningful for its case, so a consumer can never read an invented fact —
+   a phase off an off watch, a pid off an owned one — and a hand-written
+   client speaks only the members its case has. *)
+let off_reason_jsont =
+  Jsont.enum ~kind:"workspace watch off reason"
     [
-      ("off-disabled", `Off_disabled);
-      ("off-no-dune", `Off_no_dune);
-      ("off-no-server", `Off_no_server);
-      ("off-blocked", `Off_blocked);
-      ("off-gave-up", `Off_gave_up);
-      ("probing", `Probing);
-      ("starting", `Starting);
-      ("live", `Live);
-      ("restarting", `Restarting);
+      ("disabled", `Disabled);
+      ("no-dune", `No_dune);
+      ("no-server", `No_server);
+      ("blocked", `Blocked);
+      ("gave-up", `Gave_up);
     ]
 
-let phase_jsont =
+let off_case =
+  Jsont.Object.map ~kind:"off watch" (fun reason detail ->
+      match reason with
+      | `Disabled -> Off Off.Disabled
+      | `No_dune -> Off Off.No_dune
+      | `No_server -> Off Off.No_server
+      | `Blocked -> Off (Off.Blocked (Option.value detail ~default:""))
+      | `Gave_up -> Off Off.Gave_up)
+  |> Jsont.Object.mem "reason" off_reason_jsont ~enc:(function
+    | Off Off.Disabled -> `Disabled
+    | Off Off.No_dune -> `No_dune
+    | Off Off.No_server -> `No_server
+    | Off (Off.Blocked _) -> `Blocked
+    | Off Off.Gave_up -> `Gave_up
+    | Probing | Starting | Live _ | Restarting _ -> assert false)
+  |> Jsont.Object.opt_mem "detail" Jsont.string ~enc:(function
+    | Off (Off.Blocked detail) -> Some detail
+    | Off _ -> None
+    | Probing | Starting | Live _ | Restarting _ -> assert false)
+  |> Jsont.Object.error_unknown |> Jsont.Object.finish
+  |> Jsont.Object.Case.map "off" ~dec:Fun.id
+
+let probing_case =
+  Jsont.Object.map ~kind:"probing watch" Probing
+  |> Jsont.Object.error_unknown |> Jsont.Object.finish
+  |> Jsont.Object.Case.map "probing" ~dec:Fun.id
+
+let starting_case =
+  Jsont.Object.map ~kind:"starting watch" Starting
+  |> Jsont.Object.error_unknown |> Jsont.Object.finish
+  |> Jsont.Object.Case.map "starting" ~dec:Fun.id
+
+let restart_cause_jsont =
+  Jsont.enum ~kind:"workspace watch restart cause"
+    [ ("exited", `Exited); ("hung", `Hung) ]
+
+let restarting_case =
+  Jsont.Object.map ~kind:"restarting watch" (fun cause detail ->
+      match cause with
+      | `Exited -> Restarting (Restart.Exited (Option.value detail ~default:""))
+      | `Hung -> Restarting Restart.Hung)
+  |> Jsont.Object.mem "cause" restart_cause_jsont ~enc:(function
+    | Restarting (Restart.Exited _) -> `Exited
+    | Restarting Restart.Hung -> `Hung
+    | Off _ | Probing | Starting | Live _ -> assert false)
+  |> Jsont.Object.opt_mem "detail" Jsont.string ~enc:(function
+    | Restarting (Restart.Exited detail) -> Some detail
+    | Restarting Restart.Hung -> None
+    | Off _ | Probing | Starting | Live _ -> assert false)
+  |> Jsont.Object.error_unknown |> Jsont.Object.finish
+  |> Jsont.Object.Case.map "restarting" ~dec:Fun.id
+
+let phase_tag_jsont =
   Jsont.enum ~kind:"workspace watch phase"
     [
       ("building", `Building); ("settled", `Settled);
       ("unresponsive", `Unresponsive);
     ]
 
-let state_of = function
-  | Off Off.Disabled -> `Off_disabled
-  | Off Off.No_dune -> `Off_no_dune
-  | Off Off.No_server -> `Off_no_server
-  | Off (Off.Blocked _) -> `Off_blocked
-  | Off Off.Gave_up -> `Off_gave_up
-  | Probing -> `Probing
-  | Starting -> `Starting
-  | Live _ -> `Live
-  | Restarting _ -> `Restarting
+let live_owner = function
+  | Live { owner; _ } -> owner
+  | Off _ | Probing | Starting | Restarting _ -> assert false
 
-let reason_of = function
-  | Off (Off.Blocked reason) -> reason
-  | Restarting { cause } -> cause
-  | Off _ | Probing | Starting | Live _ -> ""
+let live_phase = function
+  | Live { phase; _ } -> phase
+  | Off _ | Probing | Starting | Restarting _ -> assert false
 
-let pid_of = function
-  | Live { owner = Owner.Theirs pid; _ } -> pid
-  | Live { owner = Owner.Ours; _ } | Off _ | Probing | Starting | Restarting _
-    ->
-      0
-
-let ours_of = function
-  | Live { owner = Owner.Ours; _ } -> true
-  | Live _ | Off _ | Probing | Starting | Restarting _ -> false
-
-let phase_of = function
-  | Live { phase = Phase.Building; _ } -> `Building
-  | Live { phase = Phase.Settled _; _ } -> `Settled
-  | Live { phase = Phase.Unresponsive; _ } -> `Unresponsive
-  | Off _ | Probing | Starting | Restarting _ -> `Building
-
-let errors_of = function
-  | Live { phase = Phase.Settled { build = Verdict.Failing { errors; _ }; _ }; _ }
-    ->
-      errors
-  | _ -> 0
-
-let warnings_of = function
-  | Live
-      {
-        phase = Phase.Settled { build = Verdict.Failing { warnings; _ }; _ };
-        _;
-      } ->
-      warnings
-  | _ -> 0
-
-let lint_of = function
-  | Live { phase = Phase.Settled { lint; _ }; _ } -> lint
-  | _ -> None
+let live_case =
+  Jsont.Object.map ~kind:"live watch"
+    (fun ours pid phase errors warnings lint ->
+      let owner =
+        if ours then Owner.Ours
+        else Owner.Theirs (Option.value pid ~default:0)
+      in
+      let phase =
+        match phase with
+        | `Building -> Phase.Building
+        | `Unresponsive -> Phase.Unresponsive
+        | `Settled ->
+            let errors = Option.value errors ~default:0 in
+            let warnings = Option.value warnings ~default:0 in
+            let build =
+              if errors = 0 && warnings = 0 then Verdict.Clean
+              else Verdict.Failing { errors; warnings }
+            in
+            Phase.Settled { build; lint }
+      in
+      Live { owner; phase })
+  |> Jsont.Object.mem "ours" Jsont.bool ~enc:(fun t ->
+         match live_owner t with Owner.Ours -> true | Owner.Theirs _ -> false)
+  |> Jsont.Object.opt_mem "pid" Jsont.int ~enc:(fun t ->
+         match live_owner t with
+         | Owner.Theirs pid -> Some pid
+         | Owner.Ours -> None)
+  |> Jsont.Object.mem "phase" phase_tag_jsont ~enc:(fun t ->
+         match live_phase t with
+         | Phase.Building -> `Building
+         | Phase.Settled _ -> `Settled
+         | Phase.Unresponsive -> `Unresponsive)
+  |> Jsont.Object.opt_mem "errors" Jsont.int ~enc:(fun t ->
+         match live_phase t with
+         | Phase.Settled { build = Verdict.Failing { errors; _ }; _ } ->
+             Some errors
+         | Phase.Settled { build = Verdict.Clean; _ }
+         | Phase.Building | Phase.Unresponsive ->
+             None)
+  |> Jsont.Object.opt_mem "warnings" Jsont.int ~enc:(fun t ->
+         match live_phase t with
+         | Phase.Settled { build = Verdict.Failing { warnings; _ }; _ } ->
+             Some warnings
+         | Phase.Settled { build = Verdict.Clean; _ }
+         | Phase.Building | Phase.Unresponsive ->
+             None)
+  |> Jsont.Object.opt_mem "lint" Jsont.int ~enc:(fun t ->
+         match live_phase t with
+         | Phase.Settled { lint; _ } -> lint
+         | Phase.Building | Phase.Unresponsive -> None)
+  |> Jsont.Object.error_unknown |> Jsont.Object.finish
+  |> Jsont.Object.Case.map "live" ~dec:Fun.id
 
 let jsont =
-  Jsont.Object.map ~kind:"workspace watch status"
-    (fun state reason pid ours phase errors warnings lint ->
-      match state with
-      | `Off_disabled -> Off Off.Disabled
-      | `Off_no_dune -> Off Off.No_dune
-      | `Off_no_server -> Off Off.No_server
-      | `Off_blocked -> Off (Off.Blocked reason)
-      | `Off_gave_up -> Off Off.Gave_up
-      | `Probing -> Probing
-      | `Starting -> Starting
-      | `Restarting -> Restarting { cause = reason }
-      | `Live ->
-          let owner =
-            if ours then Owner.Ours else Owner.Theirs pid
-          in
-          let phase =
-            match phase with
-            | `Building -> Phase.Building
-            | `Unresponsive -> Phase.Unresponsive
-            | `Settled ->
-                let build =
-                  if errors = 0 && warnings = 0 then Verdict.Clean
-                  else Verdict.Failing { errors; warnings }
-                in
-                Phase.Settled { build; lint }
-          in
-          Live { owner; phase })
-  |> Jsont.Object.mem "state" state_jsont ~enc:state_of
-  |> Jsont.Object.mem "reason" Jsont.string ~enc:reason_of
-  |> Jsont.Object.mem "pid" Jsont.int ~enc:pid_of
-  |> Jsont.Object.mem "ours" Jsont.bool ~enc:ours_of
-  |> Jsont.Object.mem "phase" phase_jsont ~enc:phase_of
-  |> Jsont.Object.mem "errors" Jsont.int ~enc:errors_of
-  |> Jsont.Object.mem "warnings" Jsont.int ~enc:warnings_of
-  |> Jsont.Object.mem "lint" (Jsont.option Jsont.int) ~enc:lint_of
+  let cases =
+    List.map Jsont.Object.Case.make
+      [ off_case; probing_case; starting_case; restarting_case; live_case ]
+  in
+  let enc_case = function
+    | Off _ as t -> Jsont.Object.Case.value off_case t
+    | Probing as t -> Jsont.Object.Case.value probing_case t
+    | Starting as t -> Jsont.Object.Case.value starting_case t
+    | Restarting _ as t -> Jsont.Object.Case.value restarting_case t
+    | Live _ as t -> Jsont.Object.Case.value live_case t
+  in
+  Jsont.Object.map ~kind:"workspace watch status" Fun.id
+  |> Jsont.Object.case_mem "state" Jsont.string ~enc:Fun.id ~enc_case cases
   |> Jsont.Object.error_unknown |> Jsont.Object.finish

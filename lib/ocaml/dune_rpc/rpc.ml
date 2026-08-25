@@ -61,7 +61,10 @@ module Dune_rpc_fiber = struct
         run (finally ());
         Printexc.raise_with_backtrace exn backtrace
 
-  let collect_errors f () = try Ok (run (f ())) with exn -> Error [ exn ]
+  let collect_errors f () =
+    try Ok (run (f ())) with
+    | Eio.Cancel.Cancelled _ as cancelled -> raise cancelled
+    | exn -> Error [ exn ]
 
   module O = struct
     let ( let* ) value f () = run (f (run value))
@@ -241,7 +244,10 @@ module Registry = struct
       Dune_registry.Poll
         (Registry_fiber)
         (struct
-          let with_error f = try Ok (f ()) with exn -> Error exn
+          let with_error f =
+            try Ok (f ()) with
+            | Eio.Cancel.Cancelled _ as cancelled -> raise cancelled
+            | exn -> Error exn
           let path raw = Eio.Path.( / ) fs raw
 
           let scandir raw =
@@ -287,20 +293,6 @@ module Registry = struct
                endpoint = "dune rpc registry";
                message = Printexc.to_string exn;
              })
-end
-
-module Diagnostic = struct
-  module Id = struct
-    type t = string
-
-    let of_string value =
-      if String.equal value "" then
-        invalid_arg "diagnostic id must not be empty";
-      value
-  end
-
-  type id = Id.t
-
 end
 
 module Connection = struct
@@ -410,6 +402,7 @@ module Connection = struct
     with
     | Drpc.Response.Error.E error -> response_error error
     | Drpc.Version_error.E error -> version_error error
+    | Eio.Cancel.Cancelled _ as cancelled -> raise cancelled
     | exn ->
         Error
           (Error.Connection_failed
@@ -475,85 +468,96 @@ module Connection = struct
           ~source:Mentat_ocaml.Diagnostic.Source.dune
           ~severity:(severity diagnostic) message)
 
+  (* The store key: the watch's own diagnostic identifier, rendered
+     injectively — a hash would let a collision remove the wrong finding and
+     silently corrupt the build witness. *)
   let diagnostic_id diagnostic =
-    Drpc.Diagnostic.id diagnostic
-    |> Drpc.Diagnostic.Id.hash |> string_of_int |> Diagnostic.Id.of_string
+    Csexp.to_string
+      (Drpc.Conv.to_sexp Drpc.Diagnostic.Id.sexp
+         (Drpc.Diagnostic.id diagnostic))
 
 end
 
 module Instance = struct
   type fs = Fs : _ Eio.Path.t -> fs
   type net = Net : _ Eio.Net.t -> net
+  type mono = Mono : _ Eio.Time.Mono.t -> mono
 
-  module Watch = struct
-    type status =
-      | Absent
-      | Connecting of { pid : int }
-      | Attached of { pid : int }
+  module Status = struct
+    type t = Absent | Connecting | Attached of { pid : int }
 
-    let equal (a : status) (b : status) =
+    let equal (a : t) (b : t) =
       match (a, b) with
-      | Absent, Absent -> true
-      | Connecting a, Connecting b -> Int.equal a.pid b.pid
+      | Absent, Absent | Connecting, Connecting -> true
       | Attached a, Attached b -> Int.equal a.pid b.pid
-      | (Absent | Connecting _ | Attached _), _ -> false
+      | (Absent | Connecting | Attached _), _ -> false
 
-    let pp ppf (status : status) =
-      match status with
+    let pp ppf (t : t) =
+      match t with
       | Absent -> Format.pp_print_string ppf "absent"
-      | Connecting { pid } -> Format.fprintf ppf "connecting(pid %d)" pid
+      | Connecting -> Format.pp_print_string ppf "connecting"
       | Attached { pid } -> Format.fprintf ppf "attached(pid %d)" pid
   end
 
   module Snapshot = struct
     type t = {
-      status : Watch.status;
+      status : Status.t;
       building : bool;
-      reading : Workspace.Build_change.Reading.t option;
+      reading : Mentat_ocaml.Build_change.Reading.t option;
     }
+
+    let health t =
+      match t.status with
+      | Status.Absent ->
+          Mentat_workspace.Health.Off Mentat_workspace.Health.Off.No_server
+      | Status.Connecting -> Mentat_workspace.Health.Probing
+      | Status.Attached { pid } ->
+          let phase =
+            match t.reading with
+            | Some reading when not t.building ->
+                Mentat_workspace.Health.Phase.Settled
+                  {
+                    build = Mentat_ocaml.Build_change.Reading.verdict reading;
+                    lint = Mentat_ocaml.Build_change.Reading.lint reading;
+                  }
+            | Some _ | None -> Mentat_workspace.Health.Phase.Building
+          in
+          Mentat_workspace.Health.Live
+            { owner = Mentat_workspace.Health.Owner.Theirs pid; phase }
   end
 
-  (* The last progress sample, collapsed to what the snapshot rule needs: a
-     settle admits a reading, anything else is a build in flight (dune reports
-     [Waiting] only before its first build, which has not settled either). *)
-  type activity = Settled | Busy
-
-  type mono = Mono : _ Eio.Time.Mono.t -> mono
-
+  (* Single-domain writes: every mutable field is assigned whole values with
+     no suspension between a read and its dependent write, so snapshots are
+     torn-proof without a lock and the drain path can never wait on the attach
+     fiber's IO. *)
   type t = {
     fs : fs;
     net : net;
+    mono : mono;
     workspace : Workspace.t;
     registry : Registry.t;
-    mutex : Eio.Mutex.t;
     mutable endpoint : Endpoint.t option;
     mutable endpoint_pid : int;
-    mutable mono : mono option;
-    mutable status : Watch.status;
-    mutable findings : (string * Workspace.Finding.t) list;
-    mutable activity : activity;
-    mutable last_event : Mtime.t option;
-    mutable settle_witnessed : bool;
+    mutable status : Status.t;
+    mutable store : Store.t;
   }
 
-  let create ~fs ~net ~workspace ?(env = Sys.getenv_opt) () =
+  let create ~fs ~net ~mono ~workspace ?(env = Sys.getenv_opt) () =
     {
       fs = Fs fs;
       net = Net net;
+      mono = Mono mono;
       workspace;
       registry = Registry.create ~env ();
-      mutex = Eio.Mutex.create ();
       endpoint = None;
       endpoint_pid = 0;
-      mono = None;
-      status = Watch.Absent;
-      findings = [];
-      activity = Busy;
-      last_event = None;
-      settle_witnessed = false;
+      status = Status.Absent;
+      store = Store.initial;
     }
 
-  let with_lock t f = Eio.Mutex.use_rw ~protect:true t.mutex f
+  let now t =
+    let (Mono mono) = t.mono in
+    Eio.Time.Mono.now mono
 
   let workspace_root_strings workspace =
     List.map
@@ -594,7 +598,9 @@ module Instance = struct
         && List.exists (same_root (Registry.root entry)) roots)
       entries
 
-  let refresh_unlocked t =
+  (* Registry IO runs on the attach fiber alone; only the resulting endpoint
+     assignment is shared state. *)
+  let refresh t =
     let (Fs fs) = t.fs in
     let previous = t.endpoint in
     let note_lost () =
@@ -621,25 +627,40 @@ module Instance = struct
         t.endpoint_pid <- Registry.pid entry;
         Ok (Some endpoint)
 
-  let refresh t =
-    Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> refresh_unlocked t)
-
-  (* The attach loop: fold dune's own diagnostic events into the finding
-     store, sample progress, and answer snapshots without IO. *)
-
   (* Test-only scaling: a hermetic cram drives a fake watch whose whole
-     exchange completes in microseconds, so it shrinks the quiet window rather
-     than sleeping the suite through it. Production never sets these. *)
+     exchange completes in microseconds, so it shrinks the timing windows
+     rather than sleeping the suite through them. Production never sets
+     these. *)
   let env_float name default =
     match Sys.getenv_opt name with
     | None | Some "" -> default
     | Some value -> ( try float_of_string value with Failure _ -> default)
 
   let quiet_s = env_float "MENTAT_DUNE_RPC_QUIET_S" 0.25
-  let quiet_fallback_s = 2.0
+  let quiet_fallback_s = env_float "MENTAT_DUNE_RPC_QUIET_FALLBACK_S" 2.0
   let reconnect_pause_s = env_float "MENTAT_DUNE_RPC_RECONNECT_S" 1.0
 
-  let span_s a b = Mtime.Span.to_float_ns (Mtime.span a b) *. 1e-9
+  let snapshot t =
+    {
+      Snapshot.status = t.status;
+      building =
+        (match t.status with
+        | Status.Attached _ -> Store.building t.store
+        | Status.Absent | Status.Connecting -> false);
+      reading =
+        (match t.status with
+        | Status.Attached _ ->
+            Store.reading t.store ~now:(now t) ~quiet_s
+              ~fallback_s:quiet_fallback_s
+        | Status.Absent | Status.Connecting -> None);
+    }
+
+  let set_status t status =
+    if not (Status.equal t.status status) then
+      Log.info (fun m -> m "dune watch %a" Status.pp status);
+    t.status <- status
+
+  let fold_event t event = t.store <- Store.apply ~at:(now t) event t.store
 
   let first_line text =
     match String.index_opt text '\n' with
@@ -649,14 +670,15 @@ module Instance = struct
   let finding_of_diagnostic diagnostic =
     let severity =
       match Mentat_ocaml.Diagnostic.severity diagnostic with
-      | Mentat_ocaml.Diagnostic.Severity.Error -> Workspace.Finding.Severity.Error
+      | Mentat_ocaml.Diagnostic.Severity.Error ->
+          Mentat_ocaml.Finding.Severity.Error
       | Mentat_ocaml.Diagnostic.Severity.Warning
       | Mentat_ocaml.Diagnostic.Severity.Hint ->
-          Workspace.Finding.Severity.Warning
+          Mentat_ocaml.Finding.Severity.Warning
       (* An exception-shaped diagnostic has no severity on the wire; it is a
          failure. *)
       | Mentat_ocaml.Diagnostic.Severity.Information ->
-          Workspace.Finding.Severity.Error
+          Mentat_ocaml.Finding.Severity.Error
     in
     let head =
       let head = first_line (Mentat_ocaml.Diagnostic.message diagnostic) in
@@ -669,104 +691,41 @@ module Instance = struct
           ( Some (Workspace.Path.display (Mentat_ocaml.Location.path location)),
             Some (Format.asprintf "%a" Mentat_ocaml.Location.pp location) )
     in
-    Workspace.Finding.classify ~lint:true ~severity ?path ?location ~head ()
-
-  let now_of t =
-    match t.mono with
-    | None -> None
-    | Some (Mono mono) -> Some (Eio.Time.Mono.now mono)
-
-  let apply_event t event =
-    with_lock t (fun () ->
-        (match t.mono with
-        | None -> ()
-        | Some (Mono mono) -> t.last_event <- Some (Eio.Time.Mono.now mono));
-        match event with
-        | `Add (id, finding) ->
-            t.findings <- (id, finding) :: List.remove_assoc id t.findings
-        | `Remove id ->
-            t.findings <- List.remove_assoc id t.findings;
-            t.settle_witnessed <- false)
-
-  let snapshot t =
-    with_lock t (fun () ->
-        let status = t.status in
-        let building =
-          match (status, t.activity) with
-          | Watch.Attached _, Busy -> true
-          | Watch.Attached _, Settled -> false
-          | (Watch.Absent | Watch.Connecting _), _ -> false
-        in
-        let reading =
-          match (status, t.activity, now_of t) with
-          | Watch.Attached _, Settled, Some now ->
-              let quiet_for =
-                match t.last_event with
-                | None -> infinity
-                | Some at -> span_s at now
-              in
-              if quiet_for < quiet_s then None
-              else
-                let empty_confirmed =
-                  t.settle_witnessed || quiet_for >= quiet_fallback_s
-                in
-                let findings = List.rev_map snd t.findings in
-                let lint =
-                  if
-                    List.exists
-                      (fun finding ->
-                        Workspace.Finding.Lane.equal
-                          (Workspace.Finding.lane finding)
-                          Workspace.Finding.Lane.Lint)
-                      findings
-                  then
-                    Some (Workspace.Build_change.Reading.lane findings)
-                  else None
-                in
-                Some
-                  (Workspace.Build_change.Reading.make
-                     ~build:
-                       (Workspace.Build_change.Reading.lane ~empty_confirmed
-                          findings)
-                     ?lint ())
-          | _ -> None
-        in
-        { Snapshot.status; building; reading })
-
-  let set_status t status =
-    with_lock t (fun () ->
-        if not (Watch.equal t.status status) then
-          Log.info (fun m -> m "dune watch %a" Watch.pp status);
-        t.status <- status)
+    (* Every slice-A watch is foreign — its targets unknown — so the marker
+       alone decides the lane. Ownership must thread the requested-lint fact
+       here. *)
+    Mentat_ocaml.Finding.classify ~lint:true ~severity ?path ?location ~head ()
 
   let diagnostic_events t connection events =
-    List.iter
-      (fun (event : Drpc.Diagnostic.Event.t) ->
-        match event with
-        | Drpc.Diagnostic.Event.Add diagnostic -> (
-            match Connection.diagnostic_of_dune connection diagnostic with
-            | Ok converted ->
-                apply_event t
-                  (`Add
-                     ( Connection.diagnostic_id diagnostic,
-                       finding_of_diagnostic converted ))
-            | Error _ ->
-                (* A malformed diagnostic is dropped rather than faulting the
-                   stream; the set self-corrects at the next build. *)
-                ())
-        | Drpc.Diagnostic.Event.Remove diagnostic ->
-            apply_event t (`Remove (Connection.diagnostic_id diagnostic)))
-      events
+    let events =
+      List.filter_map
+        (fun (event : Drpc.Diagnostic.Event.t) ->
+          match event with
+          | Drpc.Diagnostic.Event.Add diagnostic -> (
+              match Connection.diagnostic_of_dune connection diagnostic with
+              | Ok converted ->
+                  Some
+                    (`Add
+                       ( Connection.diagnostic_id diagnostic,
+                         finding_of_diagnostic converted ))
+              | Error _ ->
+                  (* A malformed diagnostic is dropped rather than faulting
+                     the stream; the set self-corrects at the next build. *)
+                  None)
+          | Drpc.Diagnostic.Event.Remove diagnostic ->
+              Some (`Remove (Connection.diagnostic_id diagnostic)))
+        events
+    in
+    (* The answer itself synchronises the set, an empty one included. *)
+    fold_event t (Store.Diagnostics events)
 
   let progress_event t (progress : Drpc.Progress.t) =
-    with_lock t (fun () ->
-        match progress with
-        | Drpc.Progress.Success | Drpc.Progress.Failed ->
-            t.activity <- Settled;
-            t.settle_witnessed <- true
-        | Drpc.Progress.Waiting | Drpc.Progress.In_progress _
-        | Drpc.Progress.Interrupted ->
-            t.activity <- Busy)
+    match progress with
+    | Drpc.Progress.Success | Drpc.Progress.Failed ->
+        fold_event t (Store.Progress `Settle)
+    | Drpc.Progress.Waiting | Drpc.Progress.In_progress _
+    | Drpc.Progress.Interrupted ->
+        fold_event t (Store.Progress `Busy)
 
   let stream_loop stream ~on_value =
     let rec loop () =
@@ -790,12 +749,8 @@ module Instance = struct
   let hold_subscriptions t connection =
     let* diagnostics = subscribe connection Drpc.Procedures.Poll.diagnostic in
     let* progress = subscribe connection Drpc.Procedures.Poll.progress in
-    with_lock t (fun () ->
-        t.findings <- [];
-        t.activity <- Busy;
-        t.last_event <- None;
-        t.settle_witnessed <- false);
-    set_status t (Watch.Attached { pid = t.endpoint_pid });
+    fold_event t Store.Connected;
+    set_status t (Status.Attached { pid = t.endpoint_pid });
     Eio.Fiber.both
       (fun () ->
         stream_loop diagnostics ~on_value:(diagnostic_events t connection))
@@ -804,7 +759,7 @@ module Instance = struct
 
   let attach_once t endpoint =
     let (Net net) = t.net in
-    set_status t (Watch.Connecting { pid = t.endpoint_pid });
+    set_status t Status.Connecting;
     let result =
       Eio.Switch.run @@ fun sw ->
       Connection.with_connection ~sw ~net ~workspace:t.workspace endpoint
@@ -820,17 +775,19 @@ module Instance = struct
               message
         in
         Log.debug (fun m -> m "dune watch connection ended: %s" message));
-    set_status t Watch.Absent
+    (* Hold [Connecting] across a transient EOF: the next registry poll — one
+       pause away — settles whether the endpoint is gone ([Absent]) or worth
+       reconnecting, and the row is spared a sub-second off/on flap. *)
+    set_status t Status.Connecting
 
-  let attach t ~mono =
-    t.mono <- Some (Mono mono);
+  let attach t =
+    let (Mono mono) = t.mono in
     let rec loop () =
       (match refresh t with
       | Ok (Some endpoint) -> attach_once t endpoint
-      | Ok None | Error _ -> set_status t Watch.Absent);
+      | Ok None | Error _ -> set_status t Status.Absent);
       Eio.Time.Mono.sleep mono reconnect_pause_s;
       loop ()
     in
     loop ()
-
 end

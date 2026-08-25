@@ -29,6 +29,14 @@ module Location = Location
 module Module_name = Module_name
 (** OCaml module names. *)
 
+module Finding = Finding
+(** Build and lint diagnostic identities — the content keys the build-change
+    law compares. *)
+
+module Build_change = Build_change
+(** The build-change law: the pure diff between consecutive settled diagnostic
+    readings, per lane, rendered as {!Mentat_workspace.Notice.t}. *)
+
 (** {1 Diagnostics} *)
 
 module Diagnostic = Diagnostic

@@ -1014,11 +1014,11 @@ let endpoint_reps () =
       {|{"scope":"cwd","lifecycles":[]}|},
       {|{"summaries":[],"diagnostics":[]}|} );
     ("review.crs", {|{}|}, {|[]|});
-    (* A Live/Theirs/Settled failing value, so every member of the flat watch
-       status object is pinned. *)
+    (* A Live/Theirs/Settled failing value, so the live case's every member
+       is pinned; the other case tags are covered by the codec's own suite. *)
     ( "workspace.dune",
       {|{}|},
-      {|{"state":"live","reason":"","pid":4242,"ours":false,"phase":"settled","errors":2,"warnings":1,"lint":3}|}
+      {|{"state":"live","ours":false,"pid":4242,"phase":"settled","errors":2,"warnings":1,"lint":3}|}
     );
     ("review.diff", {|"lib/a.ml"|}, {|null|});
   ]

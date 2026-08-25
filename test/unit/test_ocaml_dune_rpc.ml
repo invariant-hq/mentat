@@ -64,10 +64,10 @@ let spawn_watch ~sw ~env ~toolchain ~dune ~root =
 
 (* Run [attach] in a sibling fiber for the duration of [f]: the loop never
    returns, so the race ends it when [f]'s branch finishes. *)
-let with_attached ~eio_env instance f =
+let with_attached instance f =
   Eio.Fiber.first
     (fun () ->
-      Instance.attach instance ~mono:(Eio.Stdenv.mono_clock eio_env);
+      Instance.attach instance;
       assert false)
     f
 
@@ -96,24 +96,24 @@ let snapshot_absent () =
   Eio_main.run @@ fun eio_env ->
   let instance =
     Instance.create ~fs:(Eio.Stdenv.fs eio_env) ~net:(Eio.Stdenv.net eio_env)
-      ~workspace:(workspace_at root) ()
+      ~mono:(Eio.Stdenv.mono_clock eio_env) ~workspace:(workspace_at root) ()
   in
   let before = Instance.snapshot instance in
   is_true ~msg:"absent before attach"
-    (Instance.Watch.equal before.Instance.Snapshot.status Instance.Watch.Absent);
+    (Instance.Status.equal before.Instance.Snapshot.status Instance.Status.Absent);
   is_true ~msg:"no reading before attach"
     (Option.is_none before.Instance.Snapshot.reading);
   let clock = Eio.Stdenv.clock eio_env in
-  with_attached ~eio_env instance (fun () ->
+  with_attached instance (fun () ->
       let snapshot =
         await_snapshot ~clock instance ~timeout_s:1.0 ~wanted:(fun _ -> false)
       in
       is_true
         ~msg:
           (Format.asprintf "no watch registered => Absent, got %a"
-             Instance.Watch.pp snapshot.Instance.Snapshot.status)
-        (Instance.Watch.equal snapshot.Instance.Snapshot.status
-           Instance.Watch.Absent))
+             Instance.Status.pp snapshot.Instance.Snapshot.status)
+        (Instance.Status.equal snapshot.Instance.Snapshot.status
+           Instance.Status.Absent))
 
 (* Live end-to-end: attach to a real running Dune and confirm the handshake,
    the subscriptions, and the settled reading are truthful — a failing verdict
@@ -151,7 +151,7 @@ let attach_live () =
           let settled_verdict (snapshot : Instance.Snapshot.t) =
             match snapshot.Instance.Snapshot.reading with
             | Some reading when not snapshot.Instance.Snapshot.building ->
-                Some (Mentat_workspace.Build_change.Reading.verdict reading)
+                Some (Mentat_ocaml.Build_change.Reading.verdict reading)
             | Some _ | None -> None
           in
           let check ~broken ~wanted ~label =
@@ -160,9 +160,10 @@ let attach_live () =
             Eio.Switch.run @@ fun sw ->
             let _watch = spawn_watch ~sw ~env:eio_env ~toolchain ~dune ~root in
             let instance =
-              Instance.create ~fs ~net ~workspace:(workspace_at root) ()
+              Instance.create ~fs ~net ~mono:(Eio.Stdenv.mono_clock eio_env)
+                ~workspace:(workspace_at root) ()
             in
-            with_attached ~eio_env instance (fun () ->
+            with_attached instance (fun () ->
                 let snapshot =
                   await_snapshot ~clock instance ~timeout_s:20.0
                     ~wanted:(fun snapshot ->
@@ -174,7 +175,7 @@ let attach_live () =
                   ~msg:
                     (Format.asprintf "%s: expected %s, got %a / %s" label
                        (if broken then "Failing" else "Clean")
-                       Instance.Watch.pp snapshot.Instance.Snapshot.status
+                       Instance.Status.pp snapshot.Instance.Snapshot.status
                        (match settled_verdict snapshot with
                        | Some verdict ->
                            Format.asprintf "%a"
@@ -196,9 +197,147 @@ let attach_live () =
             "MENTAT_DUNE_RPC_LIVE_TEST is set but no dune + ocamlc toolchain \
              is discoverable; put a compiler on PATH or set OPAM_SWITCH_PREFIX")
 
+(* The pure stream fold, table-tested at the production window values the
+   hermetic cram cannot reach (it zeroes the quiet window): synthetic
+   timestamps drive the quiet rule, the settle witness, and the fallback. *)
+
+module Store = Mentat_ocaml_dune_rpc.Store
+
+let at s = Mtime.of_uint64_ns (Int64.of_float (s *. 1e9))
+
+let err name =
+  Mentat_ocaml.Finding.v ~lane:Mentat_ocaml.Finding.Lane.Build
+    ~severity:Mentat_ocaml.Finding.Severity.Error ~head:("Unbound value " ^ name)
+    ()
+
+let read ?(quiet_s = 0.25) ?(fallback_s = 2.0) store ~now =
+  Store.reading store ~now:(at now) ~quiet_s ~fallback_s
+
+let fold events =
+  List.fold_left (fun store (t, event) -> Store.apply ~at:(at t) event store)
+    Store.initial events
+
+let step_on store ~now state =
+  Mentat_ocaml.Build_change.step state (read store ~now)
+
+let store_rules =
+  group "store timing rules"
+    [
+      test "no reading before the first diagnostic answer" (fun () ->
+          let store =
+            fold [ (0., Store.Connected); (0.1, Store.Progress `Settle) ]
+          in
+          is_true ~msg:"unsynced emptiness is never a reading"
+            (Option.is_none (read store ~now:10.)));
+      test "an empty first answer synchronises and confirms via the settle"
+        (fun () ->
+          let store =
+            fold
+              [
+                (0., Store.Connected);
+                (0.1, Store.Diagnostics []);
+                (0.2, Store.Progress `Settle);
+              ]
+          in
+          match read store ~now:1. with
+          | None -> fail "expected a reading"
+          | Some reading ->
+              let state = Mentat_ocaml.Build_change.State.initial in
+              let changes, _ =
+                Mentat_ocaml.Build_change.step state (Some reading)
+              in
+              equal int ~msg:"first-seen clean says nothing" 0
+                (List.length changes));
+      test "the quiet window gates the reading" (fun () ->
+          let store =
+            fold
+              [
+                (0., Store.Connected);
+                (0.1, Store.Progress `Settle);
+                (1., Store.Diagnostics [ `Add ("1", err "restock") ]);
+              ]
+          in
+          is_true ~msg:"mid-churn is no reading"
+            (Option.is_none (read store ~now:1.2));
+          is_true ~msg:"at rest is a reading"
+            (Option.is_some (read store ~now:1.3)));
+      test
+        "a sub-sample rebuild's emptiness is withheld until witnessed or the \
+         fallback"
+        (fun () ->
+          let failing =
+            fold
+              [
+                (0., Store.Connected);
+                (0.1, Store.Diagnostics [ `Add ("1", err "restock") ]);
+                (0.2, Store.Progress `Settle);
+              ]
+          in
+          let _, stated =
+            step_on failing ~now:1.
+              Mentat_ocaml.Build_change.State.initial
+          in
+          (* The rebuild empties the store but its settle is coalesced away:
+             no progress event arrives, and the witness fell with the
+             removal. *)
+          let emptied =
+            Store.apply ~at:(at 2.) (Store.Diagnostics [ `Remove "1" ]) failing
+          in
+          let changes, stated' = step_on emptied ~now:2.4 stated in
+          equal int ~msg:"unconfirmed emptiness states nothing" 0
+            (List.length changes);
+          let changes, _ = step_on emptied ~now:4.5 stated' in
+          equal (list string) ~msg:"the 2 s fallback confirms it"
+            [ "Build recovered" ]
+            (List.map
+               (fun change ->
+                 Mentat_workspace.Notice.title
+                   (Mentat_ocaml.Build_change.notice change))
+               changes));
+      test "a witnessed settle confirms emptiness at once" (fun () ->
+          let failing =
+            fold
+              [
+                (0., Store.Connected);
+                (0.1, Store.Diagnostics [ `Add ("1", err "restock") ]);
+                (0.2, Store.Progress `Settle);
+              ]
+          in
+          let _, stated =
+            step_on failing ~now:1.
+              Mentat_ocaml.Build_change.State.initial
+          in
+          let recovered =
+            List.fold_left
+              (fun store (t, event) -> Store.apply ~at:(at t) event store)
+              failing
+              [
+                (2., Store.Diagnostics [ `Remove "1" ]);
+                (2.1, Store.Progress `Settle);
+              ]
+          in
+          let changes, _ = step_on recovered ~now:2.5 stated in
+          equal int ~msg:"one change" 1 (List.length changes));
+      test "a reconnect restarts the quiet clock" (fun () ->
+          let store =
+            fold
+              [
+                (0., Store.Connected);
+                (0.1, Store.Diagnostics [ `Add ("1", err "restock") ]);
+                (0.2, Store.Progress `Settle);
+                (5., Store.Connected);
+                (5.1, Store.Progress `Settle);
+              ]
+          in
+          is_true
+            ~msg:"the old set is forgotten and nothing reads until re-sync"
+            (Option.is_none (read store ~now:9.)));
+    ]
+
 let () =
   run "mentat.ocaml.dune_rpc"
     [
       test "the snapshot is Absent without a watch" snapshot_absent;
+      store_rules;
       test "attach against a live dune watch" attach_live;
     ]

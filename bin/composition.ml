@@ -1284,28 +1284,37 @@ let dune_health_enabled t capability =
 (* The shared observer, created on first demand under the instance switch. The
    attach loop holds the watch's diagnostic and progress subscriptions on its
    own fiber; every consumer — the drain-time producer, the glance — reads its
-   snapshot without IO. The gate is the caller's: this accessor is reached only
-   behind {!dune_health_enabled}. *)
-let dune_rpc_instance t =
-  match t.dune_rpc with
-  | Some instance -> instance
-  | None ->
-      let stdenv = t.shared.stdenv in
-      let instance =
-        Mentat_ocaml_dune_rpc.Instance.create ~fs:(Eio.Stdenv.fs stdenv)
-          ~net:(Eio.Stdenv.net stdenv)
-          ~workspace:
-            (Mentat_workspace.single (Mentat_workspace.Root.of_dir t.root))
-          ~env:(getenv t) ()
-      in
-      t.dune_rpc <- Some instance;
-      (* A daemon fiber: the attach loop must never hold the instance switch
-         open past its main flow — teardown cancels it. *)
-      Eio.Fiber.fork_daemon ~sw:t.switch (fun () ->
-          Mentat_ocaml_dune_rpc.Instance.attach instance
-            ~mono:(Eio.Stdenv.mono_clock stdenv);
-          `Stop_daemon);
-      instance
+   snapshot without IO. The accessor owns its own gate: an untrusted,
+   tooling-off, or notices-off workspace never constructs an observer, so no
+   future caller can attach one around the gate by accident. *)
+let dune_rpc_instance t capability =
+  if not (dune_health_enabled t capability) then None
+  else
+    match t.dune_rpc with
+    | Some instance -> Some instance
+    | None ->
+        let stdenv = t.shared.stdenv in
+        (* [Instance.create] never suspends, so the slot is filled before any
+           other fiber can observe it empty; the re-check makes the once-ness
+           structural rather than incidental should that ever change. *)
+        let instance =
+          Mentat_ocaml_dune_rpc.Instance.create ~fs:(Eio.Stdenv.fs stdenv)
+            ~net:(Eio.Stdenv.net stdenv)
+            ~mono:(Eio.Stdenv.mono_clock stdenv)
+            ~workspace:
+              (Mentat_workspace.single (Mentat_workspace.Root.of_dir t.root))
+            ~env:(getenv t) ()
+        in
+        (match t.dune_rpc with
+        | Some raced -> Some raced
+        | None ->
+            t.dune_rpc <- Some instance;
+            (* A daemon fiber: the attach loop must never hold the instance
+               switch open past its main flow — teardown cancels it. *)
+            Eio.Fiber.fork_daemon ~sw:t.switch (fun () ->
+                Mentat_ocaml_dune_rpc.Instance.attach instance;
+                `Stop_daemon);
+            Some instance)
 
 (* The review git loader wiring: the effect closures that adapt the workspace
    capability's sealed boundaries into the [run]/[read]/[write] the pure
@@ -1583,9 +1592,12 @@ let workspace_cone t capability ~base_spec : Client.Driver.Workspace.t =
      the model's observations. A tooling-disabled or untrusted workspace
      reports [Off Disabled], which the frontend renders as an absent row. *)
   let tooling_health () =
-    if not (dune_health_enabled t capability) then
-      Mentat_workspace.Health.Off Mentat_workspace.Health.Off.Disabled
-    else Workspace_notices.health_of (dune_rpc_instance t)
+    match dune_rpc_instance t capability with
+    | None ->
+        Mentat_workspace.Health.Off Mentat_workspace.Health.Off.Disabled
+    | Some instance ->
+        Mentat_ocaml_dune_rpc.Instance.Snapshot.health
+          (Mentat_ocaml_dune_rpc.Instance.snapshot instance)
   in
   {
     Client.Driver.Workspace.glance =
@@ -2106,9 +2118,16 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
          and capability listings — neither creates the observer nor starts its
          fiber. The first engine drain does both. *)
       let producer =
-        lazy (Workspace_notices.make ~instance:(dune_rpc_instance t) ())
+        lazy
+          (Option.map
+             (fun instance -> Workspace_notices.make ~instance ())
+             (dune_rpc_instance t read_capability))
       in
-      Some (fun () -> Workspace_notices.drain (Lazy.force producer))
+      Some
+        (fun () ->
+          match Lazy.force producer with
+          | None -> []
+          | Some producer -> Workspace_notices.drain producer)
   in
   (* The watch lane is attached to the build workspace alone: its poll
      boundaries advance on the root driver's fiber (claim brackets and

@@ -20,33 +20,43 @@ let in_lane lane findings =
   distinct
     (List.filter (fun f -> Finding.Lane.equal (Finding.lane f) lane) findings)
 
+let severity_counts findings =
+  List.fold_left
+    (fun (errors, warnings) finding ->
+      match Finding.severity finding with
+      | Finding.Severity.Error -> (errors + 1, warnings)
+      | Finding.Severity.Warning -> (errors, warnings + 1))
+    (0, 0) findings
+
 module Reading = struct
-  type lane = { findings : Finding.t list; empty_confirmed : bool }
+  (* Findings arrive as one list and are partitioned here, once: laneness is
+     the finding's own fact, so a reading cannot hold a build lane full of
+     lint findings. The lint lane exists iff it was declared live or a lint
+     finding is present — a watch whose lint targets are unknown reads
+     lint-absent, never lint-clean. [empty_confirmed] is one producer-level
+     fact: whether the settle that emptied the store was witnessed. *)
+  type t = {
+    build : Finding.t list;
+    lint : Finding.t list option;
+    empty_confirmed : bool;
+  }
 
-  let lane ?(empty_confirmed = true) findings = { findings; empty_confirmed }
-
-  type t = { build : lane; lint : lane option }
-
-  let make ~build ?lint () = { build; lint }
+  let make ?(lint_live = false) ?(empty_confirmed = true) findings =
+    let build = in_lane Finding.Lane.Build findings in
+    let lints = in_lane Finding.Lane.Lint findings in
+    let lint =
+      match (lint_live, lints) with
+      | false, [] -> None
+      | (true | false), _ -> Some lints
+    in
+    { build; lint; empty_confirmed }
 
   let verdict t =
-    let findings = in_lane Finding.Lane.Build t.build.findings in
-    let errors, warnings =
-      List.fold_left
-        (fun (errors, warnings) finding ->
-          match Finding.severity finding with
-          | Finding.Severity.Error -> (errors + 1, warnings)
-          | Finding.Severity.Warning -> (errors, warnings + 1))
-        (0, 0) findings
-    in
-    if errors = 0 && warnings = 0 then Health.Verdict.Clean
-    else Health.Verdict.Failing { errors; warnings }
+    let errors, warnings = severity_counts t.build in
+    if errors = 0 && warnings = 0 then Mentat_workspace.Health.Verdict.Clean
+    else Mentat_workspace.Health.Verdict.Failing { errors; warnings }
 
-  let lint t =
-    Option.map
-      (fun (lane : lane) ->
-        List.length (in_lane Finding.Lane.Lint lane.findings))
-      t.lint
+  let lint t = Option.map List.length t.lint
 end
 
 module State = struct
@@ -72,11 +82,11 @@ let key_set findings =
     (fun keys finding -> String_set.add (Finding.key finding) keys)
     String_set.empty findings
 
-let step_lane lane stated (reading : Reading.lane option) =
-  match reading with
+let step_lane lane stated ~empty_confirmed (findings : Finding.t list option)
+    =
+  match findings with
   | None -> (None, stated)
-  | Some { Reading.findings; empty_confirmed } -> (
-      let findings = in_lane lane findings in
+  | Some findings -> (
       let keys = key_set findings in
       match findings with
       | [] ->
@@ -96,12 +106,13 @@ let step_lane lane stated (reading : Reading.lane option) =
 let step (state : State.t) reading =
   match reading with
   | None -> ([], state)
-  | Some { Reading.build; lint } ->
+  | Some { Reading.build; lint; empty_confirmed } ->
       let build_change, build_stated =
-        step_lane Finding.Lane.Build state.State.build (Some build)
+        step_lane Finding.Lane.Build state.State.build ~empty_confirmed
+          (Some build)
       in
       let lint_change, lint_stated =
-        step_lane Finding.Lane.Lint state.State.lint lint
+        step_lane Finding.Lane.Lint state.State.lint ~empty_confirmed lint
       in
       ( List.filter_map Fun.id [ build_change; lint_change ],
         { State.build = build_stated; lint = lint_stated } )
@@ -109,14 +120,6 @@ let step (state : State.t) reading =
 (* Rendering. *)
 
 let max_body_findings = 20
-
-let count_severities findings =
-  List.fold_left
-    (fun (errors, warnings) finding ->
-      match Finding.severity finding with
-      | Finding.Severity.Error -> (errors + 1, warnings)
-      | Finding.Severity.Warning -> (errors, warnings + 1))
-    (0, 0) findings
 
 let plural n word = if n = 1 then word else word ^ "s"
 
@@ -156,7 +159,9 @@ let failing_body ~fresh ~unchanged =
   in
   let lines =
     if unchanged = 0 then lines
-    else lines @ [ counted unchanged "unchanged" ^ " since the last notice" ]
+    else
+      lines
+      @ [ string_of_int unchanged ^ " unchanged since the last notice" ]
   in
   String.concat "\n" lines
 
@@ -170,15 +175,15 @@ let key_of = function
 
 let notice = function
   | Recovered Finding.Lane.Build ->
-      Notice.make ~source:"dune" ~severity:Notice.Severity.Info
+      Mentat_workspace.Notice.make ~source:"dune" ~severity:Mentat_workspace.Notice.Severity.Info
         ~title:"Build recovered" ~key:"dune.build" ()
   | Recovered Finding.Lane.Lint ->
-      Notice.make ~source:"lint" ~severity:Notice.Severity.Info
+      Mentat_workspace.Notice.make ~source:"lint" ~severity:Mentat_workspace.Notice.Severity.Info
         ~title:"Lint clean" ~key:"dune.lint" ()
   | Failing { lane; current; fresh; resolved } ->
-      let errors, warnings = count_severities current in
+      let errors, warnings = severity_counts current in
       let severity =
-        if errors > 0 then Notice.Severity.Error else Notice.Severity.Warning
+        if errors > 0 then Mentat_workspace.Notice.Severity.Error else Mentat_workspace.Notice.Severity.Warning
       in
       let title =
         failing_title lane ~errors ~warnings ~fresh:(List.length fresh)
@@ -187,8 +192,8 @@ let notice = function
       let unchanged = List.length current - List.length fresh in
       let body = failing_body ~fresh ~unchanged in
       if String.is_empty body then
-        Notice.make ~source:(source_of lane) ~severity ~title ~key:(key_of lane)
+        Mentat_workspace.Notice.make ~source:(source_of lane) ~severity ~title ~key:(key_of lane)
           ()
       else
-        Notice.make ~source:(source_of lane) ~severity ~title ~body
+        Mentat_workspace.Notice.make ~source:(source_of lane) ~severity ~title ~body
           ~key:(key_of lane) ()

@@ -71,12 +71,19 @@ let goal ~palette ~labelled ~objective =
         ]
       else [ row [ content ] ]
 
-(* Fail-honest: a verdict exists only inside a settled phase, and an absent
-   watch renders nothing rather than a reassuring or alarming guess. Status
-   words — building, starting, restarting, unresponsive — are facts about the
-   watch itself and render muted, except unresponsiveness, which warns. *)
+(* Fail-honest: a verdict exists only inside a settled phase; the status
+   itself is a fact about the watch and renders in every state but the two
+   where nothing was attempted — tooling disabled, and no watch to attach to.
+   Status words render muted; unresponsiveness and restarts warn; a foreign
+   watch carries the [theirs] prefix so an owned one is tellable from it. *)
 let dune_row ~palette segs =
   [ row (Prims.seg (Theme.Palette.muted_style palette) "dune" :: segs) ]
+
+let muted_segs ~palette words =
+  List.concat_map
+    (fun word ->
+      [ sep ~palette; Prims.seg (Theme.Palette.muted_style palette) word ])
+    words
 
 let verdict_segs ~palette (verdict : Mentat_workspace.Health.Verdict.t) =
   match verdict with
@@ -95,49 +102,69 @@ let verdict_segs ~palette (verdict : Mentat_workspace.Health.Verdict.t) =
           (Printf.sprintf "%d error%s" errors (plural errors));
       ]
 
-let lint_segs ~palette ~sep:sep_seg lint =
+let lint_segs ~palette lint =
   match lint with
   | Some n when n > 0 ->
       [
-        sep_seg;
+        sep ~palette;
         Prims.seg
           (Theme.Palette.warning_style palette)
           (Printf.sprintf "%d lint" n);
       ]
   | Some _ | None -> []
 
+let owner_segs ~palette (owner : Mentat_workspace.Health.Owner.t) =
+  match owner with
+  | Mentat_workspace.Health.Owner.Ours -> []
+  | Mentat_workspace.Health.Owner.Theirs _ -> muted_segs ~palette [ "theirs" ]
+
 let tooling ~palette ~tooling =
   match (tooling : Mentat_workspace.Health.t) with
-  | Mentat_workspace.Health.Off _ | Mentat_workspace.Health.Probing -> []
-  | Mentat_workspace.Health.Starting ->
+  | Mentat_workspace.Health.Off Mentat_workspace.Health.Off.Disabled -> []
+  | Mentat_workspace.Health.Off Mentat_workspace.Health.Off.No_server ->
+      dune_row ~palette (muted_segs ~palette [ "off"; "no watch" ])
+  | Mentat_workspace.Health.Off Mentat_workspace.Health.Off.No_dune ->
+      dune_row ~palette (muted_segs ~palette [ "off"; "not on PATH" ])
+  | Mentat_workspace.Health.Off (Mentat_workspace.Health.Off.Blocked _) ->
+      dune_row ~palette (muted_segs ~palette [ "off"; "sandboxed watcher" ])
+  | Mentat_workspace.Health.Off Mentat_workspace.Health.Off.Gave_up ->
+      dune_row ~palette (muted_segs ~palette [ "off"; "gave up" ])
+  | Mentat_workspace.Health.Probing | Mentat_workspace.Health.Starting ->
+      dune_row ~palette (muted_segs ~palette [ "starting" ])
+  | Mentat_workspace.Health.Restarting Mentat_workspace.Health.Restart.Hung ->
       dune_row ~palette
-        [ sep ~palette; Prims.seg (Theme.Palette.muted_style palette) "starting" ]
-  | Mentat_workspace.Health.Restarting { cause } ->
+        [
+          sep ~palette;
+          Prims.seg (Theme.Palette.warning_style palette) "hung";
+          sep ~palette;
+          Prims.seg (Theme.Palette.warning_style palette) "restarting";
+        ]
+  | Mentat_workspace.Health.Restarting
+      (Mentat_workspace.Health.Restart.Exited detail) ->
       dune_row ~palette
         [
           sep ~palette;
           Prims.seg
             (Theme.Palette.warning_style palette)
-            (Printf.sprintf "restarting (%s)" cause);
+            (Printf.sprintf "restarting (%s)" detail);
         ]
-  | Mentat_workspace.Health.Live { owner = _; phase } -> (
+  | Mentat_workspace.Health.Live { owner; phase } -> (
+      let prefix = owner_segs ~palette owner in
       match phase with
       | Mentat_workspace.Health.Phase.Building ->
-          dune_row ~palette
-            [
-              sep ~palette;
-              Prims.seg (Theme.Palette.muted_style palette) "building";
-            ]
+          dune_row ~palette (prefix @ muted_segs ~palette [ "building" ])
       | Mentat_workspace.Health.Phase.Unresponsive ->
           dune_row ~palette
-            [
-              sep ~palette;
-              Prims.seg (Theme.Palette.warning_style palette) "unresponsive";
-            ]
+            (prefix
+            @ [
+                sep ~palette;
+                Prims.seg (Theme.Palette.warning_style palette) "unresponsive";
+              ])
       | Mentat_workspace.Health.Phase.Settled { build; lint } ->
           dune_row ~palette
-            ((sep ~palette :: verdict_segs ~palette build)
-            @ lint_segs ~palette ~sep:(sep ~palette) lint))
+            (prefix
+            @ (sep ~palette :: verdict_segs ~palette build)
+            @ lint_segs ~palette lint))
 
 let muted_row ~palette value =
   row [ Prims.seg (Theme.Palette.muted_style palette) value ]
