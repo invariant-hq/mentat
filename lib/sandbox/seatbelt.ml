@@ -189,7 +189,12 @@ let base_policy =
    [FSEventStreamStart] fails and dune aborts at startup with
    "Fsevents.start: failed to start". The service only delivers change
    notifications for paths — event payloads carry path names and flags, never
-   file data — so the reads the policy denies stay denied. *)
+   file data — so the reads the policy denies stay denied, though the names
+   and timing of changes may be observable past the read scope: whether
+   fseventsd filters delivery to it is not established. The admission is
+   profile-wide — every confined command may open a stream — because the
+   watch must run under the one sealed policy and per-command policy mutation
+   is exactly what the ordered-policy law forbids. *)
 let fsevents_policy =
   {|(allow mach-lookup (global-name "com.apple.FSEvents"))|}
 
