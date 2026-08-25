@@ -82,13 +82,18 @@ val report_stall : t -> unit
     which a slow build completes and a wedged event loop cannot — and only a
     failed verification restarts the watch, as [Restarting Hung]. Reports
     between lives, before the watch is up, or without a supervised watch at
-    all are dropped; the call never blocks and is safe from any fiber. *)
+    all are dropped — including the brief lag where a spawned watch already
+    serves but the observer has not yet attached; a stall in that window
+    re-reports on the command's own retry. The call never blocks and is
+    safe from any fiber. *)
 
 val drain_notices : t -> Mentat_workspace.Notice.t list
 (** [drain_notices t] returns and clears the supervisor's pending notices —
     a hang restart, a blocked file watcher — in the order they arose. The
-    drain-time notice producer appends them ahead of the build-change
-    notices it derives. *)
+    composition's drain places them ahead of the build-change notices the
+    drain-time producer derives, and outside the [notices.dune_diagnostics]
+    opt-out: a restart advisory explains a failed tool call, not a build
+    change. *)
 
 val health : t -> Mentat_workspace.Health.t
 (** [health t] is the watch status a frontend renders, without IO:

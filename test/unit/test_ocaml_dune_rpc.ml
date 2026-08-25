@@ -382,6 +382,33 @@ let watch_law =
               match Watch.after_death ~reached:false ~deaths with
               | `Retry _ -> fail "the second consecutive death gives up"
               | `Give_up -> ()));
+      test "the stall predicate reads the program off the command text"
+        (fun () ->
+          let reported command = Watch.forwards_into_watch ~command in
+          List.iter
+            (fun command ->
+              is_true ~msg:("reports: " ^ command) (reported command))
+            [
+              "dune build @check";
+              "FOO=1 dune build";
+              "DUNE_CACHE_ROOT=/tmp/cache dune build";
+              "dune\tbuild";
+              "/opt/dune/bin/dune build";
+            ];
+          List.iter
+            (fun command ->
+              is_false ~msg:("stays silent: " ^ command) (reported command))
+            [
+              "sleep 2";
+              "echo dune";
+              (* Wrapped invocations are deliberate misses: a stall they
+                 hide surfaces on the next bare dune command. *)
+              "timeout 30 dune build";
+              "opam exec -- dune build";
+              "cd sub && dune build";
+              "./x/prog=dune build";
+              "";
+            ]);
       test "a life that reached Live buys the respawn two fresh strikes"
         (fun () ->
           match Watch.after_death ~reached:true ~deaths:1 with

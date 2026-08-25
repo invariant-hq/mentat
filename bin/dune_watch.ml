@@ -35,6 +35,7 @@ type t = {
   mutable mirror_failures : int;
   mutable stalled : bool;
   mutable notices : Mentat_workspace.Notice.t list;
+  mutable teardown_hooked : bool;
 }
 
 (* The spawn-to-respawn pause, and the cadence at which a foreign watch's
@@ -70,6 +71,7 @@ let make ~rpc ~capability ~mono ~sw ~root ~run_id ~mode ~program ~targets =
     mirror_failures = 0;
     stalled = false;
     notices = [];
+    teardown_hooked = false;
   }
 
 let sleep t seconds =
@@ -325,20 +327,24 @@ let start t =
               argv
           with
           | Ok session ->
-              (* Registered after the session's own teardown resources, so on
-                 a release that skipped the explicit {!stop} this hook still
-                 runs first (release hooks are LIFO) and the child dies on
-                 SIGTERM — its own exit handlers unlinking socket and private
-                 registry entry — never on the switch's SIGKILL backstop. The
-                 hook reads the shared slot rather than closing over this
-                 life's session, so an ended life retains nothing: signalling
-                 whatever session is live is correct from every hook, and a
-                 settled session is a no-op. *)
-              Eio.Switch.on_release t.sw (fun () ->
-                  match t.session with
-                  | Some session ->
-                      Command.Session.signal ~grace:stop_grace_s session
-                  | None -> ());
+              (* Registered once, at the first spawn — after that session's
+                 own teardown resources, so on a release that skipped the
+                 explicit {!stop} this hook still runs first (release hooks
+                 are LIFO) and the child dies on SIGTERM — its own exit
+                 handlers unlinking socket and private registry entry —
+                 never on the switch's SIGKILL backstop. The hook reads the
+                 shared slot rather than closing over a life's session, so
+                 it signals whatever session is live and no ended life is
+                 retained; later lives' sessions attach their resources
+                 above it on the same switch, keeping the order. *)
+              if not t.teardown_hooked then begin
+                t.teardown_hooked <- true;
+                Eio.Switch.on_release t.sw (fun () ->
+                    match t.session with
+                    | Some session ->
+                        Command.Session.signal ~grace:stop_grace_s session
+                    | None -> ())
+              end;
               Ok session
           | Error error ->
               Error (Format.asprintf "%a" Command.Error.pp error)))
@@ -358,14 +364,17 @@ let drain_notices t =
       t.notices <- [];
       notices
 
+(* Distinct keys per cause, appended rather than coalesced: order and count
+   are the point — the journal counts restarts by kind — and the key names
+   the cause the way the titles do. *)
 let hung_notice () =
   Mentat_workspace.Notice.make ~source:"dune"
     ~severity:Mentat_workspace.Notice.Severity.Warning
     ~title:"Build watch restarted (stopped responding to builds)"
     ~body:
-      "A dune command that was running may have failed with \"Connection \
-       terminated\" or \"Build via RPC failed\"; run it again."
-    ~key:"dune.watch" ()
+      "A dune command that was running may have timed out, or failed with \
+       \"Connection terminated\" or \"Build via RPC failed\"; run it again."
+    ~key:"dune.watch.hung" ()
 
 let blocked_notice () =
   Mentat_workspace.Notice.make ~source:"dune"
@@ -373,24 +382,24 @@ let blocked_notice () =
     ~title:"Build watch off (file watcher blocked by the sandbox)"
     ~body:
       "dune came up but its file watcher never answered under the sealed \
-       profile, so builds would not follow file changes; the watch is off \
-       for this session."
-    ~key:"dune.watch" ()
+       profile — the profile may lack the file watcher's allowance (the \
+       FSEvents mach-lookup on macOS) — so builds would not follow file \
+       changes; the watch is off for this session."
+    ~key:"dune.watch.blocked" ()
 
-(* One bounded verification of the watch's event loop. A flush that answers
-   — or a stream that delivered events while it was pending: file churn
-   legitimately extends the debounce — is a slow build, not a hang; only a
-   loop that neither answered nor produced is wedged. *)
+(* One bounded verification of the watch's event loop. An answer is a live
+   loop; so is a stream that delivered events while the flush was pending —
+   file churn legitimately extends the debounce — but the two are told
+   apart, because an evidence consumer may want to try again where a
+   clearance would lie: the self-test must not pass on attach-time protocol
+   traffic. Only a loop that neither answered nor produced is wedged. *)
 let verify_loop t =
   let before = Mentat_ocaml_dune_rpc.Instance.activity t.rpc in
   match Mentat_ocaml_dune_rpc.Instance.flush t.rpc with
-  | (`Completed | `No_server) as verdict -> verdict
+  | (`Answered | `No_server) as verdict -> verdict
   | `Timed_out ->
-      if Mentat_ocaml_dune_rpc.Instance.activity t.rpc <> before then begin
-        Log.debug (fun m ->
-            m "dune watch flush timed out but events flowed; loop alive");
-        `Completed
-      end
+      if Mentat_ocaml_dune_rpc.Instance.activity t.rpc <> before then
+        `Events_flowed
       else `Timed_out
 
 (* One supervised life: follow the child's output until it settles — the
@@ -401,6 +410,7 @@ let verify_loop t =
 let live_once t session =
   let reached = ref false in
   let self_tested = ref false in
+  let self_test_strikes = ref 0 in
   let verdict = ref None in
   let tail = ref "" in
   let kill because =
@@ -422,16 +432,27 @@ let live_once t session =
           if (not !reached) && observed_live t then reached := true;
           (* The first flush after the watch comes up is the confinement
              self-test: a fresh watch whose file watcher never answers is
-             blocked, not slow — announced at once, no restart budget
-             spent. *)
+             blocked, not slow — announced at once, no restart budget spent.
+             Two escapes keep the verdict honest: attach-time protocol
+             traffic can race the window ([`Events_flowed] — retry on a
+             later tick rather than pass on evidence that proves nothing
+             about the file watcher), and a first sync on a large tree can
+             genuinely outrun one window, so blocking takes two consecutive
+             flat timeouts. *)
           if !reached && not !self_tested then begin
-            self_tested := true;
             match verify_loop t with
-            | `Completed | `No_server -> ()
+            | `Answered | `No_server -> self_tested := true
+            | `Events_flowed -> ()
             | `Timed_out ->
-                Log.warn (fun m ->
-                    m "dune watch file watcher never answered its first flush");
-                kill `Blocked
+                if !self_test_strikes >= 1 then begin
+                  self_tested := true;
+                  Log.warn (fun m ->
+                      m
+                        "dune watch file watcher never answered its first \
+                         flushes");
+                  kill `Blocked
+                end
+                else incr self_test_strikes
           end;
           (* A reported stall verifies once; between lives, or before the
              watch is up, the report has no forwarded build behind it and is
@@ -440,7 +461,7 @@ let live_once t session =
             t.stalled <- false;
             if !reached && Option.is_none !verdict then
               match verify_loop t with
-              | `Completed | `No_server ->
+              | `Answered | `No_server | `Events_flowed ->
                   Log.info (fun m ->
                       m "dune watch stall report cleared by verification")
               | `Timed_out ->

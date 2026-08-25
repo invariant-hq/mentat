@@ -37,3 +37,15 @@ val after_death : reached:bool -> deaths:int -> [ `Give_up | `Retry of int ]
     death always retries and buys the respawn two fresh strikes. Two
     consecutive lives dying before [Live] give up; otherwise the result
     carries the count the next death is judged against. *)
+
+val forwards_into_watch : command:string -> bool
+(** [forwards_into_watch ~command] holds when the shell command's program is
+    dune, read lexically off the front of the command text: leading
+    [VAR=value] assignments are skipped (an ['='] before any ['/'] marks
+    one, as POSIX does) and the first remaining word's basename is compared.
+    A stalled command that holds is worth verifying the supervised watch
+    over — its timeout may be a build forwarded into a wedged event loop.
+    Wrapped invocations ([cd d && dune …], [timeout 30 dune …],
+    [opam exec -- dune …]) are deliberate misses: a stall they hide surfaces
+    on the next bare dune command, and guessing past the first word would
+    trade false reports for it. *)

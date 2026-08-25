@@ -163,15 +163,16 @@ module Instance : sig
       environment the registry directory derives from; the caller owns the
       entry and its removal. *)
 
-  val flush : t -> [ `Completed | `Timed_out | `No_server ]
+  val flush : t -> [ `Answered | `Timed_out | `No_server ]
   (** [flush t] verifies the watch's event loop: a fresh connection to
       {!socket_path} sends dune's [flush_file_watcher] — the public request
       that waits for the file watcher's sync round-trip and the debounce
       quiet period, exercising the event loop without waiting on the build —
       bounded to ten seconds ([MENTAT_DUNE_WATCH_FLUSH_S] scales it for
-      hermetic tests). Any answer is [`Completed]: a slow build still
-      answers, a server without the method answered the negotiation, and an
-      error response is a response — only a wedged loop cannot reply.
+      hermetic tests). Any answer is [`Answered]: a slow build still
+      answers, an error response is a response, and a server without the
+      method answered the version negotiation — the answer, not its content,
+      is the evidence, so only a wedged loop cannot produce one.
       [`No_server] is a connection that never opened (nothing to verify; the
       exit paths own a dead child). [`Timed_out] is the hang verdict. *)
 

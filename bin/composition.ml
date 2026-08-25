@@ -2103,29 +2103,14 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
   (* A dune command's tool timeout is a hang's only witness — the forwarded
      build traverses the watch's event loop — so it is reported to the
      supervisor, which verifies before restarting; other programs' timeouts
-     are their own business. The command is shell text: leading VAR=value
-     assignments are skipped and the first word's basename is compared, the
-     same honesty as "whose program resolves to dune" affords a string. *)
+     are their own business. The lexical rule is the pure
+     {!Mentat_ocaml_dune_rpc.Watch.forwards_into_watch}; this closure only
+     wires it to the one supervisor that can act on it. *)
   let dune_stall_report ~command =
-    let looks_assigned token =
-      String.contains token '=' && not (String.contains token '/')
-    in
-    let rec program = function
-      | [] -> None
-      | token :: rest ->
-          if looks_assigned token then program rest else Some token
-    in
-    let tokens =
-      List.filter
-        (fun token -> not (String.is_empty token))
-        (String.split_on_char ' ' (String.trim command))
-    in
-    match program tokens with
-    | Some token when String.equal (Filename.basename token) "dune" -> (
-        match t.dune_watch with
-        | Some supervisor -> Dune_watch.report_stall supervisor
-        | None -> ())
-    | Some _ | None -> ()
+    if Mentat_ocaml_dune_rpc.Watch.forwards_into_watch ~command then
+      match t.dune_watch with
+      | Some supervisor -> Dune_watch.report_stall supervisor
+      | None -> ()
   in
   let shell =
     Tools.Shell.make ~on_timeout:dune_stall_report build_capability ~clock
@@ -2264,13 +2249,16 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
         Some
           (fun () ->
             Lazy.force engaged;
+            (* The supervisor's word first — a restart or a blocked file
+               watcher explains the readings that follow it — and outside
+               the [notices.dune_diagnostics] opt-out: a restart advisory
+               explains a failed tool call, not a build change, so a user
+               silencing build chatter still hears it. *)
+            (match t.dune_watch with
+            | Some supervisor -> Dune_watch.drain_notices supervisor
+            | None -> [])
+            @
             if notices_enabled then
-              (* The supervisor's word first — a restart or a blocked file
-                 watcher explains the readings that follow it. *)
-              (match t.dune_watch with
-              | Some supervisor -> Dune_watch.drain_notices supervisor
-              | None -> [])
-              @
               match Lazy.force producer with
               | None -> []
               | Some producer -> Workspace_notices.drain producer

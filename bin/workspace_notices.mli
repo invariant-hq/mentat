@@ -5,8 +5,10 @@
 
 (** The drain-time dune notice producer.
 
-    This is one of [drain_notices]' two v1 sources, alongside
-    {!Workspace_watch}. It reads the shared attach observer's settled reading
+    This is one of the drain's three sources, alongside {!Workspace_watch}
+    and the supervisor's own lifecycle advisories
+    ({!Dune_watch.drain_notices}). It reads the shared attach observer's
+    settled reading
     — a memory read, never IO on the drain path — and lowers the change law's
     verdicts into {!Mentat_workspace.Notice.t}: what the last settled build
     says that the model has not heard, per lane, and nothing when the finding

@@ -633,10 +633,12 @@ module Instance = struct
 
   (* Test-only scaling, like the reading windows below: a hermetic fake
      answers or parks a flush in microseconds. Production never sets it. *)
-  let flush_timeout_s =
-    match Sys.getenv_opt "MENTAT_DUNE_WATCH_FLUSH_S" with
-    | None | Some "" -> 10.0
-    | Some value -> ( try float_of_string value with Failure _ -> 10.0)
+  let env_float name default =
+    match Sys.getenv_opt name with
+    | None | Some "" -> default
+    | Some value -> ( try float_of_string value with Failure _ -> default)
+
+  let flush_timeout_s = env_float "MENTAT_DUNE_WATCH_FLUSH_S" 10.0
 
   let flush t =
     let (Net net) = t.net in
@@ -661,15 +663,15 @@ module Instance = struct
               (* A server without the method still answered the version
                  negotiation: its event loop is alive, which is all the
                  verification asks. *)
-              | Error _ -> Ok `Completed
+              | Error _ -> Ok `Answered
               | Ok staged -> (
                   match
                     Dune_rpc_fiber.run
                       (Dune_rpc_client.request client staged ())
                   with
-                  | Ok (`Ok | `Not_in_watch_mode) -> Ok `Completed
+                  | Ok (`Ok | `Not_in_watch_mode) -> Ok `Answered
                   (* An error response is a response: the loop answered. *)
-                  | Error _ -> Ok `Completed))
+                  | Error _ -> Ok `Answered))
         in
         match result with Ok verdict -> verdict | Error _ -> `No_server)
       (fun () ->
@@ -752,15 +754,9 @@ module Instance = struct
         Ok (Some pin.pin_endpoint)
     | None -> refresh_registry t
 
-  (* Test-only scaling: a hermetic cram drives a fake watch whose whole
-     exchange completes in microseconds, so it shrinks the timing windows
-     rather than sleeping the suite through them. Production never sets
-     these. *)
-  let env_float name default =
-    match Sys.getenv_opt name with
-    | None | Some "" -> default
-    | Some value -> ( try float_of_string value with Failure _ -> default)
-
+  (* Test-only scaling for the reading windows, like the flush bound above:
+     a hermetic cram's whole exchange completes in microseconds, so it
+     shrinks the windows rather than sleeping the suite through them. *)
   let quiet_s = env_float "MENTAT_DUNE_RPC_QUIET_S" 0.25
   let quiet_fallback_s = env_float "MENTAT_DUNE_RPC_QUIET_FALLBACK_S" 2.0
   let reconnect_pause_s = env_float "MENTAT_DUNE_RPC_RECONNECT_S" 1.0
