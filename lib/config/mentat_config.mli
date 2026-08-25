@@ -495,8 +495,10 @@ module Field : sig
 
   val notices_dune_diagnostics : (bool, defaulted) t
   (** [notices_dune_diagnostics] is the [notices.dune_diagnostics] field.
-      It silences the model's build-change notices only; the watch itself
-      and its status row are [dune.watch]'s. Defaults to [true]. *)
+      It silences the model's build-change notices only; the watch itself,
+      its status row, and its lifecycle advisories — a restart, a blocked
+      file watcher — are [dune.watch]'s and still surface. Defaults to
+      [true]. *)
 
   val dune_watch : (string, defaulted) t
   (** [dune_watch] is the [dune.watch] field: [auto], [observe], or [off].
