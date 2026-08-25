@@ -7,3 +7,4 @@ module Store = Store
 module Watch = Watch
 module Instance = Rpc.Instance
 module Mirror = Mirror
+module Lint_output = Lint_output

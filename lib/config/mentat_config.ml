@@ -723,6 +723,27 @@ let validate_dune_targets label values =
   in
   loop 0 values
 
+(* [dune.lint_command]: the linter's argv prefix, or [[]] to disable the
+   runner — emptiness is a meaning here, not a mistake, so only the token
+   shapes are validated. *)
+let validate_lint_command key = function
+  | [] -> Ok []
+  | values -> validate_merlin_program key values
+
+let lint_command_codec =
+  {
+    string_list_codec with
+    parse_text =
+      (fun ~label raw ->
+        let* values = parse_string_list label raw in
+        validate_lint_command label values);
+    check = (fun ~label values -> validate_lint_command label values);
+    decode_json =
+      (fun ~label leaf ->
+        let* values = decode_string_list_leaf label leaf in
+        validate_lint_command label values);
+  }
+
 let dune_targets_codec =
   {
     string_list_codec with
@@ -891,6 +912,7 @@ module Field = struct
     | Notices_dune_diagnostics : (bool, defaulted) t
     | Dune_watch : (string, defaulted) t
     | Dune_targets : (string list, defaulted) t
+    | Dune_lint_command : (string list, defaulted) t
     | Workspace_tooling : (string, defaulted) t
     | Instructions_global : (bool, defaulted) t
     | Instructions_project : (bool, defaulted) t
@@ -961,6 +983,7 @@ module Field = struct
   let notices_dune_diagnostics = Notices_dune_diagnostics
   let dune_watch = Dune_watch
   let dune_targets = Dune_targets
+  let dune_lint_command = Dune_lint_command
   let workspace_tooling = Workspace_tooling
   let instructions_global = Instructions_global
   let instructions_project = Instructions_project
@@ -1031,6 +1054,7 @@ module Field = struct
     | Notices_dune_diagnostics -> "notices.dune_diagnostics"
     | Dune_watch -> "dune.watch"
     | Dune_targets -> "dune.targets"
+    | Dune_lint_command -> "dune.lint_command"
     | Workspace_tooling -> "workspace.tooling"
     | Instructions_global -> "instructions.global"
     | Instructions_project -> "instructions.project"
@@ -1119,7 +1143,8 @@ module Field = struct
     | Sandbox_writable_roots | Sandbox_network | Sandbox_env_inherit
     | Sandbox_env_exclude | Sandbox_env_include_only | Shell | Compaction_auto
     | Revert_merge | Notices_fswatch | Notices_cr_comments
-    | Notices_dune_diagnostics | Dune_watch | Dune_targets | Workspace_tooling
+    | Notices_dune_diagnostics | Dune_watch | Dune_targets | Dune_lint_command
+    | Workspace_tooling
     | Instructions_global | Instructions_project | Instructions_claude_md
     | Instructions_project_max_bytes | Skills_enabled | Skills_builtin
     | Skills_project | Skills_compat | Skills_disabled | Skills_paths
@@ -1172,6 +1197,7 @@ module Field = struct
       Any Notices_dune_diagnostics;
       Any Dune_watch;
       Any Dune_targets;
+      Any Dune_lint_command;
       Any Workspace_tooling;
       Any Instructions_global;
       Any Instructions_project;
@@ -1412,6 +1438,9 @@ module Field = struct
     | Dune_targets ->
         defaulted dune_targets_codec ~shared:true
           ~default:(builtin field [ "@check" ])
+    | Dune_lint_command ->
+        defaulted lint_command_codec ~shared:true
+          ~default:(builtin field [ "litany"; "check" ])
     | Workspace_tooling ->
         defaulted workspace_tooling_codec ~shared:true
           ~default:(builtin field "auto")

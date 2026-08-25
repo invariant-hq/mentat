@@ -528,11 +528,7 @@ and spawn t deaths =
         t.session <- Some session;
         t.mirror_failures <- 0;
         Mentat_ocaml_dune_rpc.Instance.pin t.rpc
-          ~pid:(Command.Session.pid session)
-          (* The requested targets are known and carry no lint alias until
-             the lint lane's ownership slice threads [dune.lint_alias]
-             here. *)
-          ~lint:false;
+          ~pid:(Command.Session.pid session);
         let reached, cause = live_once t session in
         Mentat_ocaml_dune_rpc.Instance.unpin t.rpc;
         t.session <- None;

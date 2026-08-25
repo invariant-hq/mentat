@@ -35,9 +35,9 @@ module Reading : sig
   (** [make findings] is a reading over [findings], partitioned by
       {!Finding.lane} — laneness is the finding's own fact, so a reading
       cannot mis-shelve one. The lint lane exists iff [lint_live] (default
-      [false]) or a lint finding is present: a watch whose lint targets are
-      unknown reads lint-absent, never lint-clean, and an absent lane leaves
-      its baseline untouched exactly as a missing reading does.
+      [false]) or a lint finding is present: an absent lint runner reads
+      lint-absent, never lint-clean, and an absent lane leaves its baseline
+      untouched exactly as a missing reading does.
 
       [empty_confirmed] (default [true]) records one producer-level fact:
       whether the settle that emptied the store was witnessed. A lane reading

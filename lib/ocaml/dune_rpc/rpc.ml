@@ -532,10 +532,9 @@ module Instance = struct
           Mentat_workspace.Health.Live { owner; phase }
   end
 
-  (* A supervisor's claim on its own watch: the endpoint the attach loop uses
-     instead of the registry, the child's host pid, and whether the requested
-     targets make the lint lane live. *)
-  type pin = { pin_endpoint : Endpoint.t; pin_pid : int; pin_lint : bool }
+  (* A supervisor's claim on its own watch: the endpoint the attach loop
+     uses instead of the registry, and the child's host pid. *)
+  type pin = { pin_endpoint : Endpoint.t; pin_pid : int }
 
   (* Single-domain writes: every mutable field is assigned whole values with
      no suspension between a read and its dependent write, so snapshots are
@@ -552,10 +551,10 @@ module Instance = struct
     mutable endpoint : Endpoint.t option;
     mutable endpoint_pid : int;
     mutable status : Status.t;
-    (* The lane fact of the attached watch, captured when the connection
-       opened: a pinned watch's supervisor states it (the targets are known),
-       a foreign watch's targets are unknown so the marker alone decides. *)
-    mutable attached_lint : bool;
+    (* The lint runner's current findings, [None] while the lane is off:
+       a second producer's contribution to the one settled reading, never
+       part of the stream fold. *)
+    mutable lint : Mentat_ocaml.Finding.t list option;
     mutable events : int;
     mutable store : Store.t;
   }
@@ -572,7 +571,7 @@ module Instance = struct
       endpoint = None;
       endpoint_pid = 0;
       status = Status.Absent;
-      attached_lint = true;
+      lint = None;
       events = 0;
       store = Store.initial;
     }
@@ -596,12 +595,14 @@ module Instance = struct
     Filename.concat (primary_root t)
       (Filename.concat "_build" (Filename.concat ".rpc" "dune"))
 
-  let pin t ~pid ~lint =
+  let pin t ~pid =
     let endpoint =
       Endpoint.make ~root:(primary_root t) (Endpoint.Unix (socket_path t))
     in
     Log.info (fun m -> m "dune rpc endpoint pinned (pid %d)" pid);
-    t.pinned <- Some { pin_endpoint = endpoint; pin_pid = pid; pin_lint = lint }
+    t.pinned <- Some { pin_endpoint = endpoint; pin_pid = pid }
+
+  let set_lint t findings = t.lint <- findings
 
   let unpin t =
     if Option.is_some t.pinned then
@@ -771,7 +772,7 @@ module Instance = struct
       reading =
         (match t.status with
         | Status.Attached _ ->
-            Store.reading t.store ~now:(now t) ~quiet_s
+            Store.reading ?lint:t.lint t.store ~now:(now t) ~quiet_s
               ~fallback_s:quiet_fallback_s
         | Status.Absent | Status.Connecting -> None);
     }
@@ -792,7 +793,7 @@ module Instance = struct
     | Some i -> String.sub text 0 i
     | None -> text
 
-  let finding_of_diagnostic t diagnostic =
+  let finding_of_diagnostic diagnostic =
     let severity =
       match Mentat_ocaml.Diagnostic.severity diagnostic with
       | Mentat_ocaml.Diagnostic.Severity.Error ->
@@ -816,12 +817,12 @@ module Instance = struct
           ( Some (Workspace.Path.display (Mentat_ocaml.Location.path location)),
             Some (Format.asprintf "%a" Mentat_ocaml.Location.pp location) )
     in
-    (* The lane is a fact about the attached watch, captured when the
-       connection opened: a foreign watch's targets are unknown so the
-       marker alone decides; a supervised watch's supervisor stated whether
-       its requested targets make the lint lane live. *)
-    Mentat_ocaml.Finding.classify ~lint:t.attached_lint ~severity ?path
-      ?location ~head ()
+    (* The lane is the source: everything on the watch's stream is a build
+       finding — a watch that builds a lint alias reports those findings as
+       build errors itself, and this observer echoes the watch it observes.
+       The lint lane's own source is the runner ({!set_lint}). *)
+    Mentat_ocaml.Finding.v ~lane:Mentat_ocaml.Finding.Lane.Build ~severity
+      ?path ?location ~head ()
 
   let diagnostic_events t connection events =
     let events =
@@ -834,7 +835,7 @@ module Instance = struct
                   Some
                     (`Add
                        ( Connection.diagnostic_id diagnostic,
-                         finding_of_diagnostic t converted ))
+                         finding_of_diagnostic converted ))
               | Error _ ->
                   (* A malformed diagnostic is dropped rather than faulting
                      the stream; the set self-corrects at the next build. *)
@@ -877,11 +878,9 @@ module Instance = struct
     let* diagnostics = subscribe connection Drpc.Procedures.Poll.diagnostic in
     let* progress = subscribe connection Drpc.Procedures.Poll.progress in
     (* The attachment's identity is captured here, once: a connection that
-       opened through the pin is the supervised watch — its owner and lane
-       fact hold for the connection's whole life, even past a later unpin. *)
+       opened through the pin is the supervised watch — its owner holds for
+       the connection's whole life, even past a later unpin. *)
     let pinned = t.pinned in
-    t.attached_lint <-
-      (match pinned with Some pin -> pin.pin_lint | None -> true);
     fold_event t Store.Connected;
     set_status t
       (Status.Attached

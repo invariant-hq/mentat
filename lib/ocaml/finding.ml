@@ -44,29 +44,6 @@ let v ~lane ~severity ?path ?location ~head () =
     invalid_arg "finding head must be a single line";
   { lane; severity; path; location; head }
 
-(* The lint marker: the head's last token is [" [<rule>]"] with a
-   lowercase-alphanumeric-hyphen rule name — the convention a lint tool
-   running as a build rule uses, because the build tool's wire drops the rule
-   identity before a client can read it. *)
-let has_lint_marker head =
-  let len = String.length head in
-  if len < 4 || head.[len - 1] <> ']' then false
-  else
-    match String.rindex_opt head '[' with
-    | None -> false
-    | Some open_at ->
-        open_at >= 1
-        && head.[open_at - 1] = ' '
-        && open_at + 1 < len - 1
-        && (match head.[open_at + 1] with 'a' .. 'z' -> true | _ -> false)
-        && String.for_all
-             (function 'a' .. 'z' | '0' .. '9' | '-' -> true | _ -> false)
-             (String.sub head (open_at + 1) (len - 1 - (open_at + 1)))
-
-let classify ~lint ~severity ?path ?location ~head () =
-  let lane = if lint && has_lint_marker head then Lane.Lint else Lane.Build in
-  v ~lane ~severity ?path ?location ~head ()
-
 let lane t = t.lane
 let severity t = t.severity
 let path t = t.path

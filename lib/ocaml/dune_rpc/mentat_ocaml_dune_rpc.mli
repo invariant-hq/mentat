@@ -30,3 +30,6 @@ module Instance = Rpc.Instance
 
 module Mirror = Mirror
 (** The host-side registry mirror for a supervised build watch. *)
+
+module Lint_output = Lint_output
+(** The lint runner's output, parsed into lint-lane findings. *)

@@ -133,15 +133,20 @@ module Instance : sig
   (** [socket_path t] is where dune's RPC server binds for the workspace, by
       dune's own convention: [_build/.rpc/dune] under the primary root. *)
 
-  val pin : t -> pid:int -> lint:bool -> unit
-  (** [pin t ~pid ~lint] directs the attach loop at the workspace's own
-      socket ({!socket_path}) instead of the registry: the supervisor spawned
-      a watch with host process id [pid] there. [lint] states whether the
-      requested targets make the lint lane live — a pinned watch's targets
-      are known, so the lint marker alone no longer decides a finding's lane.
-      An attachment that opens through the pin reports the watch as ours. The
-      pin holds until {!unpin}; while the socket does not answer yet the loop
-      keeps reconnecting to it, which is a spawned watch starting up. *)
+  val pin : t -> pid:int -> unit
+  (** [pin t ~pid] directs the attach loop at the workspace's own socket
+      ({!socket_path}) instead of the registry: the supervisor spawned a
+      watch with host process id [pid] there. An attachment that opens
+      through the pin reports the watch as ours. The pin holds until
+      {!unpin}; while the socket does not answer yet the loop keeps
+      reconnecting to it, which is a spawned watch starting up. *)
+
+  val set_lint : t -> Mentat_ocaml.Finding.t list option -> unit
+  (** [set_lint t findings] is the lint runner's word: its latest parsed
+      findings, joined into every settled reading with the lane live —
+      [Some []] is lint-clean, statable. [None] (the initial state) is the
+      lane off: lint-absent, never lint-clean. The stream's own findings are
+      always build-lane; the two sources cannot cross. *)
 
   val unpin : t -> unit
   (** [unpin t] returns the attach loop to registry discovery — the

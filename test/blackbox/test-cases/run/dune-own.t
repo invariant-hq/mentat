@@ -45,22 +45,6 @@ carries the watch's own failing reading.
   $ grep -c 'Build failing (1 error: 1 new)' capture-own/request-2.json
   1
 
-An owned watch's targets are known, so a lint-marked head stays a build
-error — the marker alone no longer decides the lane.
-
-  $ rm -f fake-dune-argv
-  $ printf marker > dune-state
-  $ cat > marker.jsonl <<'JSONL'
-  > {"expect":{"body_contains":["marker prompt"]},"response":{"id":"m1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-m1","call_id":"call-m1","name":"shell","arguments":"{\"command\":\"sleep 3\",\"description\":\"give the watch time to come up\"}"}]}}
-  > {"expect":{"body_contains":["function_call_output","call-m1"]},"response":{"id":"m2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"marked"}]}]}}
-  > JSONL
-  $ start_fake_openai marker.jsonl capture-marker port-marker
-  $ MENTAT_DUNE_WATCH=auto mentat run "marker prompt" --cwd "$PWD" --permission bypass --id marker-turn 2>/dev/null
-  marked
-  $ wait_fake_server
-  $ grep -c 'Build failing (1 error: 1 new)' capture-marker/request-2.json
-  1
-
 Quitting leaves no orphan: the watch was signalled (its socket and private
 registry entry unlinked by its own exit handlers) and the host removed the
 registry mirror.
@@ -180,9 +164,9 @@ notice — and never a second spawn.
 
 A socket that already answers is a foreign watch: the supervisor attaches
 instead of spawning — no marker file — and the model hears the foreign
-watch's readings. A foreign watch's targets are unknown, so the same
-lint-marked head that stayed a build error on the owned watch lands in the
-lint lane here.
+watch's readings as build findings whatever their text: mentat echoes the
+watch it observes, so even a lint-shaped head from someone's watch is that
+watch's build error.
 
   $ rm -f fake-dune-argv fake-dune-mode
   $ printf marker > foreign-state
@@ -198,5 +182,5 @@ lint lane here.
   $ stop_fake_dune
   $ test -f fake-dune-argv
   [1]
-  $ grep -c '1 finding (1 new)' capture-foreign/request-2.json
+  $ grep -c 'Build failing (1 error: 1 new)' capture-foreign/request-2.json
   1

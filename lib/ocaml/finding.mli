@@ -61,23 +61,6 @@ val v :
 
     Raises [Invalid_argument] if [head] is empty or contains a newline. *)
 
-val classify :
-  lint:bool ->
-  severity:Severity.t ->
-  ?path:string ->
-  ?location:string ->
-  head:string ->
-  unit ->
-  t
-(** [classify ~lint ~severity ?path ?location ~head ()] is {!v} with the lane
-    decided by the lint marker: the finding is [Lint] iff [lint] is [true] and
-    [head] ends with [" [<rule>]"] where [<rule>] matches [[a-z][a-z0-9-]*] —
-    the convention a lint tool running inside the build uses to mark its
-    findings, since the build tool's wire drops the rule identity. Everything
-    else is [Build].
-
-    Raises [Invalid_argument] as {!v} does. *)
-
 (** {1:queries Queries} *)
 
 val lane : t -> Lane.t
