@@ -138,19 +138,10 @@ let resolve_capability ~stdenv ~sw ~tmp_base ?(env = []) ?env_policy
     ?(mode = Mode.Workspace_write) ?(read = Read.All) ?(readable_roots = [])
     ?(writable_roots = []) logical =
   with_env (("TMPDIR", Some tmp_base) :: env) @@ fun () ->
-  (* The capability takes its ambient environment from the caller now (the
-     daemon passes the invoking client's); the suite hands it this process's
+  (* The capability takes its ambient environment from the caller (the daemon
+     passes the invoking client's); the suite hands it this process's
      snapshot, taken inside the [with_env] scope so the overrides hold. *)
-  let environment =
-    Array.to_list (Unix.environment ())
-    |> List.filter_map (fun kv ->
-        match String.index_opt kv '=' with
-        | None -> None
-        | Some i ->
-            Some
-              ( String.sub kv 0 i,
-                String.sub kv (i + 1) (String.length kv - i - 1) ))
-  in
+  let environment = Wio.process_environment () in
   Wio.resolve ~sw ~stdenv ~logical ~environment ?env_policy ~mode ~read
     ~readable_roots ~writable_roots ~mentat_dirs:[]
     ~network:Sandbox.Policy.Network.Restricted ()
@@ -1922,16 +1913,7 @@ let executable_resolution_checks_the_exec_bit () =
   let io =
     with_env [ ("TMPDIR", Some tmp_base); ("PATH", Some (dir1 ^ ":" ^ dir2)) ]
     @@ fun () ->
-    let environment =
-      Array.to_list (Unix.environment ())
-      |> List.filter_map (fun kv ->
-          match String.index_opt kv '=' with
-          | None -> None
-          | Some i ->
-              Some
-                ( String.sub kv 0 i,
-                  String.sub kv (i + 1) (String.length kv - i - 1) ))
-    in
+    let environment = Wio.process_environment () in
     match
       Wio.resolve ~sw ~stdenv ~logical ~environment
         ~mode:Mode.Danger_full_access ~read:Read.All ~readable_roots:[]
@@ -2141,6 +2123,48 @@ let child_environment_policy_exclude_and_include_only () =
         ~msg:"a curated name outside include_only stays behind" "ABSENT" email;
       is_true ~msg:"the structural core is not governable"
         (not (String.equal home "ABSENT"))
+  | _ -> fail "unexpected env probe output"
+
+(* Root-derivation variables — GIT_CONFIG_GLOBAL, DUNE_CACHE_ROOT, the OCaml
+   toolchain paths — are immune to the policy even under the hard mode: the
+   resolver derives grants from them, so a child reading different values
+   would resolve files the policy never admitted (confined git aborts on
+   exactly that). A governable name under the same posture stays behind. *)
+let child_environment_root_derivation_is_immune () =
+  with_direct "run-env-roots"
+    ~env_policy:
+      {
+        Wio.Env_policy.inherit_all = false;
+        exclude = [];
+        include_only = [ "NOTHING_MATCHES_*" ];
+      }
+    ~env:
+      [
+        ("GIT_CONFIG_GLOBAL", Some "/x/work.gitconfig");
+        ("DUNE_CACHE_ROOT", Some "/x/dune-cache");
+        ("OCAMLPATH", Some "/opt/site-lib");
+        ("DUNE_CACHE", Some "enabled");
+      ]
+  @@ fun w ->
+  let outcome =
+    run_ok w.io
+      (sh
+         {|printf '%s
+%s
+%s
+%s' "${GIT_CONFIG_GLOBAL:-ABSENT}" "${DUNE_CACHE_ROOT:-ABSENT}" "${OCAMLPATH:-ABSENT}" "${DUNE_CACHE:-ABSENT}"|})
+  in
+  match String.split_on_char '
+' (stdout_str outcome) with
+  | [ gitconfig; cache_root; ocamlpath; governable ] ->
+      equal string ~msg:"the git-config override reaches the child"
+        "/x/work.gitconfig" gitconfig;
+      equal string ~msg:"the dune cache root reaches the child" "/x/dune-cache"
+        cache_root;
+      equal string ~msg:"the toolchain path reaches the child" "/opt/site-lib"
+        ocamlpath;
+      equal string ~msg:"a governable name under the same posture stays behind"
+        "ABSENT" governable
   | _ -> fail "unexpected env probe output"
 
 (* Command.Session: the supervised background primitive behind background
@@ -2771,6 +2795,8 @@ let () =
         child_environment_policy_inherit_all;
       test "env exclude and include_only govern, the core stays"
         child_environment_policy_exclude_and_include_only;
+      test "root-derivation variables are immune to the env policy"
+        child_environment_root_derivation_is_immune;
       (* Session: the supervised background primitive *)
       test "session reads are incremental over a cursor"
         session_reads_are_incremental_over_a_cursor;

@@ -199,15 +199,9 @@ let platform =
 (* Startup staging. *)
 
 (* The sandbox posture pieces shared by the run path ([resolve_workspace]) and
-   the doctor's parity probe, factored so the two cannot drift. *)
-let env_policy_of_config config =
-  {
-    Mentat_workspace_io.Env_policy.inherit_all =
-      String.equal (Cfg.Resolved.get Cfg.Field.sandbox_env_inherit config) "all";
-    exclude = Cfg.Resolved.get Cfg.Field.sandbox_env_exclude config;
-    include_only = Cfg.Resolved.get Cfg.Field.sandbox_env_include_only config;
-  }
-
+   the doctor's parity probe, factored so the two cannot drift. [sandbox.mode]
+   is deliberately optional in config; the product default is this
+   executable's, stated once here. *)
 let mentat_dirs_of dirs =
   List.filter_map
     (fun spelling -> Lpath.Abs.of_string spelling |> Result.to_option)
@@ -218,14 +212,86 @@ let mentat_dirs_of dirs =
       User_dirs.daemon_socket_dir dirs;
     ]
 
-let env_snapshot () =
-  Array.to_list (Unix.environment ())
-  |> List.filter_map (fun kv ->
-      match String.index_opt kv '=' with
-      | None -> None
-      | Some i ->
-          Some
-            (String.sub kv 0 i, String.sub kv (i + 1) (String.length kv - i - 1)))
+let product_default_mode = Cfg.Mode.Workspace_write
+
+type sandbox_posture = {
+  posture_mode : Cfg.Mode.t;
+  posture_read : Cfg.Read.t;
+  posture_readable_roots : string list;
+  posture_writable_roots : string list;
+  posture_network : Mentat_sandbox.Policy.Network.t;
+  posture_env_policy : Mentat_workspace_io.Env_policy.t;
+}
+
+let env_policy_of_config config =
+  {
+    Mentat_workspace_io.Env_policy.inherit_all =
+      (match Cfg.Resolved.get Cfg.Field.sandbox_env_inherit config with
+      | Cfg.Env_inherit.All -> true
+      | Cfg.Env_inherit.Allowlist -> false);
+    exclude = Cfg.Resolved.get Cfg.Field.sandbox_env_exclude config;
+    include_only = Cfg.Resolved.get Cfg.Field.sandbox_env_include_only config;
+  }
+
+let sandbox_posture_of_config config =
+  {
+    posture_mode =
+      Option.value
+        (Cfg.Resolved.find Cfg.Field.sandbox_mode config)
+        ~default:product_default_mode;
+    posture_read = Cfg.Resolved.get Cfg.Field.sandbox_read config;
+    posture_readable_roots =
+      Cfg.Resolved.get Cfg.Field.sandbox_readable_roots config;
+    posture_writable_roots =
+      Cfg.Resolved.get Cfg.Field.sandbox_writable_roots config;
+    posture_network = Cfg.Resolved.get Cfg.Field.sandbox_network config;
+    posture_env_policy = env_policy_of_config config;
+  }
+
+(* Doctor's parity verdict — the ping-pong advisory. The dune mentat resolves
+   and the dune a confined command's PATH resolves must be one binary: two
+   dunes sharing one _build invalidate each other's work on every alternation,
+   and the divergence is silent until a build takes ten minutes. The child
+   PATH is a derivation of its own — an active opam switch is deliberately put
+   ahead of it — so the check resolves the workspace the way a run would
+   (posture and roots included, so the resolution side effects are a run's
+   too) and compares physically. *)
+let parity_check ~sw ~stdenv ~environment ~dirs ~config ~root ~ambient_dune =
+  let posture = sandbox_posture_of_config config in
+  let logical = Mentat_workspace.single (Mentat_workspace.Root.of_dir root) in
+  match
+    Mentat_workspace_io.resolve ~sw ~stdenv ~logical ~environment
+      ~env_policy:posture.posture_env_policy ~mode:posture.posture_mode
+      ~read:posture.posture_read ~readable_roots:posture.posture_readable_roots
+      ~writable_roots:posture.posture_writable_roots
+      ~mentat_dirs:(mentat_dirs_of dirs) ~network:posture.posture_network ()
+  with
+  | Error e ->
+      Error
+        (Format.asprintf "workspace did not resolve: %a"
+           Mentat_workspace_io.Resolve_error.pp e)
+  | Ok capability -> (
+      let physical path =
+        match Unix.realpath path with
+        | resolved -> resolved
+        | exception Unix.Unix_error _ -> path
+      in
+      match Mentat_workspace_io.child_program capability "dune" with
+      | None ->
+          Error
+            (Printf.sprintf
+               "commands find no dune on their PATH, but mentat resolves %s"
+               ambient_dune)
+      | Some child_dune
+        when String.equal (physical child_dune) (physical ambient_dune) ->
+          Ok (Printf.sprintf "commands resolve the same dune (%s)" child_dune)
+      | Some child_dune ->
+          Error
+            (Printf.sprintf
+               "commands resolve dune at %s but mentat resolves %s; builds \
+                inside and outside will re-execute each other's work"
+               child_dune ambient_dune))
+
 
 let resolve_root ~cwd =
   let raw =
@@ -329,7 +395,7 @@ let make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
 let build_base ~stdenv ~sw ~cwd ~overrides ?data_home ?review_base () :
     (t, Exit_status.t) result =
   let ( let* ) = Result.bind in
-  let environment = env_snapshot () in
+  let environment = Mentat_workspace_io.process_environment () in
   let getenv = environment_get environment in
   let stage r = Result.map_error Exit_status.runtime r in
   let* dirs = stage (stage_dirs ~getenv) in
@@ -350,7 +416,7 @@ let build_base ~stdenv ~sw ~cwd ~overrides ?data_home ?review_base () :
    order, and opens exactly one store handle (the one-handle invariant). *)
 let stage_shared ~stdenv ~sw ?data_home () : (shared, Exit_status.t) result =
   let ( let* ) = Result.bind in
-  let environment = env_snapshot () in
+  let environment = Mentat_workspace_io.process_environment () in
   let getenv = environment_get environment in
   let stage r = Result.map_error Exit_status.runtime r in
   let* dirs = stage (stage_dirs ~getenv) in
@@ -708,7 +774,7 @@ end
    aborting. A stage whose prerequisite failed (config
    or the default model with no resolved config) carries that reason. *)
 let probe ~stdenv ~sw ~cwd : Probe.t =
-  let environment = env_snapshot () in
+  let environment = Mentat_workspace_io.process_environment () in
   let getenv = environment_get environment in
   match stage_dirs ~getenv with
   | Error message ->
@@ -754,12 +820,12 @@ let probe ~stdenv ~sw ~cwd : Probe.t =
             | Error e -> Error (Store.Session.Error.message e))
       in
       (* The OCaml toolchain ladder ([MENTAT_DUNE] override, PATH, opam switch,
-         local [_opam]) resolved once, reported as a presence check: a workspace
-         with no reachable [dune] is a warning, not a failure. *)
-      let toolchain =
+         local [_opam]) walked once for two rows: [toolchain] reports presence,
+         [parity] compares the answer with the child's PATH. *)
+      let dune_resolution =
         match root_result with
         | Error message -> Error message
-        | Ok root -> (
+        | Ok root ->
             let env =
               environment
               |> List.map (fun (name, value) -> name ^ "=" ^ value)
@@ -769,90 +835,24 @@ let probe ~stdenv ~sw ~cwd : Probe.t =
               Mentat_ocaml_toolchain.discover ~env
                 ~workspace_root:(Some (Lpath.Abs.to_string root))
             in
-            match Mentat_ocaml_toolchain.find tc "dune" with
-            | Some (abs, source) ->
-                Ok
-                  (Printf.sprintf "dune at %s (via %s)" abs
-                     (Mentat_ocaml_toolchain.Source.to_string source))
-            | None -> Error "dune not found on PATH or opam switch")
+            Ok (root, Mentat_ocaml_toolchain.find tc "dune")
       in
-      (* Toolchain parity — the ping-pong advisory. The dune mentat resolves
-         and the dune a confined command's PATH resolves must be one binary:
-         two dunes sharing one _build invalidate each other's work on every
-         alternation, and the divergence is silent until a build takes ten
-         minutes. The child PATH is a derivation of its own — an active opam
-         switch is deliberately put ahead of it — so doctor resolves the
-         workspace the way a run would and compares. *)
+      let toolchain =
+        match dune_resolution with
+        | Error message -> Error message
+        | Ok (_, Some (abs, source)) ->
+            Ok
+              (Printf.sprintf "dune at %s (via %s)" abs
+                 (Mentat_ocaml_toolchain.Source.to_string source))
+        | Ok (_, None) -> Error "dune not found on PATH or opam switch"
+      in
       let parity =
-        match (root_result, config_resolved) with
+        match (dune_resolution, config_resolved) with
         | Error message, _ | _, Error message -> Error message
-        | Ok root, Ok config -> (
-            let env_array =
-              environment
-              |> List.map (fun (name, value) -> name ^ "=" ^ value)
-              |> Array.of_list
-            in
-            let tc =
-              Mentat_ocaml_toolchain.discover ~env:env_array
-                ~workspace_root:(Some (Lpath.Abs.to_string root))
-            in
-            match Mentat_ocaml_toolchain.find tc "dune" with
-            | None -> Error "no dune to compare (see toolchain)"
-            | Some (ambient_dune, _) -> (
-                let logical =
-                  Mentat_workspace.single (Mentat_workspace.Root.of_dir root)
-                in
-                let mode =
-                  Option.value
-                    (Cfg.Resolved.find Cfg.Field.sandbox_mode config)
-                    ~default:Cfg.Mode.Workspace_write
-                in
-                match
-                  Mentat_workspace_io.resolve ~sw ~stdenv ~logical ~environment
-                    ~env_policy:(env_policy_of_config config)
-                    ~mode
-                    ~read:(Cfg.Resolved.get Cfg.Field.sandbox_read config)
-                    ~readable_roots:
-                      (Cfg.Resolved.get Cfg.Field.sandbox_readable_roots config)
-                    ~writable_roots:
-                      (Cfg.Resolved.get Cfg.Field.sandbox_writable_roots config)
-                    ~mentat_dirs:(mentat_dirs_of dirs)
-                    ~network:
-                      (Cfg.Resolved.get Cfg.Field.sandbox_network config)
-                    ()
-                with
-                | Error e ->
-                    Error
-                      (Format.asprintf "workspace did not resolve: %a"
-                         Mentat_workspace_io.Resolve_error.pp e)
-                | Ok capability -> (
-                    let physical path =
-                      match Unix.realpath path with
-                      | resolved -> resolved
-                      | exception Unix.Unix_error _ -> path
-                    in
-                    match
-                      Mentat_workspace_io.child_program capability "dune"
-                    with
-                    | None ->
-                        Error
-                          (Printf.sprintf
-                             "commands find no dune on their PATH, but mentat \
-                              resolves %s"
-                             ambient_dune)
-                    | Some child_dune
-                      when String.equal (physical child_dune)
-                             (physical ambient_dune) ->
-                        Ok
-                          (Printf.sprintf
-                             "commands resolve the same dune (%s)" child_dune)
-                    | Some child_dune ->
-                        Error
-                          (Printf.sprintf
-                             "commands resolve dune at %s but mentat resolves \
-                              %s; builds inside and outside will re-execute \
-                              each other's work"
-                             child_dune ambient_dune))))
+        | Ok (_, None), _ -> Error "no dune to compare (see toolchain)"
+        | Ok (root, Some (ambient_dune, _)), Ok config ->
+            parity_check ~sw ~stdenv ~environment ~dirs ~config ~root
+              ~ambient_dune
       in
       (* Project detection reads the workspace root directly — doctor is a
          local-state diagnostic, not a sealed run — for the same [dune-project]/
@@ -1818,21 +1818,16 @@ let configured_sandbox_mode t =
   match Cfg.Resolved.find Cfg.Field.sandbox_mode t.config with
   | Some mode -> mode
   (* The config library deliberately leaves [sandbox.mode] optional. This
-     executable owns the product default; capability resolution, status, and
-     the TUI all consume this operation. Safety on an unenforceable posture
-     comes from the startup gate below, not from the default. *)
-  | None -> Cfg.Mode.Workspace_write
+     executable owns the product default ([product_default_mode], stated once
+     beside the posture record); capability resolution, status, and the TUI
+     all consume this operation. Safety on an unenforceable posture comes from
+     the startup gate below, not from the default. *)
+  | None -> product_default_mode
 
 let resolve_workspace t ~mode ~network :
     (Mentat_workspace_io.t, Exit_status.t) result =
   let logical = Mentat_workspace.single (Mentat_workspace.Root.of_dir t.root) in
-  let read = Cfg.Resolved.get Cfg.Field.sandbox_read t.config in
-  let readable_roots =
-    Cfg.Resolved.get Cfg.Field.sandbox_readable_roots t.config
-  in
-  let writable_roots =
-    Cfg.Resolved.get Cfg.Field.sandbox_writable_roots t.config
-  in
+  let posture = sandbox_posture_of_config t.config in
   (* Mentat's own config, data and state homes. A confined command must not
      read them — the session store holds every transcript — and must not write
      them, because that store carries the sealed confinement identity a resume
@@ -1849,9 +1844,10 @@ let resolve_workspace t ~mode ~network :
   let mentat_dirs = mentat_dirs_of t.shared.dirs in
   match
     Mentat_workspace_io.resolve ~sw:t.switch ~stdenv:t.shared.stdenv ~logical
-      ~environment:t.ambient
-      ~env_policy:(env_policy_of_config t.config)
-      ~mode ~read ~readable_roots ~writable_roots ~mentat_dirs ~network ()
+      ~environment:t.ambient ~env_policy:posture.posture_env_policy ~mode
+      ~read:posture.posture_read
+      ~readable_roots:posture.posture_readable_roots
+      ~writable_roots:posture.posture_writable_roots ~mentat_dirs ~network ()
   with
   | Ok capability -> Ok capability
   | Error e ->

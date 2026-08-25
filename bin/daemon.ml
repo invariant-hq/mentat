@@ -202,11 +202,11 @@ let resolve_session_root registry session =
    the call and released after (the lease hand-off), then the sweep runs — a follow's
    open feed keeps its hub retained, so the instance stays put past the
    in-flight decrement. *)
-let route_session registry session ~on_error f =
+let route_session registry ~environment session ~on_error f =
   match resolve_session_root registry session with
   | Error e -> on_error e
   | Ok root -> (
-      match get_or_boot registry ~root () with
+      match get_or_boot registry ~root ?environment () with
       | Error status -> on_error (Error.unavailable (exit_message status))
       | Ok entry ->
           Eio.Mutex.use_rw ~protect:true registry.mutex (fun () ->
@@ -224,7 +224,14 @@ let route_session registry session ~on_error f =
    and the lifecycle and settings entries labelled [~session] — routes per call
    to the session's owning instance, so a session in another workspace reaches
    its own engine. *)
-let composite_driver registry (bound : Driver.t) : Driver.t =
+let composite_driver registry ~environment (bound : Driver.t) : Driver.t =
+  (* Session routing may boot the owning instance, and the boot follows the
+     same first-binder rule a direct handshake gets: the calling connection's
+     environment is the one the instance resolves against — the shell that
+     asked for the effect, never the shell that spawned the daemon. *)
+  let route_session registry session ~on_error f =
+    route_session registry ~environment session ~on_error f
+  in
   let session : Driver.Session.t =
     {
       Driver.Session.submit =
@@ -408,7 +415,7 @@ let driver_for registry ~workspace ~environment =
           Ok
             {
               Server.workspace = Some root;
-              driver = composite_driver registry entry.driver;
+              driver = composite_driver registry ~environment entry.driver;
               on_close;
             })
 
@@ -487,7 +494,7 @@ let start_web registry ~sw ~net ~clock ~web_port ~token =
          per-workspace (URL-scoped) web binding is a named future. *)
       let client =
         Composition.attach_client entry.instance
-          (composite_driver registry entry.driver)
+          (composite_driver registry ~environment:None entry.driver)
       in
       let env =
         Mentat_web.Routes.Env.make ~client ~now:Unix.gettimeofday

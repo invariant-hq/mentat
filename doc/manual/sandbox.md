@@ -132,7 +132,9 @@ writes, and socket connects, in every posture, network-enabled included. The
 directory sits inside the shared scratch grant, so without the denial the
 agent that signs for every host you can reach would be one glob and one
 connect away; stripping the variable from the environment alone is friction,
-not a boundary.
+not a boundary. The same directory hosts other per-session launchd endpoints
+— an XQuartz display socket among them — so a confined command cannot reach
+an X11 display either; that is the accepted cost of closing the agent.
 
 Machine-global toolchain state — the OPAM root and the dune and uv config
 directories — is admitted read-only under the project read scope so tools

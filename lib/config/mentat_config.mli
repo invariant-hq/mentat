@@ -216,6 +216,33 @@ module Read : sig
   (** [pp ppf t] formats [t]'s spelling. *)
 end
 
+module Env_inherit : sig
+  (** Child-environment inheritance posture for confined commands.
+
+      The values of the [sandbox.env_inherit] field. *)
+
+  type t =
+    | Allowlist  (** The curated allow-list alone — the default. *)
+    | All
+        (** Additionally inherit every remaining ambient variable that survives
+            the built-in floor and the exclude/include_only policy. *)
+
+  val all : t list
+  (** [all] are the postures in declaration order. *)
+
+  val to_string : t -> string
+  (** [to_string t] is [t]'s config spelling, ["allowlist"] or ["all"]. *)
+
+  val of_string : string -> t option
+  (** [of_string s] is the posture spelled [s], or [None]. *)
+
+  val equal : t -> t -> bool
+  (** [equal a b] is [true] iff [a] and [b] are the same posture. *)
+
+  val pp : Format.formatter -> t -> unit
+  (** [pp ppf t] formats [t]'s spelling. *)
+end
+
 module Notify : sig
   (** Notification vocabulary for the [notify.*] fields.
 
@@ -425,13 +452,13 @@ module Field : sig
   (** [sandbox_network] is the [sandbox.network] field. Defaults to
       [Restricted]. *)
 
-  val sandbox_env_inherit : (string, defaulted) t
-  (** [sandbox_env_inherit] is the [sandbox.env_inherit] field: ["allowlist"]
-      (the default) constructs the child environment from the curated allow-list
-      alone; ["all"] additionally inherits every remaining ambient variable that
-      survives the built-in floor — the secret-shaped name patterns and agent
-      handles, which no setting subtracts from — and the exclude/include_only
-      policy below. *)
+  val sandbox_env_inherit : (Env_inherit.t, defaulted) t
+  (** [sandbox_env_inherit] is the [sandbox.env_inherit] field:
+      {!Env_inherit.Allowlist} (the default) constructs the child environment
+      from the curated allow-list alone; {!Env_inherit.All} additionally
+      inherits every remaining ambient variable that survives the built-in floor
+      — the secret-shaped name patterns and agent handles, which no setting
+      subtracts from — and the exclude/include_only policy below. *)
 
   val sandbox_env_exclude : (string list, defaulted) t
   (** [sandbox_env_exclude] is the [sandbox.env_exclude] field: case-insensitive

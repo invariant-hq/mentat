@@ -97,6 +97,12 @@ type t
     sandbox value itself — only projections of it — so the sandbox's lowering
     bridges are unreachable from a holder. *)
 
+val process_environment : unit -> (string * string) list
+(** [process_environment ()] is this process's environment as bindings — the
+    default answer to whose environment is ambient: what a local run passes to
+    {!resolve}, and what an attaching client snapshots for the daemon. First
+    occurrence wins for a duplicated name, as [execve] readers resolve it. *)
+
 module Env_policy = Child_env.Policy
 (** The child-environment inheritance policy — [sandbox.env_inherit],
     [sandbox.env_exclude], [sandbox.env_include_only]. *)

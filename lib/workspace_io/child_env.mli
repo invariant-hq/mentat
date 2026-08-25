@@ -36,12 +36,14 @@ type t = {
 module Policy : sig
   (** The configurable half of the construction — [sandbox.env_inherit],
       [sandbox.env_exclude], [sandbox.env_include_only] — governing the
-      inherited sets beyond the structural core. The core ([PATH], the fixed
-      bindings, and the base directories the resolver derives roots from) is not
-      governable: excluding [HOME] would leave the policy granting directories
-      the child no longer computes, the disagreement this library exists to
-      prevent. A floor of secret-shaped patterns and agent handles is applied
-      before the policy and nothing subtracts from it. *)
+      inherited sets beyond the structural core. The core is not governable:
+      [PATH], the fixed bindings, the locale family, and every variable the
+      resolver derives a grant from — [HOME], the temp-dir and XDG bases,
+      [OPAMROOT], [GIT_CONFIG_GLOBAL], [DUNE_CACHE_ROOT], and the OCaml
+      toolchain path variables. Excluding one would leave the policy granting
+      directories the child no longer computes, the disagreement this library
+      exists to prevent. A floor of secret-shaped patterns and agent handles is
+      applied before the policy and nothing subtracts from it. *)
 
   type t = {
     inherit_all : bool;
@@ -66,7 +68,7 @@ val make :
   names:string list ->
   policy:Policy.t ->
   t
-(** [make ~path ~lookup ~names] builds the environment.
+(** [make ~path ~lookup ~names ~policy] builds the environment.
 
     [path] is the resolver-derived [PATH] value; its segments are normalized
     (absolute, deduplicated, malformed segments dropped). No value is rewritten:

@@ -86,6 +86,25 @@ module Read = struct
   let pp ppf t = Format.pp_print_string ppf (to_string t)
 end
 
+module Env_inherit = struct
+  type t = Allowlist | All
+
+  let all = [ Allowlist; All ]
+  let to_string = function Allowlist -> "allowlist" | All -> "all"
+
+  let of_string = function
+    | "allowlist" -> Some Allowlist
+    | "all" -> Some All
+    | _ -> None
+
+  let equal a b =
+    match (a, b) with
+    | Allowlist, Allowlist | All, All -> true
+    | (Allowlist | All), _ -> false
+
+  let pp ppf t = Format.pp_print_string ppf (to_string t)
+end
+
 (* Notification vocabulary owned by config. The TUI notify fields store the
    validated spellings; the reducer reads these typed enums back through
    {!of_string} rather than carrying its own sum types: the TUI links the config
@@ -217,11 +236,9 @@ let tui_diff_layout_of_string =
 let tools_editor_of_string =
   string_enum_of_string ~what:"tools editor" ~spellings:tools_editor_spellings
 
-let sandbox_env_inherit_spellings = [ "allowlist"; "all" ]
-
 let sandbox_env_inherit_of_string =
-  string_enum_of_string ~what:"sandbox env inheritance"
-    ~spellings:sandbox_env_inherit_spellings
+  decode_enum ~what:"sandbox env inheritance" ~all:Env_inherit.all
+    ~to_string:Env_inherit.to_string Env_inherit.of_string
 
 let workspace_tooling_of_string =
   string_enum_of_string ~what:"workspace tooling mode"
@@ -579,6 +596,7 @@ let unattended_id : Mentat_permission.Unattended.t Type.Id.t = Type.Id.make ()
 let mode_id : Mode.t Type.Id.t = Type.Id.make ()
 let require_id : Mentat_sandbox.Requirement.t Type.Id.t = Type.Id.make ()
 let read_id : Read.t Type.Id.t = Type.Id.make ()
+let env_inherit_id : Env_inherit.t Type.Id.t = Type.Id.make ()
 let network_id : Mentat_sandbox.Policy.Network.t Type.Id.t = Type.Id.make ()
 let string_list_id : string list Type.Id.t = Type.Id.make ()
 
@@ -764,8 +782,9 @@ let tools_editor_codec =
   string_enum_codec ~spellings:tools_editor_spellings tools_editor_of_string
 
 let sandbox_env_inherit_codec =
-  string_enum_codec ~spellings:sandbox_env_inherit_spellings
-    sandbox_env_inherit_of_string
+  vocab_codec ~type_id:env_inherit_id ~equal:Env_inherit.equal
+    ~to_text:Env_inherit.to_string ~all:Env_inherit.all
+    ~of_text:sandbox_env_inherit_of_string
 
 let workspace_tooling_codec =
   string_enum_codec ~spellings:workspace_tooling_spellings
@@ -820,7 +839,7 @@ module Field = struct
     | Sandbox_readable_roots : (string list, defaulted) t
     | Sandbox_writable_roots : (string list, defaulted) t
     | Sandbox_network : (Mentat_sandbox.Policy.Network.t, defaulted) t
-    | Sandbox_env_inherit : (string, defaulted) t
+    | Sandbox_env_inherit : (Env_inherit.t, defaulted) t
     | Sandbox_env_exclude : (string list, defaulted) t
     | Sandbox_env_include_only : (string list, defaulted) t
     | Shell : (string, defaulted) t
@@ -1314,7 +1333,7 @@ module Field = struct
           ~env:("MENTAT_SANDBOX_NETWORK", sandbox_network_of_string)
     | Sandbox_env_inherit ->
         defaulted sandbox_env_inherit_codec
-          ~default:(builtin field "allowlist")
+          ~default:(builtin field Env_inherit.Allowlist)
           ~env:("MENTAT_SANDBOX_ENV_INHERIT", sandbox_env_inherit_of_string)
     | Sandbox_env_exclude ->
         defaulted string_list_codec ~default:(builtin field [])

@@ -39,7 +39,10 @@ type handshake_request = {
           the daemon resolves a freshly booted workspace instance against it so
           confined commands are configured from the shell that asked for the
           run, not the shell that spawned the daemon. [None] is a client that
-          offers none; the daemon falls back to its own. *)
+          offers none; the daemon falls back to its own. A full environment is
+          tens of kilobytes and rides every handshake — any dial may be the one
+          that re-boots an evicted instance — which the local socket absorbs;
+          the server's request-size bound caps abuse. *)
 }
 (** [requested_workspace] is the client's canonical workspace root to bind this
     connection to (the one-connection-one-workspace binding); [None] leaves it

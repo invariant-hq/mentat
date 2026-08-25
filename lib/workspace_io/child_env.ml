@@ -63,6 +63,16 @@ let inherited_names =
     "OPAMROOT";
     "XDG_CACHE_HOME";
     "XDG_CONFIG_HOME";
+    (* The two remaining root-derivation variables that are not base
+       directories: the resolver reads [GIT_CONFIG_GLOBAL] for the git-config
+       admit — git treats a denied read as fatal, and when the variable is set
+       it REPLACES both default paths, so a child without it resolves files
+       the policy never admitted — and [DUNE_CACHE_ROOT] for the cache grant,
+       ahead of the XDG base, exactly as dune does. Both sit here rather than
+       in a governable set for the same reason [HOME] does: the policy grants
+       what the child computes, and no configuration may split the pair. *)
+    "GIT_CONFIG_GLOBAL";
+    "DUNE_CACHE_ROOT";
     "LANG";
     "LANGUAGE";
     "LC_ALL";
@@ -169,7 +179,7 @@ let glob_matches pattern name =
     if start > h then None else scan start
   in
   match String.split_on_char '*' pattern with
-  | [] -> false
+  | [] -> assert false (* [split_on_char] never returns [] *)
   | [ exact ] -> String.equal exact name
   | first :: rest ->
       String.starts_with ~prefix:first name
@@ -274,9 +284,11 @@ let make ~path ~lookup ~names ~policy =
       (governed build_tool_names)
       bindings
   in
+  (* The toolchain path variables are root-derivation inputs too — the
+     resolver admits read roots and prepends the switch [bin] from them — so
+     they are not governable either, only normalized. *)
   let bindings =
-    add_inherited ~normalize:normalize_single_path lookup
-      (governed single_toolchain_paths)
+    add_inherited ~normalize:normalize_single_path lookup single_toolchain_paths
       bindings
   in
   let bindings =
@@ -285,9 +297,7 @@ let make ~path ~lookup ~names ~policy =
         match normalize_path_list value with
         | [] -> None
         | dirs -> Some (String.concat ":" dirs))
-      lookup
-      (governed toolchain_path_lists)
-      bindings
+      lookup toolchain_path_lists bindings
   in
   let owned =
     List.map fst fixed_bindings

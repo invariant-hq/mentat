@@ -1229,11 +1229,21 @@ let client_handshake ~base ~token ~workspace ~environment client ~sw =
         | Error _ -> Wire.version
       in
       Error (`Definite (Error.Unsupported_version { server_v }))
-  | Ok (_status, text) ->
-      (* A driver_for / A9 refusal: the body is a structured protocol error. *)
+  | Ok (status, text) ->
+      (* A driver_for / A9 refusal: the body is a structured protocol error.
+         A 400 whose body decodes as neither is the one other shape a
+         handshake can meet: a running daemon older than this client cannot
+         read the request it was sent, and the raw codec complaint would send
+         the user nowhere — name the skew and the way out instead. *)
       let message =
         match Wire.decode Mentat_protocol.Error.jsont text with
         | Ok error -> Format.asprintf "%a" Mentat_protocol.Error.pp error
+        | Error _ when status = 400 ->
+            Printf.sprintf
+              "daemon rejected the handshake (%s); a running daemon older than \
+               this client cannot read it — restart it with `mentat serve \
+               --stop`"
+              (String.trim text)
         | Error _ -> String.trim text
       in
       Error (`Definite (Error.Transport message))

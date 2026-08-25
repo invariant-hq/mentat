@@ -125,6 +125,16 @@ let edit_lock_for key =
           Hashtbl.add edit_locks key lock;
           lock)
 
+let process_environment () =
+  Array.to_list (Unix.environment ())
+  |> List.filter_map (fun binding ->
+      match String.index_opt binding '=' with
+      | None -> None
+      | Some i ->
+          Some
+            ( String.sub binding 0 i,
+              String.sub binding (i + 1) (String.length binding - i - 1) ))
+
 (* The ambient environment is supplied by the caller and indexed exactly once,
    at resolution: a lookup by name (first binding wins, as execve would), and
    the names themselves for the families the child inherits by prefix. The
@@ -134,9 +144,20 @@ let edit_lock_for key =
    child from whichever shell happened to spawn it first. *)
 let index_environment environment =
   let table = Hashtbl.create (List.length environment) in
+  (* A snapshot of a real process environment cannot hold these, but the list
+     may arrive over the wire from a raw client: a name that is empty or
+     carries ['='] or NUL would smuggle or truncate an exec binding, so such
+     bindings are dropped rather than indexed. *)
+  let well_formed name value =
+    (not (String.equal name ""))
+    && (not (String.contains name '='))
+    && (not (String.contains name '\000'))
+    && not (String.contains value '\000')
+  in
   List.iter
     (fun (name, value) ->
-      if not (Hashtbl.mem table name) then Hashtbl.add table name value)
+      if well_formed name value && not (Hashtbl.mem table name) then
+        Hashtbl.add table name value)
     environment;
   let names = Hashtbl.fold (fun name _ names -> name :: names) table [] in
   ((fun name -> Hashtbl.find_opt table name), names)
