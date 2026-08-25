@@ -220,7 +220,8 @@ let all_field_names =
     "notices.fswatch";
     "notices.cr_comments";
     "notices.dune_diagnostics";
-    "notices.dune_build";
+    "dune.watch";
+    "dune.targets";
     "workspace.tooling";
     "instructions.global";
     "instructions.project";
