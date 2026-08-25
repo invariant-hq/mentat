@@ -11,6 +11,7 @@ whole exchange is local and instantaneous.
   $ touch dune-project
   $ use_fake_dune
   $ export MENTAT_DUNE_RPC_QUIET_S=0
+  $ export MENTAT_DUNE_RPC_RECONNECT_S=0.25
 
 Observe mode never spawns: no marker file appears, and with nothing
 registered there is nothing to hear.
@@ -114,15 +115,14 @@ sleeps forever, as a build forwarded into a wedged watch would.
   $ rm -f fake-dune-argv
   $ printf hang > fake-dune-mode
   $ printf clean > dune-state
-  $ export MENTAT_DUNE_WATCH_FLUSH_S=0.5
   $ cat > hang.jsonl <<'JSONL'
-  > {"expect":{"body_contains":["hang prompt"]},"response":{"id":"h1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-h1","call_id":"call-h1","name":"shell","arguments":"{\"command\":\"sleep 2\",\"description\":\"let the watch come up\"}"}]}}
+  > {"expect":{"body_contains":["hang prompt"]},"response":{"id":"h1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-h1","call_id":"call-h1","name":"shell","arguments":"{\"command\":\"for i in $(seq 100); do test -S _build/.rpc/dune && break; sleep 0.1; done; sleep 1\",\"description\":\"wait for the watch to come up\"}"}]}}
   > {"expect":{"body_contains":["function_call_output","call-h1"]},"response":{"id":"h2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-h2","call_id":"call-h2","name":"shell","arguments":"{\"command\":\"dune build @check\",\"timeout_ms\":1000,\"description\":\"forward a build into the wedged watch\"}"}]}}
   > {"expect":{"body_contains":["function_call_output","call-h2"]},"response":{"id":"h3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-h3","call_id":"call-h3","name":"shell","arguments":"{\"command\":\"sleep 4\",\"description\":\"cover verification and the restart\"}"}]}}
   > {"expect":{"body_contains":["Build watch restarted (stopped responding to builds)"]},"response":{"id":"h4","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hung"}]}]}}
   > JSONL
   $ start_fake_openai hang.jsonl capture-hang port-hang
-  $ MENTAT_DUNE_WATCH=auto mentat run "hang prompt" --cwd "$PWD" --permission bypass --id hang-turn 2>/dev/null
+  $ MENTAT_DUNE_WATCH_FLUSH_S=0.5 MENTAT_DUNE_WATCH=auto mentat run "hang prompt" --cwd "$PWD" --permission bypass --id hang-turn 2>/dev/null
   hung
   $ wait_fake_server
 
@@ -132,19 +132,46 @@ respawned life the supervisor started after verification failed.
   $ wc -l < fake-dune-argv | tr -d ' '
   3
 
-A fresh watch whose file watcher never answers its first flush is blocked,
-not slow: announced at once, no restart budget spent, one warning notice —
-and never a second spawn.
+A stall whose verification completes is a slow build, not a hang: the same
+timed-out dune command reports, the flush answers, and nothing restarts —
+no notice, no third shim invocation.
+
+  $ rm -f fake-dune-argv
+  $ printf slow > fake-dune-mode
+  $ cat > slow.jsonl <<'JSONL'
+  > {"expect":{"body_contains":["slow prompt"]},"response":{"id":"s1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-s1","call_id":"call-s1","name":"shell","arguments":"{\"command\":\"for i in $(seq 100); do test -S _build/.rpc/dune && break; sleep 0.1; done; sleep 1\",\"description\":\"wait for the watch to come up\"}"}]}}
+  > {"expect":{"body_contains":["function_call_output","call-s1"]},"response":{"id":"s2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-s2","call_id":"call-s2","name":"shell","arguments":"{\"command\":\"dune build @check\",\"timeout_ms\":1000,\"description\":\"forward a build into the slow watch\"}"}]}}
+  > {"expect":{"body_contains":["function_call_output","call-s2"]},"response":{"id":"s3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-s3","call_id":"call-s3","name":"shell","arguments":"{\"command\":\"sleep 2\",\"description\":\"cover the verification\"}"}]}}
+  > {"expect":{"body_contains":["function_call_output","call-s3"]},"response":{"id":"s4","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"slow"}]}]}}
+  > JSONL
+  $ start_fake_openai slow.jsonl capture-slow port-slow
+  $ MENTAT_DUNE_WATCH=auto mentat run "slow prompt" --cwd "$PWD" --permission bypass --id slow-turn 2>/dev/null
+  slow
+  $ wait_fake_server
+
+Two shim invocations only — the first life and the forwarder; verification
+cleared the report, so no respawn and no restart notice anywhere in the
+turn.
+
+  $ wc -l < fake-dune-argv | tr -d ' '
+  2
+  $ grep -c 'Build watch restarted' capture-slow/request-4.json
+  0
+  [1]
+
+A fresh watch whose file watcher never answers its first flushes is
+blocked, not slow: announced at once, no restart budget spent, one warning
+notice — and never a second spawn.
 
   $ rm -f fake-dune-argv
   $ printf hang-flush > fake-dune-mode
   $ cat > blocked.jsonl <<'JSONL'
-  > {"expect":{"body_contains":["blocked prompt"]},"response":{"id":"b1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-b1","call_id":"call-b1","name":"shell","arguments":"{\"command\":\"sleep 2\",\"description\":\"let the watch spawn\"}"}]}}
+  > {"expect":{"body_contains":["blocked prompt"]},"response":{"id":"b1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-b1","call_id":"call-b1","name":"shell","arguments":"{\"command\":\"for i in $(seq 100); do test -S _build/.rpc/dune && break; sleep 0.1; done; sleep 1\",\"description\":\"wait for the watch to spawn\"}"}]}}
   > {"expect":{"body_contains":["function_call_output","call-b1"]},"response":{"id":"b2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-b2","call_id":"call-b2","name":"shell","arguments":"{\"command\":\"sleep 3\",\"description\":\"cover attach and the self-test\"}"}]}}
   > {"expect":{"body_contains":["Build watch off (file watcher blocked by the sandbox)"]},"response":{"id":"b3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"blocked"}]}]}}
   > JSONL
   $ start_fake_openai blocked.jsonl capture-blocked port-blocked
-  $ MENTAT_DUNE_WATCH=auto mentat run "blocked prompt" --cwd "$PWD" --permission bypass --id blocked-turn 2>/dev/null
+  $ MENTAT_DUNE_WATCH_FLUSH_S=0.5 MENTAT_DUNE_WATCH=auto mentat run "blocked prompt" --cwd "$PWD" --permission bypass --id blocked-turn 2>/dev/null
   blocked
   $ wait_fake_server
   $ wc -l < fake-dune-argv | tr -d ' '

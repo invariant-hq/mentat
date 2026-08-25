@@ -42,8 +42,10 @@
    consults [fake-dune-mode] in the cwd ([exit:N] dies at once, [exit-once:N]
    dies once and rewrites itself to [serve]; [hang] serves but answers only
    its first flush_file_watcher and makes forwarders sleep forever — the
-   whole hung-watch scenario; [hang-flush] parks every flush, the
-   blocked-file-watcher scenario; [serve] is the default), then
+   whole hung-watch scenario; [slow] answers every flush but still makes
+   forwarders sleep forever — a slow build, not a hang, so verification
+   clears; [hang-flush] parks every flush, the blocked-file-watcher
+   scenario; [serve] is the default), then
    serves the watch protocol: registry entry under its own XDG_RUNTIME_DIR
    (the private directory a supervisor hands it), socket at
    [_build/.rpc/dune], dynamic state from [dune-state] in the cwd. A shim
@@ -160,7 +162,11 @@ let progress_payload progress =
    answers [`Ok]; a fake playing a wedged event loop parks the request
    forever. [flush_answer_limit]: [None] answers every flush, [Some n]
    answers the first [n] of this process's life and parks the rest — so a
-   watch can pass its first-flush self-test and then hang verification. *)
+   watch can pass its first-flush self-test and then hang verification.
+   Plain refs on purpose: connection threads share one runtime lock (OCaml
+   threads, single domain), so the increment cannot tear — do not "fix"
+   this with a mutex unless the fake ever moves to domains. The same holds
+   for [session_version]. *)
 let flush_answer_limit : int option ref = ref None
 let flush_seen = ref 0
 
@@ -407,7 +413,7 @@ let realpath path =
    when the absolute path would overflow sun_path: chdir there and bind the
    basename -- and answer one connection at a time. mentat holds one
    long-poll connection; probes connect, handshake, and close. *)
-let serve_forever ~mode ~root ~socket ~bind_in ~ready =
+let serve_forever ~mode ~root ~socket ~bind_in ~steal ~ready =
   (* [bind_in] chdirs below, so a relative ready path is pinned to the
      caller's directory first. *)
   let ready =
@@ -421,7 +427,6 @@ let serve_forever ~mode ~root ~socket ~bind_in ~ready =
       | None -> current_state := "clean");
       ignore (Thread.create ticker path)
   | Static _ -> ());
-  let registry_file = advertise ~root ~socket in
   let listen = Unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
   let bind_path =
     match bind_in with
@@ -430,9 +435,17 @@ let serve_forever ~mode ~root ~socket ~bind_in ~ready =
         Unix.chdir dir;
         Filename.basename socket
   in
-  (try Unix.unlink bind_path with Unix.Unix_error _ -> ());
+  (* A standalone server steals a stale socket; the shim must not — between
+     its occupied-probe and its bind another shim (the supervised watch, or
+     a racing forwarder) may have bound, and unlink-then-bind would steal a
+     socket that is very much alive. [EADDRINUSE] is the shim's cue to be a
+     forwarder instead, and it propagates to the caller. Advertising and the
+     exit cleanup come after the bind for the same reason: a loser must
+     neither register nor, at exit, unlink the winner's socket. *)
+  if steal then (try Unix.unlink bind_path with Unix.Unix_error _ -> ());
   Unix.bind listen (Unix.ADDR_UNIX bind_path);
   Unix.listen listen 8;
+  let registry_file = advertise ~root ~socket in
   let cleanup () =
     (try Unix.unlink bind_path with Unix.Unix_error _ -> ());
     try Unix.unlink registry_file with Unix.Unix_error _ -> ()
@@ -493,6 +506,16 @@ let run_as_dune () =
       | [ "hang" ] -> flush_answer_limit := Some 1
       | [ "hang-flush" ] -> flush_answer_limit := Some 0
       | _ -> ());
+      let occupied_behavior () =
+        if String.equal directive "hang" || String.equal directive "slow"
+        then
+          (* A build forwarded into this scenario's watch never returns. *)
+          while true do
+            Unix.sleep 3600
+          done;
+        print_string "forwarded one build to the running server\n";
+        exit 0
+      in
       let sock_dir = Filename.concat root "_build/.rpc" in
       let socket = Filename.concat sock_dir "dune" in
       mkdir_p sock_dir;
@@ -507,19 +530,18 @@ let run_as_dune () =
             | () -> true
             | exception Unix.Unix_error _ -> false)
       in
-      if occupied then begin
-        if String.equal directive "hang" then
-          (* A build forwarded into a wedged watch never returns. *)
-          while true do
-            Unix.sleep 3600
-          done;
-        print_string "forwarded one build to the running server\n";
-        exit 0
-      end;
+      if occupied then occupied_behavior ();
       let state_file = Filename.concat root "dune-state" in
       if not (Sys.file_exists state_file) then write_file state_file "clean\n";
-      serve_forever ~mode:(Dynamic state_file) ~root ~socket
-        ~bind_in:(Some sock_dir) ~ready:""
+      match
+        serve_forever ~mode:(Dynamic state_file) ~root ~socket
+          ~bind_in:(Some sock_dir) ~steal:false ~ready:""
+      with
+      | () -> ()
+      | exception Unix.Unix_error (Unix.EADDRINUSE, _, _) ->
+          (* Lost the bind race to another shim: be the forwarder the
+             occupied-probe would have made us. *)
+          occupied_behavior ()
 
 let () =
   Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
@@ -548,9 +570,6 @@ let () =
           Arg.Set socket_at_root,
           "bind the socket at ROOT/_build/.rpc/dune, where a real watch \
            serves" );
-        ( "--hang-flush",
-          Arg.Unit (fun () -> flush_answer_limit := Some 0),
-          "park every flush_file_watcher request: a wedged event loop" );
       ]
     in
     Arg.parse spec
@@ -567,7 +586,7 @@ let () =
       mkdir_p sock_dir;
       serve_forever ~mode ~root
         ~socket:(Filename.concat sock_dir "dune")
-        ~bind_in:(Some sock_dir) ~ready:!ready
+        ~bind_in:(Some sock_dir) ~steal:true ~ready:!ready
     end
     else begin
       (* A short socket path under [/tmp]: a Unix socket cannot bind a long
@@ -578,6 +597,7 @@ let () =
         Filename.temp_file ~temp_dir:"/tmp" "mentat-fake-rpc-" ".sock"
       in
       Unix.unlink socket;
-      serve_forever ~mode ~root ~socket ~bind_in:None ~ready:!ready
+      serve_forever ~mode ~root ~socket ~bind_in:None ~steal:true
+        ~ready:!ready
     end
   end
