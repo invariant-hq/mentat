@@ -178,7 +178,10 @@ val make :
     [dune_lease] is consulted at the lock-taking moment (default: [`Free],
     run as-is). [`Leased release] means a supervised watch was paused for
     this call — the tool runs and returns the lease via [release], failure
-    included. [`Held] means a foreign watch holds Dune's build lock: the
+    included. Two concurrently leased calls still contend with each other
+    for Dune's lock — the lease serializes them against the watch, not
+    against their siblings. [`Held] means a foreign watch holds Dune's build
+    lock: the
     call fails [`Unavailable] with text naming the lock and the
     Merlin-backed alternatives — never Dune's own lock advice, which
     suggests deleting [_build/.lock].

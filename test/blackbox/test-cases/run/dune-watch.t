@@ -9,6 +9,7 @@ window is zero because the whole exchange is local and instantaneous. No dune
 or compiler is on PATH.
 
   $ use_trusted_workspace
+  $ mentat config set dune.lint_command '[]' >/dev/null
   $ touch dune-project
   $ export MENTAT_DUNE_WATCH=observe
   $ printf failing > dune-state

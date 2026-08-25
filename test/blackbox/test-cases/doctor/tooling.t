@@ -45,3 +45,18 @@ found" (it never falls through to PATH), so the found path is exactly the overri
   dune at $TESTCASE_ROOT/stub-bin/dune (via MENTAT_* override)
   $ MENTAT_MODEL=openai/gpt-5.6-sol mentat doctor --json | mentat_cram json '.checks[8].detail'
   dune project
+
+The dune row mirrors every rung of the lane's gate, not only the knob:
+workspace.tooling=off switches the lane off whatever the marker says, and a
+read-only sandbox demotes auto to observe. With the linter gone from the
+PATH but dune present, the lint row names the dune exec reach whose first
+run answers availability.
+
+  $ MENTAT_WORKSPACE_TOOLING=off MENTAT_MODEL=openai/gpt-5.6-sol mentat doctor | censor | grep -E 'dune:|lint:'
+  [WARN] dune: lane off: workspace.tooling = off
+  [WARN] lint: lint rides the dune lane: lane off: workspace.tooling = off
+  $ MENTAT_SANDBOX_MODE=read-only MENTAT_MODEL=openai/gpt-5.6-sol mentat doctor | censor | grep -E 'dune:'
+  [PASS] dune: observe — auto demoted by sandbox.mode = read-only
+  $ rm stub-bin/litany
+  $ MENTAT_MODEL=openai/gpt-5.6-sol mentat doctor | censor | grep -E 'lint:'
+  [PASS] lint: litany check — resolves via PATH

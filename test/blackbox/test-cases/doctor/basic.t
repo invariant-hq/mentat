@@ -1,4 +1,4 @@
-DOCTOR-3 — the healthy trusted doctor. next's doctor aggregates nine local health
+DOCTOR-3 — the healthy trusted doctor. next's doctor aggregates twelve local health
 checks (config, storage, sessions, trust, auth, model, toolchain, project,
 diagnostics) without
 contacting a provider. A fresh trusted workspace with no credential is healthy: the
@@ -22,7 +22,7 @@ branch is host-independent; the found branch lives in tooling.t.
   [WARN] lint: lint rides the dune lane: no dune-project (OCaml tooling inactive)
   [PASS] diagnostics: $TESTCASE_ROOT/state/mentat (0 log(s), 0 crash report(s))
 
-The --json envelope carries the same nine checks as one deterministic line, with the
+The --json envelope carries the same twelve checks as one deterministic line, with the
 warn level surfaced structurally — strictly more than the old `grep -o '"type"'`.
 
   $ MENTAT_MODEL=openai/gpt-5.6-sol mentat doctor --json | censor
@@ -73,6 +73,6 @@ keeps the exit code at 0 (a warning is not a failure).
   [WARN] toolchain: dune not found on PATH or opam switch
   [WARN] parity: no dune to compare (see toolchain)
   [WARN] project: no dune-project (OCaml tooling inactive)
-  [WARN] dune: no dune-project (OCaml tooling inactive)
-  [WARN] lint: lint rides the dune lane: no dune-project (OCaml tooling inactive)
+  [WARN] dune: lane off: workspace not trusted
+  [WARN] lint: lint rides the dune lane: lane off: workspace not trusted
   [PASS] diagnostics: $TESTCASE_ROOT/state/mentat (0 log(s), 0 crash report(s))

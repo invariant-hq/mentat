@@ -459,25 +459,29 @@ let watch_lock_message =
 let run workspace_io ~clock ~program ~dune_lease ~cancelled input =
   if cancelled () then interrupted ()
   else
-    let proceed () =
-      let timeout_ms = Input.effective_timeout_ms input in
-      if timeout_ms > max_timeout_ms then
-        Mentat_tool.Result.failed `Invalid_input
-          ("timeout_ms must be <= " ^ string_of_int max_timeout_ms)
-      else
-        match resolve_directory workspace_io input with
-        | Error result -> result
-        | Ok (directory, address) ->
-            if cancelled () then interrupted ()
-            else
+    let timeout_ms = Input.effective_timeout_ms input in
+    if timeout_ms > max_timeout_ms then
+      Mentat_tool.Result.failed `Invalid_input
+        ("timeout_ms must be <= " ^ string_of_int max_timeout_ms)
+    else
+      match resolve_directory workspace_io input with
+      | Error result -> result
+      | Ok (directory, address) ->
+          if cancelled () then interrupted ()
+          else
+            (* The lease is consulted at the lock moment — after every
+               refusal that needs no lock — so a malformed call never costs
+               the watch a pause-and-respawn cycle. *)
+            let proceed () =
               let started = Eio.Time.Mono.now clock in
               run_setup workspace_io ~clock ~program ~started ~directory
                 ~address ~timeout_ms ~cancelled input
-    in
-    match dune_lease () with
-    | `Held -> Mentat_tool.Result.failed `Unavailable watch_lock_message
-    | `Free -> proceed ()
-    | `Leased release -> Fun.protect ~finally:release proceed
+            in
+            (match dune_lease () with
+            | `Held ->
+                Mentat_tool.Result.failed `Unavailable watch_lock_message
+            | `Free -> proceed ()
+            | `Leased release -> Fun.protect ~finally:release proceed)
 
 let permissions execution _input =
   [

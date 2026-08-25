@@ -1093,6 +1093,26 @@ let endpoint_corpus_group =
                     (read_corpus ("endpoint." ^ name ^ ".resp"))
                     resp)
             endpoint_reps);
+      (* The corpus representative pins the restart arm; the verb enum's other
+         arm and its closed-set refusal are pinned here through the same
+         canonicalizer the corpus uses. *)
+      test "the dune_control verb decodes both arms and refuses others"
+        (fun () ->
+          match
+            List.find_opt
+              (fun (n, _, _) -> String.equal n "workspace.dune_control")
+              Server.endpoint_shapes
+          with
+          | None -> fail "no workspace.dune_control endpoint row"
+          | Some (_, canon_req, _) ->
+              (match canon_req {|{"op":"stop"}|} with
+              | Ok bytes ->
+                  equal string ~msg:"stop arm" "{\n  \"op\": \"stop\"\n}"
+                    bytes
+              | Error e -> failf "stop does not decode: %s" e);
+              (match canon_req {|{"op":"pause"}|} with
+              | Ok bytes -> failf "unknown op decoded: %s" bytes
+              | Error _ -> ()));
     ]
 
 (* ---- Live-engine integration harness ----
