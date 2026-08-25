@@ -905,3 +905,58 @@ let%expect_test "dune row renders warnings with lint, and a building watch" =
     11 | ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     12 |   ! not logged in · /login · ~/mentat-tui-pane-dune-1d74279b · openai/gpt-5.5 · ! full access          ? for shortcuts
     |}]
+
+(* The supervisor's off reasons name themselves muted: no dune on the command
+   PATH, and a give-up after successive spawned watches died before coming
+   up. A disabled lane and plain absence still render no row at all. *)
+let%expect_test "dune row names the supervisor's off reasons" =
+  let prompt = "watch off" in
+  let turn = Tui.Turn_script.complete ~prompt "Done." in
+  let no_dune =
+    (None, Mentat_workspace.Health.Off Mentat_workspace.Health.Off.No_dune)
+  in
+  Tui.run ~name:"pane-dune-nodune" ~size:(120, 12) ~workspace_glance:no_dune
+    ~turns:[ turn ]
+  @@ fun t ->
+  submit t prompt;
+  Tui.finish_turn t;
+  Tui.settle t;
+  Tui.print t;
+  [%expect {|
+    01 |                                                                                 │ workspace
+    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium                     │   dune · off · not on PATH
+    03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-pane-dun5f783333                   │
+    04 |                                                                                 │
+    05 | ❯ watch off                                                                     │
+    06 |                                                                                 │
+    07 | ⏺ Done.                                                                         │
+    08 |
+    09 | ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    10 | ❯ message mentat
+    11 | ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    12 |   ! not logged in · /login · ~/mentat-tui-pane-dun5f783333 · openai/gpt-5.5 · ! full access            ? for shortcuts
+    |}];
+  let gave_up =
+    (None, Mentat_workspace.Health.Off Mentat_workspace.Health.Off.Gave_up)
+  in
+  Tui.run ~name:"pane-dune-gaveup" ~size:(120, 12) ~workspace_glance:gave_up
+    ~turns:[ turn ]
+  @@ fun t ->
+  submit t prompt;
+  Tui.finish_turn t;
+  Tui.settle t;
+  Tui.print t;
+  [%expect {|
+    01 |                                                                                 │ workspace
+    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium                     │   dune · off · gave up
+    03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-pane-dunf070191e                   │
+    04 |                                                                                 │
+    05 | ❯ watch off                                                                     │
+    06 |                                                                                 │
+    07 | ⏺ Done.                                                                         │
+    08 |
+    09 | ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    10 | ❯ message mentat
+    11 | ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    12 |   ! not logged in · /login · ~/mentat-tui-pane-dunf070191e · openai/gpt-5.5 · ! full access            ? for shortcuts
+    |}]
