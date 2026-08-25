@@ -32,6 +32,7 @@ type t = {
   mutable stopped : bool;
   mutable session : Command.Session.t option;
   mutable mirror : Mentat_ocaml_dune_rpc.Mirror.t option;
+  mutable mirror_failures : int;
 }
 
 (* The spawn-to-respawn pause, and the cadence at which a foreign watch's
@@ -64,6 +65,7 @@ let make ~rpc ~capability ~mono ~sw ~root ~run_id ~mode ~program ~targets =
     stopped = false;
     session = None;
     mirror = None;
+    mirror_failures = 0;
   }
 
 let sleep t seconds =
@@ -206,18 +208,32 @@ let private_entry_registered t =
   | entries -> Array.length entries > 0
   | exception Sys_error _ -> false
 
+(* The mirror is an editor courtesy — the observer rides the pin — so a
+   registry that cannot be written (unset HOME, unwritable data dir) is
+   worth a few tries and one warning, never a 4 Hz retry-and-warn for the
+   life of the watch. *)
+let mirror_attempts = 3
+
 let write_mirror t session =
-  match
-    Mentat_ocaml_dune_rpc.Instance.mirror t.rpc
-      ~pid:(Command.Session.pid session)
-  with
-  | Ok mirror ->
-      Log.info (fun m ->
-          m "dune watch registry mirror written at %s"
-            (Mentat_ocaml_dune_rpc.Mirror.path mirror));
-      t.mirror <- Some mirror
-  | Error message ->
-      Log.warn (fun m -> m "dune watch registry mirror failed: %s" message)
+  if t.mirror_failures < mirror_attempts then
+    match
+      Mentat_ocaml_dune_rpc.Instance.mirror t.rpc
+        ~pid:(Command.Session.pid session)
+    with
+    | Ok mirror ->
+        Log.info (fun m ->
+            m "dune watch registry mirror written at %s"
+              (Mentat_ocaml_dune_rpc.Mirror.path mirror));
+        t.mirror <- Some mirror;
+        t.mirror_failures <- 0
+    | Error message ->
+        t.mirror_failures <- t.mirror_failures + 1;
+        if t.mirror_failures >= mirror_attempts then
+          Log.warn (fun m ->
+              m
+                "dune watch registry mirror failed; editors will not \
+                 discover this watch: %s"
+                message)
 
 let remove_mirror t =
   match t.mirror with
@@ -391,6 +407,7 @@ and spawn t deaths =
         Log.info (fun m ->
             m "dune watch spawned pid %d" (Command.Session.pid session));
         t.session <- Some session;
+        t.mirror_failures <- 0;
         Mentat_ocaml_dune_rpc.Instance.pin t.rpc
           ~pid:(Command.Session.pid session)
           (* The requested targets are known and carry no lint alias until
