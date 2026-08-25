@@ -543,9 +543,38 @@ let run_as_dune () =
              occupied-probe would have made us. *)
           occupied_behavior ()
 
+(* The fake-dune [exec] shim: resolve and run the target the way dune exec
+   does, with the lock universe's bin dir — played by [fake-lock-bin] in
+   the cwd — ahead of the PATH, and dune's own not-found answer when the
+   target resolves nowhere. *)
+let run_as_exec () =
+  let root = Unix.getcwd () in
+  append_line
+    (Filename.concat root "fake-dune-argv")
+    (String.concat " " (List.tl (Array.to_list Sys.argv)));
+  let rest =
+    match Array.to_list Sys.argv with
+    | _ :: "exec" :: "--" :: rest -> rest
+    | _ :: "exec" :: rest -> rest
+    | _ -> []
+  in
+  match rest with
+  | [] -> exit 2
+  | program :: _ -> (
+      let path =
+        match Sys.getenv_opt "PATH" with Some path -> path | None -> ""
+      in
+      Unix.putenv "PATH" (Filename.concat root "fake-lock-bin" ^ ":" ^ path);
+      try Unix.execvp program (Array.of_list rest)
+      with Unix.Unix_error (Unix.ENOENT, _, _) ->
+        Printf.printf "Error: Program %S not found!\n" program;
+        exit 1)
+
 let () =
   Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
-  if Array.length Sys.argv > 1 && String.equal Sys.argv.(1) "build" then
+  if Array.length Sys.argv > 1 && String.equal Sys.argv.(1) "exec" then
+    run_as_exec ()
+  else if Array.length Sys.argv > 1 && String.equal Sys.argv.(1) "build" then
     run_as_dune ()
   else begin
     let root = ref "" and scenario = ref "failing" in

@@ -23,6 +23,7 @@ type t = {
      one whose stream moved past it — dune mints fresh diagnostic ids per
      build, so any build produces events and advances the count. *)
   mutable ran_at : int;
+  mutable dead : bool;
 }
 
 (* The trigger poll is a memory read; the run itself is bounded generously —
@@ -42,6 +43,7 @@ let make ~rpc ~capability ~mono ~sw ~workspace ~command =
     command;
     engaged = false;
     ran_at = -1;
+    dead = false;
   }
 
 let sleep t seconds =
@@ -61,6 +63,28 @@ let due t =
       if at > t.ran_at then Some at else None
   | Some _ | None -> None
 
+(* Availability is the first run's answer, in both worlds: a direct
+   command that cannot spawn is a structural [Error]; a [dune exec]-reached
+   one that does not exist is dune's own [Program "<name>" not found]. The
+   name asked about is the command's target — past the [dune exec --]
+   prefix when the gate added one. *)
+let target t =
+  match t.command with
+  | "dune" :: "exec" :: "--" :: name :: _ -> name
+  | name :: _ -> name
+  | [] -> assert false (* refused at make *)
+
+let says_not_found t output =
+  let needle = Printf.sprintf "Program %S not found" (target t) in
+  let length = String.length needle in
+  let rec search from =
+    if from + length > String.length output then false
+    else
+      String.equal (String.sub output from length) needle
+      || search (from + 1)
+  in
+  search 0
+
 let captured_text outcome =
   Command.Captured.render outcome.Command.stdout
   ^ "\n"
@@ -77,8 +101,10 @@ let run_once t at =
   with
   | Error error ->
       t.ran_at <- at;
-      Log.warn (fun m ->
-          m "lint run failed to spawn: %a" Command.Error.pp error)
+      t.dead <- true;
+      Log.info (fun m ->
+          m "lint command cannot spawn; lint lane off: %a" Command.Error.pp
+            error)
   | Ok outcome -> (
       t.ran_at <- at;
       match outcome.Command.termination with
@@ -99,17 +125,27 @@ let run_once t at =
                   m "lint run settled: %d finding(s)" (List.length findings));
               Mentat_ocaml_dune_rpc.Instance.set_lint t.rpc (Some findings)
           | (`Exited _ | `Signaled _), [] ->
-              Log.warn (fun m ->
-                  m "lint command failed without findings; findings kept")))
+              if says_not_found t (captured_text outcome) then begin
+                t.dead <- true;
+                Log.info (fun m ->
+                    m "lint target %s is not in the project; lint lane off"
+                      (target t))
+              end
+              else
+                Log.warn (fun m ->
+                    m "lint command failed without findings; findings kept")))
 
 let engage t =
   if not t.engaged then begin
     t.engaged <- true;
     Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
         let rec loop () =
-          (match due t with Some at -> run_once t at | None -> ());
-          sleep t poll_s;
-          loop ()
+          if t.dead then `Stop_daemon
+          else begin
+            (match due t with Some at -> run_once t at | None -> ());
+            sleep t poll_s;
+            loop ()
+          end
         in
         loop ())
   end
