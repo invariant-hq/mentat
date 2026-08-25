@@ -21,6 +21,7 @@
   workspace_notices
   workspace_watch
   workspace_adapter
+  dune_watch
   tool_boot
   review_git
   composition
