@@ -12,4 +12,3 @@ module Eval = Eval
 module Find_definitions = Find_definitions
 module Find_references = Find_references
 module Docs = Docs
-module Dune_describe = Dune_describe

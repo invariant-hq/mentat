@@ -42,7 +42,6 @@ type verb =
   | Web_search  (** Searching the web. *)
   | Task  (** Delegating work to a child agent. *)
   | Todo  (** Updating the task board. The board itself renders separately. *)
-  | Dune  (** Querying Dune project data. *)
   | Diagnostics  (** Reading compiler diagnostics. *)
   | Ocaml_search  (** Searching OCaml source structurally. *)
   | Ocaml_edit  (** Editing OCaml source through its syntax tree. *)

@@ -531,34 +531,6 @@
   (pps ppx_windtrap)))
 
 (library
- (name test_tools_ocaml_dune_describe_expect)
- (modules test_tools_ocaml_dune_describe_expect)
- (inline_tests)
- (libraries
-  windtrap
-  test_tools_support
-  eio
-  eio.mock
-  eio.unix
-  eio_main
-  unix
-  mtime
-  jsont
-  jsont.bytesrw
-  mentat_config
-  mentat_llm
-  lpath
-  mentat_permission
-  mentat_sandbox
-  mentat_tool
-  mentat_tools
-  mentat_tools_output
-  mentat_workspace
-  mentat_workspace_io)
- (preprocess
-  (pps ppx_windtrap)))
-
-(library
  (name test_tools_web_fetch_expect)
  (modules test_tools_web_fetch_expect)
  (inline_tests)

@@ -145,8 +145,9 @@ aliases or files); putting an action in it is a removed legacy form:
 ```
 
 A rule with an alias but no targets exists only through that alias,
-so a typo'd alias name fails silently — `dune describe aliases`
-lists what a directory actually defines.
+so a typo'd alias name fails silently — misspell it and the rule
+simply never runs; re-check the stanza spelling when a check
+"does nothing".
 
 ## 4. Promotion
 
@@ -275,13 +276,11 @@ reach for introspection instead of guessing:
   (dune derives module names from filenames: `Foo_bar` lives in
   `foo_bar.ml`).
 - A rule that "doesn't run" is usually attached to nothing: no alias
-  requests it and nothing depends on its targets. Ask
-  `dune describe aliases` and `dune describe targets` what the
-  directory really defines.
+  requests it and nothing depends on its targets — re-read the
+  stanza's `(alias ...)` and `(deps ...)` wiring.
 - `dune rules [target]` dumps the rule dune actually computed ---
   deps, targets, action — settling most "why did/didn't this
-  rebuild" questions. `dune describe workspace` shows the inferred
-  stanza structure.
+  rebuild" questions.
 - `dune printenv dir` shows the effective flags after `env` stanzas
   and profiles apply — check it before concluding a flag is
   ignored.
@@ -306,8 +305,8 @@ reach for introspection instead of guessing:
       `chdir` to `%{workspace_root}` for sane error paths
 - [ ] Generated-then-checked files go through `diff` + promotion;
       generated dune logic uses include + `dune.inc`
-- [ ] Checks and generators attached to the right alias, verified
-      with `dune describe aliases`
+- [ ] Checks and generators attached to the right alias, spelled
+      exactly as the alias is defined
 - [ ] Flag customizations extend `(:standard ...)`, never replace
       it; profile-specific settings live in `env`
 - [ ] Multi-stanza directories partition `(modules ...)` explicitly;
@@ -316,5 +315,5 @@ reach for introspection instead of guessing:
       tests, `--profile release` for performance work
 - [ ] Watch-mode server left running; concurrent builds go through
       it, never around it
-- [ ] Failures diagnosed with `dune rules`, `dune describe`, and
-      `dune printenv` before editing stanzas speculatively
+- [ ] Failures diagnosed with `dune rules` and `dune printenv`
+      before editing stanzas speculatively

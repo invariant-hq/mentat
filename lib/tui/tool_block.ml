@@ -20,7 +20,6 @@ type verb =
   | Web_search
   | Task
   | Todo
-  | Dune
   | Diagnostics
   | Ocaml_search
   | Ocaml_edit
@@ -142,7 +141,6 @@ let label = function
   | Web_search -> "Web Search"
   | Task -> "Task"
   | Todo -> "Todo"
-  | Dune -> "Dune"
   | Diagnostics -> "Diagnostics"
   | Ocaml_search -> "OCaml Search"
   | Ocaml_edit -> "OCaml Edit"

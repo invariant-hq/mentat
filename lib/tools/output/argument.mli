@@ -56,7 +56,6 @@ val headline : tool:string -> input:Jsont.json -> string option
 
     - [apply_patch]: its affected paths live inside the patch envelope, whose
       format the patch decoder owns; no input member carries them.
-    - [ocaml_dune_describe]: it accepts no input.
     - [todo_write], [propose_plan], [ask_user]: their content renders from their
       own facts, not the call header.
     - any unknown extension tool. *)

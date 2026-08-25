@@ -2065,8 +2065,6 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
         ~program:merlin_program;
       Tools.Ocaml.Docs.make build_capability ~clock ~merlin_program
         ~dune_program ~ocamlfind_program ~opam_switch_prefix;
-      Tools.Ocaml.Dune_describe.make build_capability ~clock
-        ~program:dune_program;
     ]
   in
   let read_core_tools =

@@ -44,8 +44,6 @@ let constructors =
               Output.Ocaml.References.make ~references:1 ~files:2);
           expect_invalid_arg "documentation values" (fun () ->
               Output.Ocaml.Docs.make ~values:(-1) ~types:0 ~modules:0);
-          expect_invalid_arg "project components" (fun () ->
-              Output.Ocaml.Project.make ~components:(-1) ~tests:0);
           expect_invalid_arg "rename files exceed occurrences" (fun () ->
               Output.Ocaml.Rename.make ~disposition:Output.Ocaml.Rename.Applied
                 ~occurrences:1 ~files:2);
@@ -85,8 +83,6 @@ let codecs =
             (Output.Ocaml.References.make ~references:9 ~files:4);
           expect_round_trip ~msg:"docs" Output.Ocaml.Docs.jsont
             (Output.Ocaml.Docs.make ~values:3 ~types:2 ~modules:1);
-          expect_round_trip ~msg:"project" Output.Ocaml.Project.jsont
-            (Output.Ocaml.Project.make ~components:8 ~tests:5);
           expect_round_trip ~msg:"rename" Output.Ocaml.Rename.jsont
             (Output.Ocaml.Rename.make ~disposition:Output.Ocaml.Rename.Previewed
                ~occurrences:7 ~files:3));
@@ -233,10 +229,6 @@ let equal_references left right =
   Output.Ocaml.References.references left
   = Output.Ocaml.References.references right
   && Output.Ocaml.References.files left = Output.Ocaml.References.files right
-
-let equal_project left right =
-  Output.Ocaml.Project.components left = Output.Ocaml.Project.components right
-  && Output.Ocaml.Project.tests left = Output.Ocaml.Project.tests right
 
 let equal_docs left right =
   Output.Ocaml.Docs.values left = Output.Ocaml.Docs.values right
@@ -434,13 +426,6 @@ let samples =
       };
     Sample
       {
-        name = "project";
-        codec = Output.Ocaml.Project.jsont;
-        value = Output.Ocaml.Project.make ~components:5 ~tests:2;
-        equal = equal_project;
-      };
-    Sample
-      {
         name = "docs";
         codec = Output.Ocaml.Docs.jsont;
         value = Output.Ocaml.Docs.make ~values:3 ~types:2 ~modules:1;
@@ -485,7 +470,6 @@ let representatives =
     List.nth samples 19;
     List.nth samples 21;
     List.nth samples 22;
-    List.nth samples 23;
   ]
 
 let invalid_decodes =
@@ -497,9 +481,8 @@ let invalid_decodes =
     ("process negative duration", List.nth representatives 4, "duration_ms", -1);
     ("definition line zero", List.nth representatives 5, "line", 0);
     ("references negative count", List.nth representatives 6, "references", -1);
-    ("project negative count", List.nth representatives 7, "components", -1);
-    ("docs negative count", List.nth representatives 8, "values", -1);
-    ("type-at negative count", List.nth representatives 9, "more", -1);
+    ("docs negative count", List.nth representatives 7, "values", -1);
+    ("type-at negative count", List.nth representatives 8, "more", -1);
   ]
 
 let compact_codecs =
@@ -614,14 +597,6 @@ let compact_codecs =
               ( "reference files exceed references",
                 fun () ->
                   ignore (Output.Ocaml.References.make ~references:1 ~files:2)
-              );
-              ( "project components",
-                fun () ->
-                  ignore (Output.Ocaml.Project.make ~components:(-1) ~tests:0)
-              );
-              ( "project tests",
-                fun () ->
-                  ignore (Output.Ocaml.Project.make ~components:0 ~tests:(-1))
               );
               ( "docs values",
                 fun () ->
@@ -1155,7 +1130,6 @@ let argument_projections =
       "apply_patch",
       json_object [ ("patch", Json.string "*** Begin Patch\n*** End Patch\n") ],
       None );
-    ("dune describe takes no input", "ocaml_dune_describe", json_object [], None);
     ( "todo write renders elsewhere",
       "todo_write",
       json_object [ ("tasks", Json.list []) ],
