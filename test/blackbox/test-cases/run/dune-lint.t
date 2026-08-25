@@ -27,26 +27,56 @@ dune-own.t.
   > EOF
   $ printf 1 > lint-exit
 
-A green settle triggers one lint run; the findings ride the next request on
-their own lane while the build lane stays clean.
+A green settle triggers one lint run; the findings ride the next request
+on their own lane while the build lane stays clean. A crashed linter
+(non-zero exit, no report) then keeps the lane's last word — the stated
+findings are neither retracted nor replaced by a clean no linter earned —
+and a later completed clean run states Lint clean.
 
   $ cat > lint.jsonl <<'JSONL'
-  > {"expect":{"body_contains":["lint prompt"]},"response":{"id":"l1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-l1","call_id":"call-l1","name":"shell","arguments":"{\"command\":\"for i in $(seq 100); do test -S _build/.rpc/dune && break; sleep 0.1; done; sleep 1\",\"description\":\"wait for the watch to come up\"}"}]}}
-  > {"expect":{"body_contains":["function_call_output","call-l1"]},"response":{"id":"l2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-l2","call_id":"call-l2","name":"shell","arguments":"{\"command\":\"sleep 2\",\"description\":\"cover the lint run\"}"}]}}
-  > {"expect":{"body_contains":["2 findings (2 new)"]},"response":{"id":"l3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-l3","call_id":"call-l3","name":"shell","arguments":"{\"command\":\"printf failing > dune-state; sleep 1.5\",\"description\":\"break the build\"}"}]}}
-  > {"expect":{"body_contains":["Build failing (1 error: 1 new)"]},"response":{"id":"l4","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-l4","call_id":"call-l4","name":"shell","arguments":"{\"command\":\": > lint-output; printf 0 > lint-exit; printf clean > dune-state; sleep 2.5\",\"description\":\"fix the build and the findings\"}"}]}}
-  > {"expect":{"body_contains":["Build recovered","Lint clean"]},"response":{"id":"l5","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"linted"}]}]}}
+  > {"expect":{"body_contains":["lint prompt"]},"response":{"id":"l1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-l1","call_id":"call-l1","name":"shell","arguments":"{\"command\":\"for i in $(seq 100); do test -f fake-litany-argv && break; sleep 0.1; done; sleep 1\",\"description\":\"wait for the watch and the first lint run\"}"}]}}
+  > {"expect":{"body_contains":["2 findings (2 new)"]},"response":{"id":"l2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-l2","call_id":"call-l2","name":"shell","arguments":"{\"command\":\": > lint-output; printf 2 > lint-exit; printf failing > dune-state; sleep 1.5; printf clean > dune-state; for i in $(seq 100); do test $(wc -l < fake-litany-argv) -ge 2 && break; sleep 0.1; done; sleep 1\",\"description\":\"crash the linter across a red-green cycle\"}"}]}}
+  > {"expect":{"body_contains":["function_call_output","call-l2"]},"response":{"id":"l3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-l3","call_id":"call-l3","name":"shell","arguments":"{\"command\":\"printf 0 > lint-exit; printf failing > dune-state; sleep 1.5; printf clean > dune-state; for i in $(seq 100); do test $(wc -l < fake-litany-argv) -ge 3 && break; sleep 0.1; done; sleep 1\",\"description\":\"fix the linter across another red-green cycle\"}"}]}}
+  > {"expect":{"body_contains":["Lint clean"]},"response":{"id":"l4","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"linted"}]}]}}
   > JSONL
   $ start_fake_openai lint.jsonl capture-lint port-lint
   $ MENTAT_DUNE_WATCH=auto mentat run "lint prompt" --cwd "$PWD" --permission bypass --id lint-turn 2>/dev/null
   linted
   $ wait_fake_server
 
-Two lint runs: one per green settle — the red build in between triggered
-nothing.
+Three lint runs, one per green settle. The crashed second run said nothing:
+its request carries no Lint clean and no new findings — the lane held its
+word until the completed third run earned the clean.
 
   $ wc -l < fake-litany-argv | tr -d ' '
-  2
+  3
+  $ grep -c 'Lint clean' capture-lint/request-3.json
+  0
+  [1]
+
+A foreign watch's green settle is as good as our own: with someone else's
+watch serving clean and no spawn of ours, the runner still lints on its
+settle.
+
+  $ printf clean > foreign-state
+  $ start_fake_dune_at_root "$PWD/foreign-state"
+  $ rm -f fake-dune-argv fake-litany-argv
+  $ cat > lint-output <<'EOF'
+  > File "lib/inventory.ml", line 5, characters 17-40:
+  > Warning 12 [needless-list-length]: comparison through List.length is a needless emptiness test [needless-list-length]
+  > EOF
+  $ printf 1 > lint-exit
+  $ cat > foreignlint.jsonl <<'JSONL'
+  > {"expect":{"body_contains":["foreignlint prompt"]},"response":{"id":"f1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-f1","call_id":"call-f1","name":"shell","arguments":"{\"command\":\"for i in $(seq 100); do test -f fake-litany-argv && break; sleep 0.1; done; sleep 1\",\"description\":\"wait for the foreign settle's lint run\"}"}]}}
+  > {"expect":{"body_contains":["1 finding (1 new)"]},"response":{"id":"f2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"foreign linted"}]}]}}
+  > JSONL
+  $ start_fake_openai foreignlint.jsonl capture-foreignlint port-foreignlint
+  $ MENTAT_DUNE_WATCH=auto mentat run "foreignlint prompt" --cwd "$PWD" --permission bypass --id foreignlint-turn 2>/dev/null
+  foreign linted
+  $ wait_fake_server
+  $ stop_fake_dune
+  $ test -f fake-dune-argv
+  [1]
 
 A linter off the PATH is reached through dune exec — the dune-pkg world,
 where a dev-dependency's binary lives in the lock universe: the gate falls
@@ -77,7 +107,7 @@ fake lock bin.
   $ MENTAT_DUNE_WATCH=auto mentat run "lockbin prompt" --cwd "$PWD" --permission bypass --id lockbin-turn 2>/dev/null
   lock linted
   $ wait_fake_server
-  $ grep -c 'exec -- litany check' fake-dune-argv
+  $ grep -c 'exec -- litany check' fake-dune-exec-argv
   1
   $ cat fake-litany-argv
   check
@@ -87,7 +117,7 @@ and the lane goes off for the session after that one run: a second green
 settle triggers nothing, no findings are ever stated, and the build lane is
 untouched.
 
-  $ rm -f fake-lock-bin/litany fake-litany-argv fake-dune-argv
+  $ rm -f fake-lock-bin/litany fake-litany-argv fake-dune-exec-argv
   $ printf clean > dune-state
   $ cat > nolint.jsonl <<'JSONL'
   > {"expect":{"body_contains":["nolint prompt"]},"response":{"id":"n1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-n1","call_id":"call-n1","name":"shell","arguments":"{\"command\":\"for i in $(seq 100); do test -S _build/.rpc/dune && break; sleep 0.1; done; sleep 2\",\"description\":\"wait for the watch and the doomed lint run\"}"}]}}
@@ -102,7 +132,7 @@ untouched.
 One doomed run, then silence: the not-found answer took the lane off, so
 the second green settle asked nothing.
 
-  $ grep -c 'exec -- litany check' fake-dune-argv
+  $ grep -c 'exec -- litany check' fake-dune-exec-argv
   1
   $ test -f fake-litany-argv
   [1]

@@ -15,7 +15,9 @@
 
     It is a separate library from {!Mentat_ocaml} for one reason: it contains
     the Dune RPC protocol stack ([dune-rpc], [csexp], [xdg]) and the [eio]
-    effects that drive it. *)
+    effects that drive it — and {!Lint_output}'s [ocamlc-loc], which rides
+    the same lock entry as [dune-rpc], is kept here so that undeclared
+    dependency has exactly one home. *)
 
 module Store = Store
 (** The pure fold of a watch's diagnostic and progress streams — exposed so

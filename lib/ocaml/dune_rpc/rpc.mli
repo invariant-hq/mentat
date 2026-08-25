@@ -126,8 +126,10 @@ module Instance : sig
       A build-watch supervisor knows its own watch's socket and host pid, so
       the observer must never rediscover that watch through the user's global
       registry — a broken or unwritable registry would silently cost the
-      agent its own build visibility. These seams let the supervisor state
-      what it knows; everything below stays observation. *)
+      agent its own build visibility. The lint runner is the second such
+      producer: it states its latest word into the settled reading. These
+      seams let a producer state what it knows; everything below stays
+      observation. *)
 
   val socket_path : t -> string
   (** [socket_path t] is where dune's RPC server binds for the workspace, by
@@ -141,17 +143,18 @@ module Instance : sig
       {!unpin}; while the socket does not answer yet the loop keeps
       reconnecting to it, which is a spawned watch starting up. *)
 
-  val set_lint : t -> Mentat_ocaml.Finding.t list option -> unit
-  (** [set_lint t findings] is the lint runner's word: its latest parsed
-      findings, joined into every settled reading with the lane live —
-      [Some []] is lint-clean, statable. [None] (the initial state) is the
-      lane off: lint-absent, never lint-clean. The stream's own findings are
-      always build-lane; the two sources cannot cross. *)
-
   val unpin : t -> unit
   (** [unpin t] returns the attach loop to registry discovery — the
       supervised watch is gone. An attachment already open keeps the identity
       it was opened with until it disconnects. *)
+
+  val set_lint : t -> Mentat_ocaml.Finding.t list option -> unit
+  (** [set_lint t findings] is the lint runner's word: its latest parsed
+      findings, joined into every settled reading with the lane live —
+      [Some []] is lint-clean, statable. [None] (the initial state, and the
+      runner's word when its lane dies) is the lane off: lint-absent, never
+      lint-clean. The stream's own findings are always build-lane; the two
+      sources cannot cross. *)
 
   val probe : t -> bool
   (** [probe t] is [true] iff a Dune RPC server accepted a connection at
@@ -182,8 +185,12 @@ module Instance : sig
       exit paths own a dead child). [`Timed_out] is the hang verdict. *)
 
   val activity : t -> int
-  (** [activity t] is a monotone count of stream events folded so far, for
-      liveness comparison around a {!flush}: a count that moved during the
-      verification window means the loop delivered events — alive — whatever
-      the flush itself did. *)
+  (** [activity t] is a monotone count of stream events folded so far. Two
+      consumers lean on it: liveness comparison around a {!flush} — a count
+      that moved during the verification window means the loop delivered
+      events, alive whatever the flush itself did — and the lint runner's
+      build-witness generation, where a count moved past a run's stamp is a
+      fresh observed build. Sampling caveat for the latter: a sub-sample
+      clean-to-clean rebuild can fold nothing (see {!Store}), so an
+      unobserved build advances nothing. *)
 end

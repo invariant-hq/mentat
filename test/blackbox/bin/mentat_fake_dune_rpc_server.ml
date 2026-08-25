@@ -549,8 +549,11 @@ let run_as_dune () =
    target resolves nowhere. *)
 let run_as_exec () =
   let root = Unix.getcwd () in
+  (* Its own marker file: the build/watch arcs count spawns in
+     [fake-dune-argv], and a lint runner reaching its target through the
+     exec shim must not inflate those counts. *)
   append_line
-    (Filename.concat root "fake-dune-argv")
+    (Filename.concat root "fake-dune-exec-argv")
     (String.concat " " (List.tl (Array.to_list Sys.argv)));
   let rest =
     match Array.to_list Sys.argv with
@@ -567,7 +570,10 @@ let run_as_exec () =
       Unix.putenv "PATH" (Filename.concat root "fake-lock-bin" ^ ":" ^ path);
       try Unix.execvp program (Array.of_list rest)
       with Unix.Unix_error (Unix.ENOENT, _, _) ->
-        Printf.printf "Error: Program %S not found!\n" program;
+        (* Dune's own rendering: [User_message.command] wraps the program
+           in single quotes — the fake must print the string production
+           matches, or the cram passes for a message dune never emits. *)
+        Printf.printf "Error: Program '%s' not found!\n" program;
         exit 1)
 
 let () =

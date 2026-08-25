@@ -462,6 +462,30 @@ let lint_lane =
               "physical comparison has a non-immediate operand";
             ]
             (List.map Mentat_ocaml.Finding.head findings));
+      test "alert blocks parse as warnings; _build anchors are dropped whole"
+        (fun () ->
+          with_temp_dir @@ fun root ->
+          make_project ~root ~broken:false;
+          let workspace = workspace_at root in
+          let output =
+            "File \"lib/probe_lib.ml\", line 1, characters 0-3:\n\
+             Alert deprecated: this is on its way out\n\
+             File \"_build/_private/default/.pkg/litany/lib/x.ml\", line 2, \
+             characters 0-3:\n\
+             Error: the linter's own broken build is not a project finding\n"
+          in
+          let findings =
+            Mentat_ocaml_dune_rpc.Lint_output.findings ~workspace output
+          in
+          equal int ~msg:"the _build block is dropped whole" 1
+            (List.length findings);
+          match findings with
+          | [ finding ] ->
+              is_true ~msg:"an alert is a warning"
+                (Mentat_ocaml.Finding.Severity.equal
+                   (Mentat_ocaml.Finding.severity finding)
+                   Mentat_ocaml.Finding.Severity.Warning)
+          | _ -> fail "expected exactly one finding");
       test "a clean run parses to no findings" (fun () ->
           with_temp_dir @@ fun root ->
           make_project ~root ~broken:false;

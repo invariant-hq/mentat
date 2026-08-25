@@ -485,6 +485,9 @@ let malformed_rows =
     ( "merlin empty list",
       nested "ocaml.merlin_program" (jlist []),
       "cfg ocaml.merlin_program must not be empty" );
+    ( "lint command empty token",
+      nested "dune.lint_command" (jlist [ js "" ]),
+      "cfg dune.lint_command must not be empty" );
     ( "merlin NUL token",
       nested "ocaml.merlin_program" (jlist [ js "a\000b" ]),
       "cfg ocaml.merlin_program elements must be non-empty and must not \
