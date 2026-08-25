@@ -137,7 +137,7 @@ let base_css =
    var(--err);color:var(--err);padding:10px \
    12px;font-size:12.5px}.divider{border-top:1px dashed \
    var(--border-strong);margin:26px 0 \
-   14px;padding-top:10px;color:var(--faint);font-size:12px;letter-spacing:0.06em}.goal,.queue,.deleg{color:var(--muted);font-size:12.5px}.todo{list-style:none;font-size:12.5px}.todo \
+   14px;padding-top:10px;color:var(--faint);font-size:12px;letter-spacing:0.06em}.queue,.deleg{color:var(--muted);font-size:12.5px}.todo{list-style:none;font-size:12.5px}.todo \
    li{padding:2px 0;color:var(--prose)}.todo \
    .g{color:var(--accent);margin-right:8px}.todo \
    .prio{color:var(--faint);font-size:11px;margin-left:8px}.elided{color:var(--faint);font-size:11.5px;font-style:italic;margin:4px \
@@ -502,24 +502,6 @@ let task_glyph = function
   | Mentat_session.Task.Status.Completed -> "\xe2\x9c\x93" (* ✓ *)
   | Mentat_session.Task.Status.Cancelled -> "\xe2\x9c\x97" (* ✗ *)
 
-let goal_line update =
-  match (update : Mentat_session.Goal.Update.t) with
-  | Mentat_session.Goal.Update.Declare { objective; _ } ->
-      "Goal declared: " ^ objective
-  | Mentat_session.Goal.Update.Pause _ -> "Goal paused"
-  | Mentat_session.Goal.Update.Resume _ -> "Goal resumed"
-  | Mentat_session.Goal.Update.Edit { objective; _ } ->
-      "Goal edited: " ^ objective
-  | Mentat_session.Goal.Update.Clear _ -> "Goal cleared"
-  | Mentat_session.Goal.Update.Complete { summary = Some s; _ } ->
-      "Goal completed: " ^ s
-  | Mentat_session.Goal.Update.Complete { summary = None; _ } ->
-      "Goal completed"
-  | Mentat_session.Goal.Update.Block { reason = Some r; _ } ->
-      "Goal blocked: " ^ r
-  | Mentat_session.Goal.Update.Block { reason = None; _ } -> "Goal blocked"
-  | Mentat_session.Goal.Update.Budget_limited _ -> "Goal budget limited"
-
 let queue_line update =
   match (update : Mentat_session.Queue.Update.t) with
   | Mentat_session.Queue.Update.Enqueued _ -> "Queued a follow-up input"
@@ -811,13 +793,7 @@ let fragment ~resolve_media (opts : Options.t) position fact =
       block ~fact:"decision.resolved" ~seq
         [ decision_resolution_block resolved ]
   | Journal_task_board board -> task_board_card ~seq board
-  | Journal_goal update ->
-      block ~fact:"journal.goal" ~seq
-        [
-          Html.node "div"
-            ~attrs:[ ("class", "goal") ]
-            [ Html.txt (goal_line update) ];
-        ]
+  | Journal_goal _ -> Html.empty
   | Journal_delegation delegation ->
       let label =
         match Mentat_session.Delegation.description delegation with

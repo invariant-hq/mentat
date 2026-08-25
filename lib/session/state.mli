@@ -388,12 +388,13 @@ val turn : Turn.Id.t -> t -> Turn.t option
 val turn_first_message_index : Turn.Id.t -> t -> int option
 (** [turn_first_message_index id t] is the absolute index in the full transcript
     of turn [id]'s appended user input, or [None] when [id] is unknown or is a
-    non-user turn (a [Continue] or a plan-build) that appended none. This is the
-    first message an undo boundary anchored at [id] excludes. *)
+    turn (a [Continue] or a plan-build) that appended none. This is the first
+    message an undo boundary anchored at [id] excludes. *)
 
 val can_undo_anchor : Turn.Id.t -> t -> bool
 (** [can_undo_anchor id t] is [true] iff an undo boundary may arm at turn [id]:
-    it is a user turn whose first message is at or after the model-context head
+    it is a turn carrying user-authored input whose first message is at or
+    after the model-context head
     (a compaction retained-tail start or a Fresh plan-build reset). The undo
     driver checks it before reverting files so an arm that the fold would reject
     ({!Error.Undo.Anchor_before_context}) never leaves the working tree reverted

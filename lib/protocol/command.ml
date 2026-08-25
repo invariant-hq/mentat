@@ -15,6 +15,7 @@ module Invalid = struct
     | Empty_queue_entry of int
     | Empty_goal_objective
     | Negative_goal_budget of int
+    | Empty_triggered_member of string
     | Output_schema_not_object
 
   let equal a b =
@@ -27,11 +28,12 @@ module Invalid = struct
     | Empty_queue_entry a, Empty_queue_entry b -> Int.equal a b
     | Empty_goal_objective, Empty_goal_objective -> true
     | Negative_goal_budget a, Negative_goal_budget b -> Int.equal a b
+    | Empty_triggered_member a, Empty_triggered_member b -> String.equal a b
     | Output_schema_not_object, Output_schema_not_object -> true
     | ( ( Empty_prompt_input | Non_positive_max_steps _ | Empty_interrupt_reason
         | Empty_queue_input | Empty_queue_replacement | Empty_queue_entry _
         | Empty_goal_objective | Negative_goal_budget _
-        | Output_schema_not_object ),
+        | Empty_triggered_member _ | Output_schema_not_object ),
         _ ) ->
         false
 
@@ -47,12 +49,15 @@ module Invalid = struct
     | Empty_goal_objective -> "goal objective must not be empty"
     | Negative_goal_budget n ->
         Printf.sprintf "goal budget must not be negative (got %d)" n
+    | Empty_triggered_member member ->
+        Printf.sprintf "triggered %s must not be empty" member
     | Output_schema_not_object -> "output schema must be a JSON object"
 
   let pp ppf t = Format.pp_print_string ppf (message t)
 end
 
 type goal = { objective : string; token_budget : int option }
+type triggered = { charter : string; digest : string; key : string }
 
 type t =
   | Prompt of {
@@ -63,6 +68,7 @@ type t =
       mode : Mentat_session.Contract.Mode.t option;
       max_steps : int option;
       goal : goal option;
+      triggered : triggered option;
       output_schema : Jsont.json option;
     }
   | Answer_decision of {
@@ -99,8 +105,8 @@ type t =
       goal : Mentat_session.Goal.Id.t;
     }
 
-let prompt ~session ~turn ~input ?options ?mode ?max_steps ?goal ?output_schema
-    () =
+let prompt ~session ~turn ~input ?options ?mode ?max_steps ?goal ?triggered
+    ?output_schema () =
   if List.is_empty input then Error Invalid.Empty_prompt_input
   else
     match max_steps with
@@ -112,21 +118,30 @@ let prompt ~session ~turn ~input ?options ?mode ?max_steps ?goal ?output_schema
         | Some { token_budget = Some n; _ } when n < 0 ->
             Error (Invalid.Negative_goal_budget n)
         | Some _ | None -> (
-            match output_schema with
-            | Some (Jsont.Object _) | None ->
-                Ok
-                  (Prompt
-                     {
-                       session;
-                       turn;
-                       input;
-                       options;
-                       mode;
-                       max_steps;
-                       goal;
-                       output_schema;
-                     })
-            | Some _ -> Error Invalid.Output_schema_not_object))
+            match triggered with
+            | Some { charter; _ } when String.is_empty charter ->
+                Error (Invalid.Empty_triggered_member "charter")
+            | Some { digest; _ } when String.is_empty digest ->
+                Error (Invalid.Empty_triggered_member "digest")
+            | Some { key; _ } when String.is_empty key ->
+                Error (Invalid.Empty_triggered_member "key")
+            | Some _ | None -> (
+                match output_schema with
+                | Some (Jsont.Object _) | None ->
+                    Ok
+                      (Prompt
+                         {
+                           session;
+                           turn;
+                           input;
+                           options;
+                           mode;
+                           max_steps;
+                           goal;
+                           triggered;
+                           output_schema;
+                         })
+                | Some _ -> Error Invalid.Output_schema_not_object)))
 
 let answer_decision ~session ~decision ~answer =
   Answer_decision { session; decision; answer }
@@ -210,12 +225,21 @@ let jsont =
         g.token_budget)
     |> Jsont.Object.error_unknown |> Jsont.Object.finish
   in
+  let triggered_jsont =
+    Jsont.Object.map ~kind:"prompt trigger provenance"
+      (fun charter digest key -> { charter; digest; key })
+    |> Jsont.Object.mem "charter" Jsont.string ~enc:(fun t -> t.charter)
+    |> Jsont.Object.mem "digest" Jsont.string ~enc:(fun t -> t.digest)
+    |> Jsont.Object.mem "key" Jsont.string ~enc:(fun t -> t.key)
+    |> Jsont.Object.error_unknown |> Jsont.Object.finish
+  in
   let prompt_case =
     Jsont.Object.map ~kind:"prompt command"
-      (fun session turn input options mode max_steps goal output_schema ->
+      (fun session turn input options mode max_steps goal triggered
+           output_schema ->
         decode_result
           (prompt ~session ~turn ~input ?options ?mode ?max_steps ?goal
-             ?output_schema ()))
+             ?triggered ?output_schema ()))
     |> Jsont.Object.mem "session" Mentat_session.Id.jsont ~enc:(function
       | Prompt { session; _ } -> session
       | _ -> assert false)
@@ -239,6 +263,9 @@ let jsont =
       | _ -> assert false)
     |> Jsont.Object.opt_mem "goal" goal_jsont ~enc:(function
       | Prompt { goal; _ } -> goal
+      | _ -> assert false)
+    |> Jsont.Object.opt_mem "triggered" triggered_jsont ~enc:(function
+      | Prompt { triggered; _ } -> triggered
       | _ -> assert false)
     |> Jsont.Object.opt_mem "output_schema" Jsont.json ~enc:(function
       | Prompt { output_schema; _ } -> output_schema

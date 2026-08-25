@@ -14,5 +14,4 @@ Skip the board for a single-step task or a pure question — tracking it is
 overhead with no payoff.
 
 This board is the ephemeral plan for the current stretch of work. It is not
-the approval gate (propose_plan) and not the long-horizon objective
-(update_goal).
+the approval gate (propose_plan) and not a long-horizon objective.

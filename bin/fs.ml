@@ -69,6 +69,31 @@ let atomic_write ~perms path bytes =
           (try Sys.remove tmp with Sys_error _ -> ());
           Error (render path e))
 
+let write_new ~perms path bytes =
+  match mkdir_p (Filename.dirname path) with
+  | Error _ as e -> e
+  | Ok () -> (
+      match
+        Unix.openfile path
+          [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL; Unix.O_CLOEXEC ]
+          perms
+      with
+      | exception Unix.Unix_error (Unix.EEXIST, _, _) -> Ok `Exists
+      | exception Unix.Unix_error (e, _, _) -> Error (render path e)
+      | fd -> (
+          let oc = Unix.out_channel_of_descr fd in
+          match
+            Fun.protect
+              ~finally:(fun () -> close_out_noerr oc)
+              (fun () -> output_string oc bytes);
+            (* [openfile] applies the umask; force the requested mode. *)
+            try Unix.chmod path perms with Unix.Unix_error _ -> ()
+          with
+          | () -> Ok `Written
+          | exception Sys_error message ->
+              (try Sys.remove path with Sys_error _ -> ());
+              Error message))
+
 (* In-process serialization: one [Eio.Mutex] per lock path, keyed through a
    registry the store's [Handle] pattern uses. The registry itself is guarded by
    a stdlib mutex so the find-or-create is atomic. *)

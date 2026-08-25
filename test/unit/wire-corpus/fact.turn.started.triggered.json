@@ -1,0 +1,48 @@
+{
+  "type": "turn.started",
+  "v": 1,
+  "turn": {
+    "id": "turn-c",
+    "origin": {
+      "type": "triggered",
+      "charter": "nightly-review",
+      "digest": "0f9a4c1d2e3b4a5f",
+      "key": "delivery-42"
+    },
+    "input": {
+      "type": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Refactor."
+        }
+      ]
+    },
+    "max_steps": 32,
+    "contract": {
+      "mode": "build",
+      "model": {
+        "provider": "openai",
+        "api": "responses",
+        "id": "gpt-5"
+      },
+      "options": {
+        "tool_choice": {
+          "type": "auto"
+        },
+        "response_format": {
+          "type": "text"
+        }
+      },
+      "declarations": [],
+      "policy": {
+        "version": 1,
+        "rules": []
+      },
+      "review": "enforce",
+      "sandbox": {
+        "class": "not_requested"
+      }
+    }
+  }
+}

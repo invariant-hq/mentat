@@ -8,10 +8,11 @@
    rendering — so everything is exercised on values and string payloads
    directly.
 
-   The module lives in [bin/] and is not library-linkable, so its source is
-   copied into this test executable by the [copy_files] rule in [dune]. *)
+   The module lives in the private [mentat_connector] library under
+   [bin/connector/]. *)
 
 open Windtrap
+open Mentat_connector
 module Severity = Review_finding.Severity
 
 let str_contains sub s =
@@ -693,7 +694,7 @@ let requests_take_the_worked_shapes () =
            "{\"body\":\"**P0** — `Broken \
             invariant`\\n\\n```\\nExplanation.\\n```\\n\\n<!-- \
             mentat-finding:%s origin=ci \
-            -->\",\"commit_id\":\"%s\",\"path\":\"lib/a.ml\",\"line\":3,\"start_line\":2}"
+            -->\",\"commit_id\":\"%s\",\"path\":\"lib/a.ml\",\"start_line\":2,\"start_side\":\"RIGHT\",\"line\":3,\"side\":\"RIGHT\"}"
            (hex ranged) head)
         (encode_compact thread.Publication.Request.body);
       is_true ~msg:"the summary has no label"
@@ -709,8 +710,12 @@ let requests_take_the_worked_shapes () =
       let encoded = encode_compact thread.Publication.Request.body in
       is_true ~msg:"a single-line thread carries no start_line"
         (not (str_contains "start_line" encoded));
+      is_true ~msg:"a single-line thread carries no start_side"
+        (not (str_contains "start_side" encoded));
       is_true ~msg:"a single-line thread anchors on its line"
-        (str_contains "\"line\":1" encoded)
+        (str_contains "\"line\":1" encoded);
+      is_true ~msg:"a single-line thread still pins the new side"
+        (str_contains "\"side\":\"RIGHT\"" encoded)
   | { Publication.threads; _ } ->
       failf "expected one thread request, got %d" (List.length threads)
 

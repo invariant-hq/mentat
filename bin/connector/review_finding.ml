@@ -54,17 +54,7 @@ module Body = struct
   let text t = t
 end
 
-module Error = struct
-  type t = { context : string; reason : string }
-
-  let make ~context reason = { context; reason }
-
-  let message e =
-    if String.equal e.context "" then e.reason
-    else Printf.sprintf "%s: %s" e.context e.reason
-
-  let pp ppf e = Format.pp_print_string ppf (message e)
-end
+module Error = Decode.Error
 
 type t = {
   severity : Severity.t;
@@ -104,16 +94,6 @@ module Document = struct
     let* s = as_string ~context json in
     if String.equal s "" then error ~context "must be a non-empty string"
     else Ok s
-
-  (* [Jsont.Number] carries a float; accept only values that are an integer
-     round-trip so an out-of-range magnitude cannot alias a valid line. *)
-  let as_line ~context = function
-    | Jsont.Number (v, _)
-      when Float.is_integer v
-           && Float.compare v 1.0 >= 0
-           && Float.equal (float_of_int (int_of_float v)) v ->
-        Ok (int_of_float v)
-    | _ -> error ~context "must be a positive integer"
 
   (* Route each member of [mems] into its slot exactly once; an unlisted or
      repeated member is the caller's strictness error. *)
@@ -177,13 +157,15 @@ module Document = struct
         in
         let* line =
           let* json = require ~context "line" line in
-          as_line ~context:(in_finding "line") json
+          Decode.positive_int ~context:(in_finding "line") json
         in
         let* end_line =
           match !end_line with
           | None -> Ok None
           | Some json ->
-              let* value = as_line ~context:(in_finding "end_line") json in
+              let* value =
+                Decode.positive_int ~context:(in_finding "end_line") json
+              in
               if value < line then
                 error ~context:(in_finding "end_line")
                   (Printf.sprintf "must not precede line %d" line)

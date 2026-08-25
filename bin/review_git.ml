@@ -10,11 +10,13 @@
    caller can cheaply detect change. Nothing here mutates the repository.
 
    The git subprocess and worktree reads are injected as [run] and [read]
-   closures, both fallible with a display-safe reason. The composition edge
+   closures. [read] classifies what it finds — regular-file text, a symbolic
+   link's target (never followed), or an over-bound refusal — and otherwise
+   fails with a display-safe reason, like [run]. The composition edge
    constructs them over the workspace capability's sealed
-   [Mentat_workspace_io.Command.run] and [Mentat_workspace_io.File.load], so
-   every spawn crosses the one sealed process boundary; the pure parsing in
-   {!Parse} takes no closures and is exercised directly. *)
+   [Mentat_workspace_io.Command.run] and [Mentat_workspace_io.File]
+   observations, so every spawn crosses the one sealed process boundary; the
+   pure parsing in {!Parse} takes no closures and is exercised directly. *)
 
 module Error = struct
   type kind =
@@ -45,6 +47,19 @@ module Parse = struct
       (fun component ->
         List.mem component Mentat_workspace.observation_prune_names)
       (String.split_on_char '/' (Lpath.Rel.to_string rel))
+
+  (* The review feature's own reserved scratch namespace: [run review]
+     materializes its target diff to a root-level
+     [.mentat-review-<session>.patch], and a parked or killed run keeps one
+     behind. Like the meta directories, the review's own scratch is never
+     review content — without this, the next review would ingest a kept
+     patch as a new file, and two concurrent reviews in one workspace would
+     cross-contaminate. *)
+  let reserved_scratch rel =
+    let name = Lpath.Rel.to_string rel in
+    (not (String.contains name '/'))
+    && String.starts_with ~prefix:".mentat-review-" name
+    && String.ends_with ~suffix:".patch" name
 
   let nul_fields output =
     List.filter
@@ -78,7 +93,8 @@ module Parse = struct
     in
     pair fields
 
-  (* Untracked paths from [ls-files --others -z], meta directories dropped. *)
+  (* Untracked paths from [ls-files --others -z], meta directories and the
+     review's reserved scratch dropped. *)
   let untracked_paths fields =
     let rec collect = function
       | [] -> Ok []
@@ -92,7 +108,11 @@ module Parse = struct
     in
     match collect fields with
     | Error _ as error -> error
-    | Ok paths -> Ok (List.filter (fun rel -> not (meta_path rel)) paths)
+    | Ok paths ->
+        Ok
+          (List.filter
+             (fun rel -> not (meta_path rel || reserved_scratch rel))
+             paths)
 
   (* Line-addition count for an untracked file's worktree text — the additions
      it contributes to the worktree summary, matching git's rule: every line is
@@ -107,6 +127,81 @@ module Parse = struct
       in
       if Char.equal text.[String.length text - 1] '\n' then newlines
       else newlines + 1
+
+  (* One untracked file rendered as the new-file unified diff [git diff] would
+     emit for it once tracked, minus the index line: header, mode line,
+     [/dev/null] sources, and a single hunk adding every line. Path quoting
+     stays off to match the pinned tracked-diff output; a name containing a
+     space takes git's literal-tab suffix on the [+++] line. A file with a NUL
+     byte in its first 8000 bytes renders git's binary stanza and an empty
+     file only its headers — neither contributes hunk lines. *)
+  let untracked_diff ~path ~contents =
+    let path = Lpath.Rel.to_string path in
+    let buffer = Buffer.create (String.length contents + 128) in
+    Buffer.add_string buffer
+      (Printf.sprintf "diff --git a/%s b/%s\n" path path);
+    Buffer.add_string buffer "new file mode 100644\n";
+    let binary =
+      let n = min 8000 (String.length contents) in
+      let rec scan i =
+        i < n && (Char.equal contents.[i] '\000' || scan (i + 1))
+      in
+      scan 0
+    in
+    let count = count_lines contents in
+    if binary then
+      Buffer.add_string buffer
+        (Printf.sprintf "Binary files /dev/null and b/%s differ\n" path)
+    else if count > 0 then (
+      let target = if String.contains path ' ' then path ^ "\t" else path in
+      Buffer.add_string buffer "--- /dev/null\n";
+      Buffer.add_string buffer (Printf.sprintf "+++ b/%s\n" target);
+      Buffer.add_string buffer
+        (if count = 1 then "@@ -0,0 +1 @@\n"
+         else Printf.sprintf "@@ -0,0 +1,%d @@\n" count);
+      let lines =
+        match List.rev (String.split_on_char '\n' contents) with
+        | "" :: rest -> List.rev rest
+        | all -> List.rev all
+      in
+      List.iter
+        (fun line ->
+          Buffer.add_char buffer '+';
+          Buffer.add_string buffer line;
+          Buffer.add_char buffer '\n')
+        lines;
+      if not (Char.equal contents.[String.length contents - 1] '\n') then
+        Buffer.add_string buffer "\\ No newline at end of file\n");
+    Buffer.contents buffer
+
+  (* One untracked symbolic link rendered as the new-file diff git emits for
+     a link: mode 120000 and the target path as the single content line,
+     never following the link. Git stores a link's target as its blob
+     content without a trailing newline, so the no-newline marker always
+     follows. *)
+  let untracked_link_diff ~path ~target =
+    let path = Lpath.Rel.to_string path in
+    let name = if String.contains path ' ' then path ^ "\t" else path in
+    String.concat ""
+      [
+        Printf.sprintf "diff --git a/%s b/%s\n" path path;
+        "new file mode 120000\n";
+        "--- /dev/null\n";
+        Printf.sprintf "+++ b/%s\n" name;
+        "@@ -0,0 +1 @@\n";
+        "+" ^ target ^ "\n";
+        "\\ No newline at end of file\n";
+      ]
+
+  (* One untracked file whose bytes are unavailable — over the loader's read
+     bound — rendered as the binary stanza a NUL-bearing file already takes:
+     the file is named in the diff without its contents. *)
+  let untracked_binary_diff ~path =
+    let path = Lpath.Rel.to_string path in
+    Printf.sprintf
+      "diff --git a/%s b/%s\nnew file mode 100644\nBinary files /dev/null \
+       and b/%s differ\n"
+      path path path
 
   (* Per-file counts from [diff --numstat -z]: NUL-separated
      [<add>\t<del>\t<path>] records. [add]/[del] are ["-"] for a binary file,
@@ -201,7 +296,13 @@ end
 (* Repository handles. *)
 
 type run = ?stdin:string -> string list -> (string, string) result
-type read = Lpath.Rel.t -> (string, string) result
+
+(* The worktree reader never follows a final symlink: the loader must render
+   a link as git renders it (its target as content), not duplicate — or
+   escape through — whatever the link points at. *)
+type file = Text of string | Link of string
+type read_error = Too_large | Unreadable of string
+type read = Lpath.Rel.t -> (file, read_error) result
 
 type write =
   Lpath.Rel.t -> before:string -> after:string -> (unit, string) result
@@ -313,8 +414,6 @@ let merge_base t ~base =
             git_failed
               (Printf.sprintf "no merge base between %s and HEAD" reference))
 
-let diff_text t ~base_sha = git t (diff_args base_sha)
-
 (* One commit's own change: its first parent against it. A root commit has no
    parent and therefore no lone diff; that is a revision-class refusal, not a
    git failure. *)
@@ -351,20 +450,65 @@ let untracked_paths t =
       | Ok paths -> Ok paths
       | Error message -> git_failed message)
 
+(* A file's review-side text. A symlink reads as its target path — its git
+   blob content — so the feature shows the link itself, exactly as a tracked
+   link's diff would. *)
+let worktree_text t ~path =
+  match t.read path with
+  | Ok (Text contents) -> Ok contents
+  | Ok (Link target) -> Ok target
+  | Error Too_large ->
+      let message =
+        Printf.sprintf "%s is too large to review" (Lpath.Rel.to_string path)
+      in
+      Error (Error.make (Error.Io message) message)
+  | Error (Unreadable message) -> Error (Error.make (Error.Io message) message)
+
+(* Bare [git diff] never shows an untracked file, so each is appended as a
+   synthesized new-file diff — a worktree whose only change is a new file
+   still yields a non-empty review diff. A symlink renders as git's link
+   stanza from its target, never followed; a file over the read bound
+   degrades to the binary stanza; any other unreadable file stays loud. *)
+let diff_text t ~base_sha =
+  match git t (diff_args base_sha) with
+  | Error _ as error -> error
+  | Ok tracked -> (
+      match untracked_paths t with
+      | Error _ as error -> error
+      | Ok paths ->
+          let rec append acc = function
+            | [] -> Ok (String.concat "" (tracked :: List.rev acc))
+            | path :: rest -> (
+                match t.read path with
+                | Ok (Text contents) ->
+                    append (Parse.untracked_diff ~path ~contents :: acc) rest
+                | Ok (Link target) ->
+                    append (Parse.untracked_link_diff ~path ~target :: acc) rest
+                | Error Too_large ->
+                    append (Parse.untracked_binary_diff ~path :: acc) rest
+                | Error (Unreadable message) ->
+                    Error (Error.make (Error.Io message) message))
+          in
+          append [] paths)
+
 (* An equality token for the untracked set: paths plus content identities, so
    creating, deleting, or editing an untracked file moves the fingerprint even
-   when a writer preserves mtimes. *)
+   when a writer preserves mtimes. A symlink's identity is its target text
+   under a distinguishing prefix, so retargeting the link — or replacing a
+   file with a link to identical bytes — moves the fingerprint too. *)
 let untracked_token t paths =
   let buffer = Buffer.create 256 in
   List.iter
     (fun rel ->
       Mentat_digest.frame buffer (Lpath.Rel.to_string rel);
       match t.read rel with
-      | Ok contents ->
+      | Ok (Text contents) ->
           Mentat_digest.frame buffer
             (Mentat_digest.Content_ref.to_token
                (Mentat_digest.Content_ref.of_contents contents))
-      | Error _ -> Mentat_digest.frame buffer "absent")
+      | Ok (Link target) -> Mentat_digest.frame buffer ("link:" ^ target)
+      | Error (Too_large | Unreadable _) ->
+          Mentat_digest.frame buffer "absent")
     paths;
   Buffer.contents buffer
 
@@ -428,8 +572,9 @@ let stats t ~base =
                 List.fold_left
                   (fun acc rel ->
                     match t.read rel with
-                    | Ok text -> acc + Parse.count_lines text
-                    | Error _ -> acc)
+                    | Ok (Text text) -> acc + Parse.count_lines text
+                    | Ok (Link target) -> acc + Parse.count_lines target
+                    | Error (Too_large | Unreadable _) -> acc)
                   0 untracked
               in
               Ok
@@ -476,11 +621,6 @@ let base_blobs t ~base paths =
                        objects"
               in
               zip paths contents))
-
-let worktree_text t ~path =
-  match t.read path with
-  | Ok contents -> Ok contents
-  | Error message -> Error (Error.make (Error.Io message) message)
 
 (* Assemble one file's (before, after) sides. [before] is the pre-fetched base
    blob — [Some] for a Modified or Deleted file, [None] for an Added one — so no
@@ -624,8 +764,16 @@ let apply_edit t ~base edit =
   let cr_message error = Format.asprintf "%a" Mentat_review.Cr.Error.pp error in
   let rel = edit_path edit in
   match t.read rel with
-  | Error message -> Error (Apply_failed message)
-  | Ok text -> (
+  | Error Too_large ->
+      Error
+        (Apply_failed
+           (Printf.sprintf "%s is too large to edit" (Lpath.Rel.to_string rel)))
+  | Error (Unreadable message) -> Error (Apply_failed message)
+  | Ok (Link _) ->
+      Error
+        (Apply_failed
+           (Printf.sprintf "%s is a symbolic link" (Lpath.Rel.to_string rel)))
+  | Ok (Text text) -> (
       let resolve ref =
         Mentat_review.Cr.resolve_ref
           (Mentat_review.Cr.scan_file ~path:rel ~text)

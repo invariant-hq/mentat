@@ -1074,58 +1074,6 @@ let%expect_test
     24 |   ! not logged in · /login · ~/mentat-tu… · openai/gpt… · ! full access ? for…
     |}]
 
-(* A goal wind-down commits its budget-limited transition between turns, so the
-   [Journal_goal] fact reaches the transcript reducer with no active turn. That
-   is a session-scoped transition, not a turn-scoped fault: the settled
-   transcript stays clean and no error banner is appended. *)
-let%expect_test "a goal transition between turns does not fault the transcript"
-    =
-  let goal = Mentat_session.Goal.Id.of_string "goal-budget" in
-  let turn =
-    Tui.Turn_script.complete ~prompt:"start the budgeted work"
-      "Work parked at the budget."
-  in
-  Tui.run ~name:"t" ~turns:[ turn ] @@ fun t ->
-  submit t "start the budgeted work";
-  Tui.finish_turn t;
-  Tui.settle t;
-  (* The goal is declared, then wound down, while no turn is active; both facts
-     formerly raised "turn-scoped fact arrived with no active turn". *)
-  Tui.update_goal t
-    (Mentat_session.Goal.Update.declare ~id:goal ~objective:"Ship the parser"
-       ~token_budget:100 ());
-  Tui.settle t;
-  Tui.update_goal t (Mentat_session.Goal.Update.budget_limited ~id:goal);
-  Tui.settle t;
-  Tui.print t;
-  [%expect
-    {|
-    01 |
-    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium
-    03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-553b9dad
-    04 |
-    05 | ❯ start the budgeted work
-    06 |
-    07 | ⏺ Work parked at the budget.
-    08 |
-    09 |
-    10 |
-    11 |
-    12 |
-    13 |
-    14 |
-    15 |
-    16 |
-    17 |
-    18 | ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
-    19 |   goal · Ship the parser
-    20 |
-    21 | ────────────────────────────────────────────────────────────────────────────────
-    22 | ❯ message mentat
-    23 | ────────────────────────────────────────────────────────────────────────────────
-    24 |   ! not logged in · /login · ~/mentat… · openai/gpt-… · ! full access ? for s…
-    |}]
-
 let%expect_test "a failed turn leaves the session usable for the next prompt" =
   let error =
     Mentat_llm.Error.make ~kind:Mentat_llm.Error.Invalid_request ~provider

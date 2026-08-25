@@ -24,8 +24,6 @@
   dune_watch
   dune_lint
   tool_boot
-  review_finding
-  publication
   review_git
   composition
   daemon
@@ -84,6 +82,7 @@
   mentat_prompts
   mentat_agent
   mentat_client
+  mentat_connector
   mentat_server
   mentat_web
   mentat_provider_runtime

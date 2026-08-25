@@ -60,6 +60,8 @@ module Invalid : sig
     | Empty_goal_objective  (** {!goal_edit}'s [objective] was empty. *)
     | Negative_goal_budget of int
         (** {!goal_resume}'s [budget] was negative. *)
+    | Empty_triggered_member of string
+        (** {!prompt}'s [triggered] had the named member empty. *)
     | Output_schema_not_object
         (** {!prompt}'s [output_schema] was present but not a JSON object. The
             supported-subset check is the executable's load-time responsibility;
@@ -83,6 +85,15 @@ type goal = { objective : string; token_budget : int option }
     the engine mints the id at admission. [objective] is non-empty;
     [token_budget], when present, is non-negative. *)
 
+type triggered = { charter : string; digest : string; key : string }
+(** Trigger provenance declared at turn start: the charter name, the sealed
+    charter-content digest, and the trigger key a trigger host acted on. When
+    present on {!Prompt}, the engine mints the turn's origin as
+    {!Mentat_session.Turn.Origin.Triggered} instead of
+    {!Mentat_session.Turn.Origin.User}. Provenance is attribution, never
+    authority: it changes nothing about how the turn is admitted or executed.
+    All members are non-empty. *)
+
 (** The type for session intents. Every verb targets exactly one session. *)
 type t = private
   | Prompt of {
@@ -97,6 +108,10 @@ type t = private
               engine mints the goal id at admission and appends the declaration
               before the model plans; a second declaration on a session with a
               live goal fails admission. *)
+      triggered : triggered option;
+          (** Optional trigger provenance. When present, the engine mints the
+              turn's origin as {!Mentat_session.Turn.Origin.Triggered}; absent,
+              the turn admits as {!Mentat_session.Turn.Origin.User}. *)
       output_schema : Jsont.json option;
           (** An optional JSON Schema the turn's final answer must conform to.
               When present, the engine seals a synthetic [structured_output]
@@ -164,6 +179,7 @@ val prompt :
   ?mode:Mentat_session.Contract.Mode.t ->
   ?max_steps:int ->
   ?goal:goal ->
+  ?triggered:triggered ->
   ?output_schema:Jsont.json ->
   unit ->
   (t, Invalid.t) result
@@ -171,7 +187,8 @@ val prompt :
     [input] is empty ({!Invalid.Empty_prompt_input}), [max_steps] is present and
     not positive ({!Invalid.Non_positive_max_steps}), [goal]'s objective is
     empty ({!Invalid.Empty_goal_objective}), [goal]'s token budget is negative
-    ({!Invalid.Negative_goal_budget}), or [output_schema] is present but not a
+    ({!Invalid.Negative_goal_budget}), [triggered] has an empty member
+    ({!Invalid.Empty_triggered_member}), or [output_schema] is present but not a
     JSON object ({!Invalid.Output_schema_not_object}). *)
 
 val answer_decision :

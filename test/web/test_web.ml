@@ -154,7 +154,14 @@ let turn_family_tests =
           let acc, blocks =
             fold Render.initial (position 0)
               (Fact.Turn_started
-                 (turn ~origin:Session.Turn.Origin.Goal_continuation
+                 (turn
+                    ~origin:
+                      (Session.Turn.Origin.Triggered
+                         {
+                           charter = "nightly-review";
+                           digest = "0123456789abcdef";
+                           key = "2026-08-25T06:00";
+                         })
                     ~input:Session.Turn.Input.continue ()))
           in
           equal int 0 (List.length blocks);
@@ -377,15 +384,6 @@ let journal_family_tests =
           contains ~msg:html ~sub:"class=\"board\"" html;
           contains ~sub:"task in_progress" html;
           contains ~sub:"write the code" html);
-      test "journal.goal renders a goal chip" (fun () ->
-          let acc, _ = started () in
-          let update =
-            Session.Goal.Update.declare
-              ~id:(Session.Goal.Id.of_string "g1")
-              ~objective:"ship the release" ()
-          in
-          let acc, _ = fold acc (position 1) (Fact.Journal_goal update) in
-          contains ~sub:"ship the release" (live acc));
       test "journal.queue renders a queue chip" (fun () ->
           let acc, _ = started () in
           let entry =

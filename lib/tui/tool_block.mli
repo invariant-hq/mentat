@@ -54,7 +54,6 @@ type verb =
   | Ocaml_references  (** Looking up OCaml references. *)
   | Skill  (** Loading a skill. *)
   | Plan  (** Proposing a plan. *)
-  | Goal  (** Updating a goal. *)
   | Message  (** Sending an agent message. *)
   | Follow_up  (** Sending a follow-up message to a child agent. *)
   | Cancel  (** Cancelling child-agent work. *)

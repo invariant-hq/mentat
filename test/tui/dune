@@ -8,24 +8,6 @@
 ; every terminal row; expectations are intentionally human-reviewable frames.
 
 (library
- (name test_goal)
- (modules test_goal)
- (inline_tests)
- (libraries
-  mentat_digest
-  mentat_diagnostic
-  mentat_llm
-  lpath
-  mentat_permission
-  mentat_protocol
-  mentat_sandbox
-  mentat_session
-  tui_harness
-  windtrap)
- (preprocess
-  (pps ppx_windtrap)))
-
-(library
  (name test_review)
  (modules test_review)
  (inline_tests)

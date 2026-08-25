@@ -1,0 +1,5 @@
+(library
+ (name mentat_connector)
+ (modules review_finding publication decode)
+ (private_modules decode)
+ (libraries jsont jsont.bytesrw mentat_digest))

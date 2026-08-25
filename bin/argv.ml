@@ -52,6 +52,41 @@ let review_behavior = function
         (Printf.sprintf "unknown permission mode %S; expected default or bypass"
            other)
 
+(* Trigger provenance, parsed strictly from <charter>@<digest>:<key>: the
+   charter name a token, the digest lowercase hex, the key non-empty. A key may
+   itself contain '@' or ':', so the first '@' and the first ':' after it are
+   the delimiters. The flag is minted by trigger hosts; a sloppy value means
+   the host is wrong. The digest length is deliberately unpinned: mentatd owns
+   the charter digest algorithm, and the change that fixes it pins the length
+   here. *)
+let triggered raw =
+  let malformed () =
+    usage
+      (Printf.sprintf
+         "invalid --triggered value %s: expected <charter>@<digest>:<key>" raw)
+  in
+  let hex c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') in
+  match String.index_opt raw '@' with
+  | None -> malformed ()
+  | Some at -> (
+      let charter = String.sub raw 0 at in
+      let rest = String.sub raw (at + 1) (String.length raw - at - 1) in
+      match String.index_opt rest ':' with
+      | None -> malformed ()
+      | Some colon ->
+          let digest = String.sub rest 0 colon in
+          let key =
+            String.sub rest (colon + 1) (String.length rest - colon - 1)
+          in
+          if
+            String.length charter = 0
+            || not (String.for_all id_char charter)
+            || String.length digest = 0
+            || not (String.for_all hex digest)
+            || String.length key = 0
+          then malformed ()
+          else Ok { Mentat_protocol.Command.charter; digest; key })
+
 let config_key raw =
   match Mentat_config.Field.of_string raw with
   | Ok field -> Ok field

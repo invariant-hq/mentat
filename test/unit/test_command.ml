@@ -273,7 +273,7 @@ let parse_line =
           equal string "unexpected:model:anthropic/claude-sonnet-5"
             (classify "/model anthropic/claude-sonnet-5"));
       test "an argument-taking builtin keeps its argument" (fun () ->
-          equal string "argument:goal:ship it" (classify "/goal ship it"));
+          equal string "argument:rename:Ship it" (classify "/rename Ship it"));
       test "an unknown command is not classified" (fun () ->
           equal string "none" (classify "/definitely-not-a-command x"));
     ]

@@ -59,6 +59,15 @@ val review_behavior :
     naming the accepted set. It is a session-scoped run posture (set through the
     client before the turn), not a config field. *)
 
+val triggered :
+  string -> (Mentat_protocol.Command.triggered, Exit_status.t) result
+(** [triggered raw] parses the [run start] [--triggered] value as
+    [<charter>@<digest>:<key>]: a charter name of letters, digits, ['.'],
+    ['_'], or ['-']; a non-empty lowercase-hex charter-content digest; and a
+    non-empty trigger key. The key may itself contain ['@'] or [':'] — the
+    first ['@'] and the first [':'] after it delimit the parts. Anything else
+    is a {!Exit_status.Usage_error} naming the grammar. *)
+
 val config_key : string -> (Mentat_config.Field.any, Exit_status.t) result
 (** [config_key raw] parses [raw] as a supported config key, returning the field
     (so the responder does not re-parse), or a {!Exit_status.Usage_error}

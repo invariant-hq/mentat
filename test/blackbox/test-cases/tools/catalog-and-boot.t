@@ -56,7 +56,6 @@ OCaml tools, and keeps [propose_plan] reserved for Plan mode.
   skill
   spawn
   todo_write
-  update_goal
   wait
   $ mentat_cram json '.tools[].name' capture-catalog/request-1.json > catalog-names
   $ grep -qx web_fetch catalog-names && echo present || echo absent
@@ -176,7 +175,6 @@ families: `write_file`, `edit_file`, `apply_patch`, `ocaml_ast_edit`,
   skill
   spawn
   todo_write
-  update_goal
   wait
   $ write_config '["ocamlmerlin"]' string-replace on
   $ capture_catalog read-only-build-on
@@ -199,7 +197,6 @@ families: `write_file`, `edit_file`, `apply_patch`, `ocaml_ast_edit`,
   skill
   spawn
   todo_write
-  update_goal
   wait
   $ write_config '["ocamlmerlin"]' string-replace on true
   $ capture_catalog read-only-build-web

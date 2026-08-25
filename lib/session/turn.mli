@@ -60,6 +60,14 @@ module Origin : sig
     | Goal_continuation  (** The engine continued an active goal. *)
     | Queued of Queue.Id.t
         (** The turn admits queued entry [id]; admission consumes it. *)
+    | Triggered of { charter : string; digest : string; key : string }
+        (** A trigger host admitted the turn on behalf of the charter named
+            [charter], sealed at charter-content digest [digest], for trigger
+            key [key]. Provenance is attribution, never authority: the origin
+            records who admitted the prompt and grants nothing — the turn
+            executes under its sealed contract exactly as a {!User} turn does,
+            and a forged provenance misleads only its own journal. All members
+            are non-empty. *)
     | Plan_build  (** The Build turn a plan approval admits. *)
     | Compaction
         (** A user-requested manual compaction. The turn accepts only
@@ -77,6 +85,14 @@ module Origin : sig
             not a goal turn — it neither spends the goal's budget nor consumes
             its continuation allowance. *)
 
+  val triggered : charter:string -> digest:string -> key:string -> t
+  (** [triggered ~charter ~digest ~key] is {!Triggered} with every member
+      checked non-empty — the one construction that validates, and the path
+      the codec decodes through, so a producer that minted through it can
+      never write a [Triggered] origin its own replay rejects.
+
+      Raises [Invalid_argument] if any member is empty. *)
+
   val equal : t -> t -> bool
   (** [equal a b] is [true] iff [a] and [b] are the same origin. *)
 
@@ -85,7 +101,8 @@ module Origin : sig
 
   val jsont : t Jsont.t
   (** [jsont] maps origins to JSON values by a per-arm tag, rejecting unknown
-      tags and members. *)
+      tags and members. Decoding validates the non-empty members of
+      {!Triggered}. *)
 end
 
 (** {1:inputs Accepted inputs} *)

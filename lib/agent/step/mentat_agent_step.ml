@@ -1524,6 +1524,7 @@ let install_summary env id ~summary ~reason ~summarized_upto ?usage session =
       | Mentat_session.Turn.Origin.User
       | Mentat_session.Turn.Origin.Goal_continuation
       | Mentat_session.Turn.Origin.Queued _
+      | Mentat_session.Turn.Origin.Triggered _
       | Mentat_session.Turn.Origin.Plan_build
       | Mentat_session.Turn.Origin.Step_limit_wind_down ->
           normalize env session [ installed ])

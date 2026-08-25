@@ -48,8 +48,6 @@ flags control this invocation directly.
 | `--title TITLE` | Set the new session's title. |
 | `--skill NAME` | Pin a skill's guidance as durable user content ahead of the prompt. Repeatable. |
 | `--ephemeral` | Persist nothing: the session lives under a throwaway store removed when the run ends. A blocked ephemeral run cannot be resumed. |
-| `--goal OBJECTIVE` | Declare a goal for the session, pursued across turns. |
-| `--goal-budget TOKENS` | Token budget for the declared goal (requires `--goal`). |
 
 See [Instructions and skills](instructions-and-skills.md) for discovery,
 precedence, and the difference between cataloged and pinned skills.
@@ -89,6 +87,43 @@ parsed value in `output`. Failure to produce a conforming answer emits terminal
 exits 1 when the structured-answer failure settles the turn. A step limit or
 interruption still uses its normal `turn.finished`; provider failures remain
 `session.failed`.
+
+## Reviewing a diff
+
+`mentat run review` runs one review turn over an explicit git diff target and
+writes a findings document: a summary and a list of findings, each locating
+one issue in the reviewed tree. The document is delivered through a built-in
+schema, so it is valid by construction — without `--json` it is the entire
+stdout, and with `--json` it rides the `turn.finished` event's `output`
+member, exactly as a `--output-schema` run does. To turn a findings document
+into GitHub review comments, see [GitHub review](github-review.md).
+
+The target is exactly one of:
+
+| Flag | Reviews |
+| --- | --- |
+| `--base BRANCH` | The worktree — committed, uncommitted, and untracked changes together — against the merge base of BRANCH and HEAD. When BRANCH has an upstream that is ahead, the upstream is used and a warning on stderr names it. |
+| `--uncommitted` | The uncommitted worktree changes, untracked files included, against HEAD. |
+| `--commit SHA` | The named commit alone, against its first parent. |
+
+The worktree targets append each untracked file to the diff as a new-file
+hunk, so a change that only adds files still reviews.
+
+`review` also accepts `--json`, `--model`, `--reasoning`, `--max-steps`
+(default 60), `--attach`, and `--cwd`; the workflow mode, review posture, and
+output schema are fixed by the verb. The resolved diff is materialized to
+`.mentat-review-<session-id>.patch` at the workspace root for the turn — the
+session id keeps the name collision-free with your files — and removed when
+the run ends, except when the turn parks on a decision, which keeps it for
+the resumed session. A kept patch is never itself treated as review content
+by a later review, but nothing removes it automatically: delete it yourself
+once the parked review is resolved. An empty target diff is a clean no-op: a "nothing to
+review" line on stderr and exit 0, with no run started and no provider
+contacted. A named revision that does not resolve is a usage error (exit 2);
+other git failures, including a workspace that is not a repository, are
+runtime errors (exit 1). The exit codes below apply otherwise — in
+particular, a turn parked on a decision still exits 3, and the printed
+`mentat run reply` continuation resolves it.
 
 ## Image input
 
@@ -201,34 +236,14 @@ and latency. `--title` skips that request; `MENTAT_AUTO_TITLE=0`, `false`, `no`,
 or `off` disables it. See [Sessions](sessions.md#automatic-titles) for the full
 scope and fallback behavior.
 
-## Goals
-
-A goal is declared either at start with `run start --goal OBJECTIVE`
-(`--goal-budget TOKENS` sets its token budget) or by the model mid-run. The
-declaration is saved before the turn starts, so a `--goal` run emits
-`goal.declared` ahead of `turn.started`; a session with a goal already live
-rejects a second declaration. `mentat run reply` carries the goal lifecycle
-verbs; they act on the current goal, take no pending decision, and start no turn:
-
-```sh
-mentat run reply SESSION --pause-goal
-mentat run reply SESSION --edit-goal "Ship the parser without compatibility"
-mentat run reply SESSION --resume-goal [--goal-budget TOKENS]
-mentat run reply SESSION --clear-goal
-```
-
-Resuming flips a paused, blocked, or budget-limited goal back to active; the
-next `mentat run resume` turn then continues its pursuit.
-
 `mentat run reply SESSION --title "New title"` renames the session. A decision
-answer, a goal action, and `--title` are mutually exclusive on one invocation.
+answer and `--title` are mutually exclusive on one invocation.
 
 ## JSONL events
 
 With `--json`, each output line is one JSON event carrying `schema_version`
 (currently `1`), `type`, `session_id`, and type-specific fields. A run starts
-with `run.started` and `session.started`; a start with `--goal` emits
-`goal.declared` before `turn.started`. Depending on the run, later events
+with `run.started` and `session.started`. Depending on the run, later events
 include:
 
 - `run.started` — the sandbox posture (`sandbox.mode`, `sandbox.read`,
@@ -240,9 +255,6 @@ include:
 - `decision.requested` / `decision.resolved` — a permission decision denied by
   `--permission-unattended deny` without parking, correlated by `decision_id`.
 - `compaction.installed` — the installed boundary, with its `reason`.
-- `goal.declared`, `goal.paused`, `goal.resumed`, `goal.edited`,
-  `goal.cleared`, `goal.completed`, `goal.blocked`, `goal.budget_limited` — one
-  per goal transition.
 - `queue.enqueued`, `queue.replaced`, `queue.cleared` — one per queue
   transition.
 - `turn.finished` — the terminal `outcome` (`completed`, `step_limit`, or

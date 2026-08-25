@@ -51,6 +51,7 @@
     "fact.turn.message",
     "fact.turn.provider_failed",
     "fact.turn.started",
+    "fact.turn.started.triggered",
     "fact.undo.updated",
     "fact.workspace.notice",
     "position.head",

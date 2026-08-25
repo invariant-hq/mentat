@@ -48,29 +48,6 @@ let diff_rows ~palette ~label = function
 let worktree ~palette ~worktree = diff_rows ~palette ~label:"worktree" worktree
 let changed ~palette ~changed = diff_rows ~palette ~label:"session" changed
 
-(* The session-goal objective. In the pane its section header names it, so the
-   bare row is the objective alone; the narrow strip has no headers, so
-   [labelled] prefixes the muted [goal] tag that tells the row apart from the
-   task rows beneath it. *)
-let goal ~palette ~labelled ~objective =
-  match objective with
-  | None -> []
-  | Some objective ->
-      let content =
-        text ~style:Ansi.Style.default ~wrap:`Word ~flex_grow:1. ~flex_shrink:1.
-          ~min_size:zero_size objective
-      in
-      if labelled then
-        [
-          row
-            [
-              Prims.seg (Theme.Palette.muted_style palette) "goal";
-              sep ~palette;
-              content;
-            ];
-        ]
-      else [ row [ content ] ]
-
 (* Fail-honest: a verdict exists only inside a settled phase; the status
    itself is a fact about the watch and renders in every state but the two
    where nothing was attempted — tooling disabled, and no watch to attach to.

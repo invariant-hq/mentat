@@ -2452,7 +2452,8 @@ let plan_approval_reaches_the_build_request context () =
             match Session.Turn.origin turn with
             | Session.Turn.Origin.Plan_build -> true
             | Session.Turn.Origin.User | Session.Turn.Origin.Goal_continuation
-            | Session.Turn.Origin.Queued _ | Session.Turn.Origin.Compaction
+            | Session.Turn.Origin.Queued _ | Session.Turn.Origin.Triggered _
+            | Session.Turn.Origin.Compaction
             | Session.Turn.Origin.Step_limit_wind_down ->
                 false)
       in
@@ -3090,6 +3091,7 @@ let an_interrupt_admits_the_queued_correction () =
                  | Session.Turn.Origin.Queued _ -> true
                  | Session.Turn.Origin.User
                  | Session.Turn.Origin.Goal_continuation
+                 | Session.Turn.Origin.Triggered _
                  | Session.Turn.Origin.Plan_build
                  | Session.Turn.Origin.Compaction
                  | Session.Turn.Origin.Step_limit_wind_down ->

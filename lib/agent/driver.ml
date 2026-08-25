@@ -1182,8 +1182,19 @@ and handle_any t msg ~mid_effect =
 and handle_command t command ~mid_effect ~ack =
   match command with
   | Mentat_protocol.Command.Prompt
-      { turn; input; options; mode; max_steps; goal; output_schema; _ } ->
-      prompt t ~turn ~input ~options ~mode ~max_steps ~goal ~output_schema ~ack
+      {
+        turn;
+        input;
+        options;
+        mode;
+        max_steps;
+        goal;
+        triggered;
+        output_schema;
+        _;
+      } ->
+      prompt t ~turn ~input ~options ~mode ~max_steps ~goal ~triggered
+        ~output_schema ~ack
   | Mentat_protocol.Command.Answer_decision { decision; answer; _ } ->
       if mid_effect then
         ack (Error (Mentat_protocol.Error.Decision_not_pending decision))
@@ -1320,7 +1331,8 @@ and declare_prompt_goal t ~turn ~goal =
           | None -> Error (unavailable e))
       | Error e -> Error (unavailable e))
 
-and prompt t ~turn ~input ~options ~mode ~max_steps ~goal ~output_schema ~ack =
+and prompt t ~turn ~input ~options ~mode ~max_steps ~goal ~triggered
+    ~output_schema ~ack =
   (* The engine mints the turn input from the command's content after admission:
      [Command.Prompt] carries content, never the engine-only [Continue]. The
      content is non-empty by the command constructor's contract. Inline
@@ -1357,12 +1369,24 @@ and prompt t ~turn ~input ~options ~mode ~max_steps ~goal ~output_schema ~ack =
                     match declare_prompt_goal t ~turn ~goal with
                     | Error e -> ack (Error e)
                     | Ok () ->
+                        (* Trigger provenance is attribution, never authority:
+                           it selects the minted origin and changes nothing
+                           else about admission. *)
+                        let origin =
+                          match triggered with
+                          | None -> Mentat_session.Turn.Origin.User
+                          | Some
+                              { Mentat_protocol.Command.charter; digest; key }
+                            ->
+                              Mentat_session.Turn.Origin.triggered ~charter
+                                ~digest ~key
+                        in
                         start_turn t cfg
                           ~mode:
                             (Option.value mode
                                ~default:Mentat_session.Contract.Mode.Build)
-                          ~options ~max_steps ~id:turn ~input
-                          ~origin:Mentat_session.Turn.Origin.User ~output_schema
+                          ~options ~max_steps ~id:turn ~input ~origin
+                          ~output_schema
                           ~ack:(fun r ->
                             ack (Result.map_error (fun e -> unavailable e) r))))
           ))

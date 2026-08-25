@@ -1919,6 +1919,41 @@ let command_codec_group =
                   ~input:[ Llm.Content.text "x" ]
                   ~goal:{ Protocol.Command.objective = ""; token_budget = None }
                   ())));
+      test "a prompt carries optional trigger provenance round-trip" (fun () ->
+          (* Trigger provenance rides the prompt payload: the wire tag stays
+             [prompt], the optional [triggered] member carries charter, digest,
+             and key, and an absent member decodes as none — the
+             backward-compatible codec addition. *)
+          let with_triggered =
+            ok_or "prompt.triggered"
+              (Protocol.Command.prompt ~session:fix_session_id
+                 ~turn:(turn_id "turn-trig")
+                 ~input:[ Llm.Content.text "Review the diff." ]
+                 ~triggered:
+                   {
+                     Protocol.Command.charter = "nightly-review";
+                     digest = "0f9a4c1d2e3b4a5f";
+                     key = "delivery-42";
+                   }
+                 ())
+          in
+          let json = encode Protocol.Command.jsont with_triggered in
+          assert_v_and_tag ~msg:"prompt.triggered" "prompt" json;
+          equal command_value ~msg:"prompt.triggered round-trip" with_triggered
+            (decode Protocol.Command.jsont json);
+          (* An empty member is rejected by the constructor. *)
+          is_true ~msg:"empty triggered charter rejected"
+            (Result.is_error
+               (Protocol.Command.prompt ~session:fix_session_id
+                  ~turn:(turn_id "turn-trig2")
+                  ~input:[ Llm.Content.text "x" ]
+                  ~triggered:
+                    {
+                      Protocol.Command.charter = "";
+                      digest = "0f9a4c1d2e3b4a5f";
+                      key = "delivery-42";
+                    }
+                  ())));
       test "every command targets exactly one session" (fun () ->
           List.iter
             (fun (tag, command) ->
@@ -2026,6 +2061,28 @@ let command_parity_group =
                       json_array
                         [ encode Llm.Content.jsont (Llm.Content.text "keep") ];
                       json_array [];
+                    ])));
+      test "prompt rejects an empty triggered member" (fun () ->
+          parity ~msg:"empty triggered charter"
+            ~constructor:(fun () ->
+              Protocol.Command.prompt ~session:fix_session_id
+                ~turn:(turn_id "turn-cmd")
+                ~input:[ Llm.Content.text "Go." ]
+                ~triggered:
+                  {
+                    Protocol.Command.charter = "";
+                    digest = "0f9a4c1d2e3b4a5f";
+                    key = "delivery-42";
+                  }
+                ())
+            ~tag:"prompt"
+            ~corrupt:
+              (add_member "triggered"
+                 (json_object
+                    [
+                      ("charter", Json.string "");
+                      ("digest", Json.string "0f9a4c1d2e3b4a5f");
+                      ("key", Json.string "delivery-42");
                     ])));
       test "goal_edit rejects an empty objective" (fun () ->
           parity ~msg:"empty objective"
@@ -2620,6 +2677,20 @@ let variant_shapes =
     ( "progress.model.download.ready",
       canonical Protocol.Progress.jsont
         (download_variant Protocol.Progress.Model_download.Ready) );
+    (* Turn origins: user rides the base fact.turn.started; triggered is the
+       one origin whose payload is more than an id. *)
+    ( "fact.turn.started.triggered",
+      canonical Protocol.Fact.jsont
+        (Protocol.Fact.Turn_started
+           (turn ~id:"turn-c"
+              ~origin:
+                (Session.Turn.Origin.Triggered
+                   {
+                     charter = "nightly-review";
+                     digest = "0f9a4c1d2e3b4a5f";
+                     key = "delivery-42";
+                   })
+              ())) );
     (* Turn outcomes: completed rides the base fact.turn.finished. *)
     ( "fact.turn.finished.interrupted",
       canonical Protocol.Fact.jsont

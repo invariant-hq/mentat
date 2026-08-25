@@ -85,6 +85,7 @@ val create :
     (Config.t, Mentat_diagnostic.t) result) ->
   now:(unit -> Mentat_session.Time.t) ->
   ?max_children:int ->
+  ?child_backend:Ports.child_backend ->
   execution_for_mode:Execution.factory ->
   delegated_execution:Execution.delegated_factory ->
   unit ->
@@ -122,7 +123,28 @@ val create :
     an empty background-process view. Independently attached children verify
     their metadata backlink against the parent delegation edge before a driver
     is created. [max_children] bounds the scheduler's tree-wide capacity permit
-    (default [4]). *)
+    (default [4]). [child_backend] names where a delegated child session
+    materializes once its edge and document are durable
+    ({!Ports.child_backend}, default {!Ports.In_process}): under [In_process]
+    the runtime attaches the child as a sibling driver and submits its
+    deterministic first turn ({!child_first_turn}) itself; the [Brokered] arm
+    is the reserved seam for an executable-owned broker, and this runtime does
+    not consume it — [create] refuses it with [Invalid_argument] at
+    construction, before any durable edge exists. A broker implementation must
+    replace that refusal with a real materialization rather than inherit it: a
+    raise deferred to delegation time would re-fire on every recovery re-drive
+    of a durable edge, wedging attachment.
+
+    Raises [Invalid_argument] on [child_backend = Brokered _]. *)
+
+val child_first_turn :
+  Mentat_session.Delegation.Id.t -> Mentat_session.Turn.Id.t
+(** [child_first_turn delegation] is the deterministic id of a delegated
+    child's first turn: a keyed digest over [delegation] alone. It is the one
+    cross-backend mint rule — every child backend submits the child's first
+    turn under this id, so a crash re-drive or a re-materialization resubmits
+    the same turn and the byte-identical task prompt is idempotent rather
+    than duplicated. *)
 
 val shutdown : t -> unit
 (** [shutdown t] stops admission and closes every driver, then returns. It has

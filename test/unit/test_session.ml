@@ -797,6 +797,9 @@ let origin_gen =
       Gen.pure Session.Turn.Origin.User;
       Gen.pure Session.Turn.Origin.Goal_continuation;
       Gen.map (fun s -> Session.Turn.Origin.Queued (queue_id s)) ident_gen;
+      Gen.(
+        let+ charter = ident_gen and+ digest = ident_gen and+ key = ident_gen in
+        Session.Turn.Origin.Triggered { charter; digest; key });
       Gen.pure Session.Turn.Origin.Plan_build;
       Gen.pure Session.Turn.Origin.Compaction;
       Gen.pure Session.Turn.Origin.Step_limit_wind_down;
@@ -1237,6 +1240,12 @@ let turn_group =
               Session.Turn.Origin.User;
               Session.Turn.Origin.Goal_continuation;
               Session.Turn.Origin.Queued (queue_id "q-1");
+              Session.Turn.Origin.Triggered
+                {
+                  charter = "nightly-review";
+                  digest = "0f9a4c1d2e3b4a5f";
+                  key = "delivery-42";
+                };
               Session.Turn.Origin.Plan_build;
               Session.Turn.Origin.Compaction;
               Session.Turn.Origin.Step_limit_wind_down;
@@ -1245,7 +1254,34 @@ let turn_group =
             (json_object [ ("type", Json.string "cron") ]);
           assert_decode_error "queued origin without entry"
             Session.Turn.Origin.jsont
-            (json_object [ ("type", Json.string "queued") ]));
+            (json_object [ ("type", Json.string "queued") ]);
+          assert_decode_error "triggered origin missing a member"
+            Session.Turn.Origin.jsont
+            (json_object
+               [
+                 ("type", Json.string "triggered");
+                 ("charter", Json.string "nightly-review");
+                 ("digest", Json.string "0f9a4c1d2e3b4a5f");
+               ]);
+          assert_decode_error "triggered origin with an empty member"
+            Session.Turn.Origin.jsont
+            (json_object
+               [
+                 ("type", Json.string "triggered");
+                 ("charter", Json.string "");
+                 ("digest", Json.string "0f9a4c1d2e3b4a5f");
+                 ("key", Json.string "delivery-42");
+               ]);
+          assert_decode_error "triggered origin with an unknown member"
+            Session.Turn.Origin.jsont
+            (json_object
+               [
+                 ("type", Json.string "triggered");
+                 ("charter", Json.string "nightly-review");
+                 ("digest", Json.string "0f9a4c1d2e3b4a5f");
+                 ("key", Json.string "delivery-42");
+                 ("actor", Json.string "host");
+               ]));
       test "turn jsont round-trips and rejects unknown members" (fun () ->
           let t =
             turn ~id:"turn-json"
@@ -1539,6 +1575,34 @@ let turn_replay_group =
                (turn ~id:"turn-q2"
                   ~origin:(Session.Turn.Origin.Queued (queue_id "q-9"))
                   ())));
+      test "a triggered turn pairs with prompt input like a user turn"
+        (fun () ->
+          let origin =
+            Session.Turn.Origin.Triggered
+              {
+                charter = "nightly-review";
+                digest = "0f9a4c1d2e3b4a5f";
+                key = "delivery-42";
+              }
+          in
+          let admitted = turn ~id:"turn-trig" ~origin () in
+          let st = state [ Event.turn_started admitted; finish admitted ] in
+          is_true ~msg:"the triggered turn is recorded with its provenance"
+            (match State.turn (Session.Turn.id admitted) st with
+            | Some recorded -> Session.Turn.equal admitted recorded
+            | None -> false);
+          expect_apply_error
+            ~msg:"plan-build input cannot ride a triggered origin"
+            (State.Error.Turn
+               (State.Error.Turn.Unexpected_plan_build_input
+                  (turn_id "turn-trig2")))
+            (Event.turn_started
+               (turn ~id:"turn-trig2" ~origin
+                  ~input:
+                    (Session.Turn.Input.plan_build
+                       (approval ~context:`Current "1. Do the thing"))
+                  ()))
+            State.empty);
       test "enqueue_recorded is a durable receipt, not queue membership"
         (fun () ->
           let consumed =

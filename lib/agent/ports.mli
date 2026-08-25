@@ -21,7 +21,10 @@
 
     Process spawn is deliberately not a port: the engine never spawns — tools
     close over the workspace-IO spawn boundary at construction, and a call's
-    cancellation is a read-only predicate. *)
+    cancellation is a read-only predicate. The child backend below keeps that
+    law: it is a policy value naming where a delegated child session
+    materializes, and any process behind its [Brokered] arm belongs to the
+    executable's broker, never to the engine. *)
 
 (** {1:store The store port} *)
 
@@ -307,6 +310,50 @@ val script :
     artifact to fetch, and no in-flight work to cancel. It is the shape a fake
     or scripted provider wants; a live transport, which streams deltas and
     honors cancellation, implements {!provider_call} directly. *)
+
+(** {1:children The child backend} *)
+
+type child_ops = {
+  materialize :
+    child:Mentat_session.Id.t ->
+    delegation:Mentat_session.Delegation.Id.t ->
+    unit;
+      (** [materialize ~child ~delegation] makes the recorded child run: the
+          broker owns admission, spawn, observation, and reaping. The call
+          carries identity only — the child re-reads its task and role from
+          the durable delegation edge, so no content crosses the seam. It is
+          idempotent on [child]: re-materializing a child that is already
+          running is a no-op, and a re-drive after a crash re-issues the same
+          identities. *)
+  cancel : child:Mentat_session.Id.t -> unit;
+      (** [cancel ~child] asks the broker to stop [child]'s work semantically —
+          an interrupt delivered to the child, never a kill of the delegation
+          tree's processes. Completion is observed through the child's
+          journal, not through this call. *)
+}
+(** The calls an out-of-process child backend consumes.
+
+    The record is narrower than the whole cross-backend contract. A broker
+    submits the child's first turn under the deterministic id of
+    {!Mentat_agent.child_first_turn}, exactly as the in-process arm does. The
+    runtime's child-cancellation cascade ([cancel_children]) and
+    parent-to-child message delivery ([deliver_child_message], which attaches
+    an in-process driver) today resolve in-process drivers only; they are the
+    dispatch sites a brokered backend reaches through [cancel] and a future
+    delivery call. And a brokered child's settlement never crosses this
+    record at all: it is the broker's own observation of the child journal
+    that reports the settled result back into the parent's scheduler. *)
+
+(** Where a delegated child session materializes. The engine always records
+    the delegation edge, creates the child document, and keeps the semantic
+    capacity permit; the backend decides only who runs the child. *)
+type child_backend =
+  | In_process
+      (** The child attaches as a sibling driver in this runtime — the
+          engine's own registry, scheduler, and hubs carry it. *)
+  | Brokered of child_ops
+      (** Materialization is handed to the executable's broker through the
+          ops record; only running the child moves out of this process. *)
 
 (** {1:workspace The workspace port}
 

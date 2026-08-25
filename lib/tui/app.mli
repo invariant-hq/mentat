@@ -109,7 +109,6 @@ type command =
       media : Mentat_llm.Content.t list;
       mode : Mentat_session.Contract.Mode.t;
       history : Draft.History_entry.t option;
-      goal : Mentat_protocol.Command.goal option;
       model :
         (Mentat_provider.Selector.t
         * Mentat_llm.Request.Options.Reasoning_effort.t option)
@@ -121,11 +120,10 @@ type command =
           minted session with {!session_followed}; durable turn activity still
           begins only at {!Fact.Turn_started}. When [history] is present, the
           runtime attributes that entry to the same minted session before any
-          asynchronous create/follow work begins. [goal], when present, is the
-          user-declared objective that rides this first prompt; the engine mints
-          its id at admission. [media] is the attached images' content blocks,
-          placed ahead of the prompt text. [model], when present, is the
-          selection the user staged before this session existed: the runtime
+          asynchronous create/follow work begins. [media] is the attached
+          images' content blocks, placed ahead of the prompt text. [model],
+          when present, is the selection the user staged before this session
+          existed: the runtime
           applies it after create and before the first submit, so the first turn
           seals on the staged model; a refusal settles [request] through
           {!command_failed} without submitting the prompt. *)
@@ -135,14 +133,10 @@ type command =
       prompt : string;
       media : Mentat_llm.Content.t list;
       mode : Mentat_session.Contract.Mode.t;
-      goal : Mentat_protocol.Command.goal option;
     }
       (** Mint and submit a prompt turn in idle [session], with [media] ahead of
           the prompt text. The runtime owns client-safe turn-id generation; the
-          resulting exact id enters the shell through {!Fact.Turn_started}.
-          [goal], when present, is the user-declared objective that rides this
-          turn; the engine mints its id at admission and rejects a second
-          declaration over a live goal. *)
+          resulting exact id enters the shell through {!Fact.Turn_started}. *)
   | Queue_next of {
       request : request;
       session : Mentat_session.Id.t;
@@ -183,7 +177,6 @@ type command =
       media : Mentat_llm.Content.t list;
       mode : Mentat_session.Contract.Mode.t;
       history : Draft.History_entry.t option;
-      goal : Mentat_protocol.Command.goal option;
     }
       (** Mint a child, rewind [source] at [anchor] into it, follow the child
           from [`Beginning], and only then submit [media] ahead of [prompt] as
@@ -191,9 +184,7 @@ type command =
           edited prompt. Report the child with {!session_followed}; durable turn
           activity still begins only at {!Fact.Turn_started}. [history], when
           present, attributes the seeded-and-edited draft to the child before
-          create/follow work begins, exactly as on {!Start_session}. [goal],
-          when present, is the user-declared objective riding this first turn.
-      *)
+          create/follow work begins, exactly as on {!Start_session}. *)
   | Compact_session of { request : request; session : Mentat_session.Id.t }
       (** Run manual compaction. An installed compaction also arrives as a
           durable fact. Fold the typed [Installed]/[Skipped] result with
@@ -335,37 +326,6 @@ type command =
           effective provenance through {!ui_theme_persisted}: [Ok None] when the
           write is effective, or [Ok (Some (layer, value))] when a higher config
           layer shadows it. Sessionless. *)
-  | Goal_pause of {
-      request : Goal_screen.mutation;
-      session : Mentat_session.Id.t;
-      goal : Mentat_session.Goal.Id.t;
-    }
-      (** Pause the exact displayed active [goal]. Return [request] unchanged
-          through {!goal_mutation_finished}; durable state still waits for a
-          goal fact and session-detail refresh. [session] is the active owner at
-          confirmation time; activating another session closes every screen, so
-          a retained Goal screen cannot silently retarget this pair. *)
-  | Goal_edit of {
-      request : Goal_screen.mutation;
-      session : Mentat_session.Id.t;
-      goal : Mentat_session.Goal.Id.t;
-      objective : string;
-    }  (** Replace the exact displayed unfinished [goal]'s objective. *)
-  | Goal_resume of {
-      request : Goal_screen.mutation;
-      session : Mentat_session.Id.t;
-      goal : Mentat_session.Goal.Id.t;
-      budget : int option;
-    }
-      (** Resume the exact displayed paused, blocked, or budget-limited [goal],
-          optionally replacing its token budget. *)
-  | Goal_clear of {
-      request : Goal_screen.mutation;
-      session : Mentat_session.Id.t;
-      goal : Mentat_session.Goal.Id.t;
-    }
-      (** Clear the exact displayed unfinished [goal] after the screen's
-          destructive confirmation. *)
   | Auth_save_api_key of {
       attempt : Auth_panel.attempt;
       provider : Mentat_llm.Provider.t;
@@ -577,13 +537,6 @@ val settings_mutation_finished :
     unchanged. The screen validates its captured exact session before accepting
     the result. *)
 
-val goal_mutation_finished :
-  request:Goal_screen.mutation -> (unit, Mentat_protocol.Error.t) result -> msg
-(** [goal_mutation_finished ~request result] returns the opaque goal-screen
-    token unchanged. Client success acknowledges admission only; the screen
-    remains pending until an authoritative session-detail refresh changes its
-    exact goal projection. *)
-
 val capability_failed : request:request -> Mentat_diagnostic.t -> msg
 (** [capability_failed ~request diagnostic] folds a structured failure from an
     advertised executable-local capability. *)
@@ -642,10 +595,8 @@ val session_view_loaded :
   (Mentat_session.Session_view.t, Mentat_protocol.Error.t) result ->
   msg
 (** [session_view_loaded] folds the detail projection only when both request and
-    exact session identity still match. On the Goal screen an initial failure
-    becomes its structured unavailable state, while a refresh failure retains
-    the preceding exact goal projection and reports the complete diagnostic.
-    Other surfaces keep their existing command-failure presentation. *)
+    exact session identity still match. A failure keeps the existing
+    command-failure presentation. *)
 
 val running_processes_loaded :
   request:request ->

@@ -50,6 +50,14 @@ git -c core.quotePath=false diff --no-color --no-ext-diff \
   "$(git merge-base "$BASE_SHA" "$HEAD_SHA")" "$HEAD_SHA" > review.diff
 ```
 
+One asymmetry to keep in mind: the review's worktree targets (`--base`,
+`--uncommitted`) include untracked files as synthesized new-file diffs, but
+the publisher's commit-to-commit diff cannot contain them, so a finding on a
+file absent from `review.diff` never threads — it degrades to an unanchored
+summary row. Run the CI review on a clean checkout, or gitignore any
+artifacts a pre-review workflow step generates, so the two halves see the
+same set of files.
+
 ## What is already posted
 
 Re-runs converge instead of stacking: a finding that already has a thread is

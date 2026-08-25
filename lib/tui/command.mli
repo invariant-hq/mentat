@@ -25,7 +25,7 @@
 type category = Session | Conversation | Navigation | Model | View | App
 
 (** A full-screen surface with its own verbs. *)
-type screen = Review | Sessions | Settings | Goal
+type screen = Review | Sessions | Settings
 
 (** The three settings pages: the destination tab an {!Open_settings} fate
     carries. *)
@@ -65,7 +65,6 @@ type fate =
   | Undo_session  (** Step the durable undo boundary back one user turn. *)
   | Redo_session  (** Step the undo boundary forward one user turn. *)
   | Compact_session  (** Compact the active conversation. *)
-  | Open_goal  (** Open the active session's goal projection. *)
   | Rename_session  (** Rename the active session. *)
   | Open_model  (** Open model selection. *)
   | Open_theme  (** Open theme selection. *)

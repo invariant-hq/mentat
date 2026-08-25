@@ -156,7 +156,6 @@ type acc = {
   writing : writing option;
   retrying : retrying option;
   provider_failure_reported : Provider_request.Id.t option;
-  goal : Goal.Update.t option;
   queue : Mentat_session.Queue.Update.t option;
 }
 
@@ -179,7 +178,6 @@ let initial =
     writing = None;
     retrying = None;
     provider_failure_reported = None;
-    goal = None;
     queue = None;
   }
 
@@ -755,7 +753,8 @@ let add_evidence ~ambiguous evidence acc =
 
 let user_input_blocks ~id turn =
   match (Turn.origin turn, Turn.input turn) with
-  | (Turn.Origin.User | Turn.Origin.Queued _), Turn.Input.User content ->
+  | ( (Turn.Origin.User | Turn.Origin.Queued _ | Turn.Origin.Triggered _),
+      Turn.Input.User content ) ->
       let text = content_text content in
       if visible text then [ user_article ~id text ] else []
   | _ -> []
@@ -1018,7 +1017,7 @@ let fact ~now acc position f =
       match active_id acc.phase with
       | None -> Error Error.No_active_turn
       | Some _ -> Ok (acc, [ notice_workspace ~id notice ]))
-  | Fact.Journal_goal update -> Ok ({ acc with goal = Some update }, [])
+  | Fact.Journal_goal _ -> Ok (acc, [])
   | Fact.Journal_queue update -> Ok ({ acc with queue = Some update }, [])
   | Fact.Undo { update; dropped_turns; _ } -> (
       (* An armed undo boundary renders a seam; a released one clears it. *)
@@ -1383,22 +1382,6 @@ let board_section acc =
           ];
       ]
 
-let goal_row acc =
-  match acc.goal with
-  | Some (Goal.Update.Declare { objective; _ })
-  | Some (Goal.Update.Edit { objective; _ }) ->
-      [
-        Html.El.div
-          ~at:[ Html.At.id "goal"; Html.At.class_ "goal" ]
-          [ Html.El.txt objective ];
-      ]
-  | Some (Goal.Update.Clear _) | None -> []
-  | Some _ ->
-      [
-        Html.El.div
-          ~at:[ Html.At.id "goal"; Html.At.class_ "goal" ]
-          [ Html.El.txt "goal updated" ];
-      ]
 
 let queue_row acc =
   match acc.queue with
@@ -1497,7 +1480,6 @@ let live ~now:_ ~session acc =
         tool_rows acc;
         decision;
         board_section acc;
-        goal_row acc;
         queue_row acc;
         download_row acc;
         working_row acc;

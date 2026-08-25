@@ -13,12 +13,16 @@
     detect change. Nothing here mutates the repository or its index.
 
     The git subprocess and worktree reads are the two injected effects — a
-    {!type-run} and a {!type-read}, each fallible with a display-safe reason.
-    The composition edge builds them over the workspace capability's sealed
-    [Mentat_workspace_io.Command.run] and [Mentat_workspace_io.File.load], so
-    every git spawn crosses the one sealed process boundary; {!make} lets a test
-    inject its own effect closures. The workspace meta directories ([.git],
-    [.mentat], [_build], [_opam]) are dropped from the reviewed feature.
+    {!type-run} and a {!type-read}. [read] classifies what it finds
+    ({!type-file}) and refuses an over-bound file as a value
+    ({!type-read_error}); both closures otherwise fail with a display-safe
+    reason. The composition edge builds them over the workspace capability's
+    sealed [Mentat_workspace_io.Command.run] and [Mentat_workspace_io.File]
+    observations, so every git spawn crosses the one sealed process boundary;
+    {!make} lets a test inject its own effect closures. The workspace meta
+    directories ([.git], [.mentat], [_build], [_opam]) and the review's own
+    reserved scratch namespace (root-level [.mentat-review-*.patch] files) are
+    dropped from the reviewed feature.
 
     The pure output parsing and fingerprint composition are {!Parse}, which
     takes no closures and is exercised directly. *)
@@ -76,8 +80,12 @@ module Parse : sig
 
   val untracked_paths : string list -> (Lpath.Rel.t list, string) result
   (** [untracked_paths fields] parses the NUL fields of [ls-files --others -z]
-      into paths, dropping {!meta_path} entries. An unparseable path is an
-      [Error]. *)
+      into paths, dropping {!meta_path} entries and the review feature's own
+      reserved scratch namespace — root-level [.mentat-review-*.patch] files,
+      where a review run materializes its target diff and a parked run keeps
+      it. The review's scratch is never review content: without the
+      reservation, a kept or concurrent patch would be ingested into the next
+      review's diff. An unparseable path is an [Error]. *)
 
   val numstat : string list -> ((int * int * Lpath.Rel.t) list, string) result
   (** [numstat fields] parses the NUL fields of [diff --numstat -z] into
@@ -91,6 +99,35 @@ module Parse : sig
       line counts as an addition and a final line without a trailing newline
       still counts — so it is the additions an untracked file contributes to
       {!stats}. Empty text is [0]. *)
+
+  val untracked_diff : path:Lpath.Rel.t -> contents:string -> string
+  (** [untracked_diff ~path ~contents] renders one untracked file as the
+      new-file unified diff [git diff] would emit for it once tracked, minus
+      the index line: the [diff --git] header, the mode line, [/dev/null]
+      sources, and a single hunk adding every {!count_lines} line, with git's
+      no-final-newline marker when [contents] does not end in a newline. A
+      file with a NUL byte in its first 8000 bytes renders git's binary
+      stanza and an empty file only its headers — neither contributes hunk
+      lines. Path quoting stays off, matching {!diff_text}'s pinned output;
+      a name containing a space takes git's literal-tab suffix on the [+++]
+      line. Two further divergences from real git output: the mode line is
+      always [100644] (an executable's [100755] is not detected), and
+      [.gitattributes] text conversion is never applied — the hunk carries
+      the worktree bytes. {!diff_text} appends these after the tracked
+      diff. *)
+
+  val untracked_link_diff : path:Lpath.Rel.t -> target:string -> string
+  (** [untracked_link_diff ~path ~target] renders one untracked symbolic link
+      as the new-file diff git emits for a link: mode [120000] and [target] —
+      the link's git blob content — as the single hunk line, followed by the
+      no-final-newline marker git always emits for a link. The link is never
+      read through. *)
+
+  val untracked_binary_diff : path:Lpath.Rel.t -> string
+  (** [untracked_binary_diff ~path] renders one untracked file whose bytes
+      are unavailable — over the loader's read bound — as the binary stanza a
+      NUL-bearing file already takes: the file is named in the diff without
+      its contents. *)
 
   val fingerprint_key : diff:string -> untracked_token:string -> string
   (** [fingerprint_key ~diff ~untracked_token] is the opaque equality token for
@@ -116,9 +153,24 @@ type run = ?stdin:string -> string list -> (string, string) result
     subprocess's standard input: {!load} passes the object list of a
     [git cat-file --batch] that way. *)
 
-type read = Lpath.Rel.t -> (string, string) result
-(** A worktree file reader. It returns a workspace-relative file's contents or a
-    display-safe reason on failure. *)
+(** What a worktree read found. The reader never follows a final symlink: a
+    link is a classified value, so the loader renders it as git does — its
+    target as content — rather than duplicating, or escaping through, what it
+    points at. *)
+type file =
+  | Text of string  (** A regular file's complete bytes. *)
+  | Link of string  (** A symbolic link's target path — its git blob content. *)
+
+(** Why a worktree read yielded no {!type-file}. *)
+type read_error =
+  | Too_large
+      (** The file exceeds the reader's byte bound. {!diff_text} degrades it
+          to a binary stanza; the whole-text readers refuse it. *)
+  | Unreadable of string  (** Any other failure, display-safe. *)
+
+type read = Lpath.Rel.t -> (file, read_error) result
+(** A worktree file reader. It classifies the workspace-relative entry it
+    finds or fails with a {!type-read_error}. *)
 
 type write =
   Lpath.Rel.t -> before:string -> after:string -> (unit, string) result
@@ -176,12 +228,20 @@ val merge_base : t -> base:string -> (comparison, Error.t) result
 
 val diff_text : t -> base_sha:string -> (string, Error.t) result
 (** [diff_text t ~base_sha] is the raw unified diff from commit [base_sha] to
-    the worktree — committed and uncommitted tracked changes together, as
-    [git diff] renders them. The output format is pinned — path quoting
-    disabled and the [a/]/[b/] prefixes forced — so the bytes do not vary with
-    user git configuration. Untracked files are not part of the text.
-    [base_sha] must be a resolved commit hash (see {!resolve_base} and
-    {!merge_base}). *)
+    the worktree: committed and uncommitted tracked changes as [git diff]
+    renders them, followed by every untracked file (meta directories and the
+    review's own reserved root-level [.mentat-review-*.patch] scratch files
+    excluded — see {!Parse.untracked_paths}) as a synthesized new-file diff —
+    see {!Parse.untracked_diff} — so a new file reaches a diff consumer
+    exactly like an added one and a worktree whose only change is a new file
+    still has a non-empty diff. An untracked symlink renders as git's link
+    stanza from its target, never followed ({!Parse.untracked_link_diff});
+    one over the read bound degrades to the binary stanza
+    ({!Parse.untracked_binary_diff}). The output format is pinned — path
+    quoting disabled and the [a/]/[b/] prefixes forced — so the bytes do not
+    vary with user git configuration. Errors with {!Error.Io} when an
+    untracked file cannot be read for any other reason. [base_sha] must be a
+    resolved commit hash (see {!resolve_base} and {!merge_base}). *)
 
 val commit_diff : t -> commit:string -> (string, Error.t) result
 (** [commit_diff t ~commit] is the raw unified diff of revision [commit] alone:

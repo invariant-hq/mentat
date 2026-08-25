@@ -11,9 +11,9 @@
    Every tool name maps to its own verb so two tools never share a transcript
    label, and toolchain-backed tools carry their [Ocaml_] verb so a language-
    aware call is visibly distinct from a plain workspace call. [glob] is
-   path-pattern search, not directory enumeration. Task-board state and goal
-   state still render from their own journal facts; these entries classify only
-   the call header. *)
+   path-pattern search, not directory enumeration. Task-board state still
+   renders from its own journal facts; these entries classify only the call
+   header. *)
 module Output_semantics = Mentat_tools_output
 
 let verb_of_name = function
@@ -39,7 +39,6 @@ let verb_of_name = function
   | "ocaml_find_references" -> Tool_block.Ocaml_references
   | "skill" -> Tool_block.Skill
   | "todo_write" -> Tool_block.Todo
-  | "update_goal" -> Tool_block.Goal
   | "ask_user" -> Tool_block.Question
   | "propose_plan" -> Tool_block.Plan
   | "spawn" -> Tool_block.Task

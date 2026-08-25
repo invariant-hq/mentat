@@ -3,17 +3,7 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-module Error = struct
-  type t = { context : string; reason : string }
-
-  let make ~context reason = { context; reason }
-
-  let message e =
-    if String.equal e.context "" then e.reason
-    else Printf.sprintf "%s: %s" e.context e.reason
-
-  let pp ppf e = Format.pp_print_string ppf (message e)
-end
+module Error = Decode.Error
 
 module Diff = struct
   (* Per new-side file: the hunks as inclusive new-side intervals, in diff
@@ -328,13 +318,8 @@ module Posted = struct
     | Jsont.Object (mems, _) ->
         let* id =
           match Jsont.Json.find_mem "id" mems with
-          | Some (_, Jsont.Number (v, _))
-            when Float.is_integer v
-                 && Float.compare v 1.0 >= 0
-                 && Float.equal (float_of_int (int_of_float v)) v ->
-              Ok (int_of_float v)
-          | Some _ ->
-              error ~context:(context ^ ".id") "must be a positive integer"
+          | Some (_, json) ->
+              Decode.positive_int ~context:(context ^ ".id") json
           | None -> error ~context {|missing member "id"|}
         in
         let* body =
@@ -664,14 +649,22 @@ let thread_body t (a : Anchored.t) =
     (parts @ [ Marker.finding ~origin:t.origin a.Anchored.fingerprint ])
 
 let thread_request t (a : Anchored.t) =
+  (* Threads anchor on commentable new-side lines, so the diff side is always
+     RIGHT — stated explicitly because GitHub rejects line-addressed requests
+     that omit [side] (and [start_side] on a spanning comment) with 422 rather
+     than defaulting. *)
+  let side name = json_mem name (Jsont.Json.string "RIGHT") in
   let position =
     match a.Anchored.end_line with
     | Some e ->
         [
-          json_mem "line" (Jsont.Json.int e);
           json_mem "start_line" (Jsont.Json.int a.Anchored.matched_line);
+          side "start_side";
+          json_mem "line" (Jsont.Json.int e);
+          side "side";
         ]
-    | None -> [ json_mem "line" (Jsont.Json.int a.Anchored.matched_line) ]
+    | None ->
+        [ json_mem "line" (Jsont.Json.int a.Anchored.matched_line); side "side" ]
   in
   {
     Request.label = Some (Review_finding.Fingerprint.to_hex a.Anchored.fingerprint);

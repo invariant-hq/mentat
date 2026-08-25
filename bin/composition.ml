@@ -1722,20 +1722,41 @@ let git_run capability ~timeout ?stdin argv =
       | Mentat_workspace_io.Command.Supervision_failed err ->
           Error (Format.asprintf "%a" Eio.Exn.pp_err err))
 
+(* The classified worktree read the review loader consumes: lstat first, so a
+   symlink is reported as its target and never read through — no in-root
+   duplication, no escape, no dangling-link failure — and an over-bound file
+   is a [Too_large] value the loader can degrade rather than a rendered
+   string it cannot distinguish. *)
 let git_read capability rel =
+  let unreadable error =
+    Review_git.Unreadable
+      (Format.asprintf "%a" Mentat_workspace_io.File_error.pp error)
+  in
   match
     Mentat_workspace_io.resolve_path capability (Lpath.Rel.to_string rel)
   with
   | Error error ->
-      Error (Format.asprintf "%a" Mentat_workspace.Resolve_error.pp error)
+      Error
+        (Review_git.Unreadable
+           (Format.asprintf "%a" Mentat_workspace.Resolve_error.pp error))
   | Ok path -> (
-      match
-        Mentat_workspace_io.File.load capability path
-          ~max_bytes:git_read_max_bytes
-      with
-      | Ok text -> Ok text
-      | Error error ->
-          Error (Format.asprintf "%a" Mentat_workspace_io.File_error.pp error))
+      match Mentat_workspace_io.File.lstat capability path with
+      | Error error -> Error (unreadable error)
+      | Ok stat -> (
+          match stat.Eio.File.Stat.kind with
+          | `Symbolic_link -> (
+              match Mentat_workspace_io.File.read_link capability path with
+              | Ok target -> Ok (Review_git.Link target)
+              | Error error -> Error (unreadable error))
+          | _ -> (
+              match
+                Mentat_workspace_io.File.load capability path
+                  ~max_bytes:git_read_max_bytes
+              with
+              | Ok text -> Ok (Review_git.Text text)
+              | Error (Mentat_workspace_io.File_error.Too_large _) ->
+                  Error Review_git.Too_large
+              | Error error -> Error (unreadable error))))
 
 (* A CR edit is a stale-safe full-file rewrite through the native-write enforcer,
    so it refuses protected metadata and read-only roots exactly as an agent edit
@@ -2173,15 +2194,14 @@ let config_callback t ~product_rules :
              (Mentat_session.Id.to_string session))
           ~default:Mentat_permission.Review_behavior.Enforce
       in
-      (* [continuation_turn_limit] caps goal-driven continuation turns; the
-         engine requires an explicit bound so an unbounded goal is never
-         accidental (agent/config.mli). The next CLI wires no [--goal] surface
-         yet, so no headless turn consumes it; a conservative non-runaway
-         default of 50 stands until a goal surface lands and threads a config
-         value through. *)
+      (* [continuation_turn_limit] caps goal-driven continuation turns. Goals
+         are retired: every surface that could declare, complete, pause, or
+         clear one is gone, so only a legacy session with a live goal can
+         still consume this bound — it winds down in one continuation turn.
+         The parameter is deleted with the rest of the goal vocabulary. *)
       Ok
         (Engine_config.make ~model ~options ~policy ~review ?max_steps
-           ?compaction_pressure_tokens ~continuation_turn_limit:(Some 50)
+           ?compaction_pressure_tokens ~continuation_turn_limit:(Some 1)
            ~max_spawn_depth ~max_exchanges ())
 
 (* The Build editor-tool family decision, declared once here (the composition
@@ -2523,9 +2543,7 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
   let collaboration =
     [ Verb.Spawn; Verb.Wait; Verb.Send_message; Verb.Follow_up ]
   in
-  let build_verbs =
-    [ Verb.Todo_write; Verb.Update_goal; Verb.Ask_user ] @ collaboration
-  in
+  let build_verbs = [ Verb.Todo_write; Verb.Ask_user ] @ collaboration in
   let plan_verbs = [ Verb.Ask_user; Verb.Propose_plan ] @ collaboration in
   let review_verbs = Verb.Ask_user :: collaboration in
   let snapshot_store = snapshot_store t in
@@ -3230,7 +3248,8 @@ let build_driver t :
     Engine.create ~sw:t.switch ~store:store_port ~provider:provider_call
       ~config:(config_callback t ~product_rules:build_product_rules)
       ~now:(fun () -> now_time t)
-      ~max_children ~execution_for_mode ~delegated_execution ()
+      ~max_children ~child_backend:Engine.Ports.In_process ~execution_for_mode
+      ~delegated_execution ()
   in
   t.engine <- Some engine;
   let driver_record : Client.Driver.t =

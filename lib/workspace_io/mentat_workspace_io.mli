@@ -284,6 +284,15 @@ module File : sig
       its opened root without following the final symlink. Intermediate symlinks
       are resolved with the same confined containment checks as {!stat}. *)
 
+  val read_link :
+    t -> Mentat_workspace.Path.t -> (string, File_error.t) result
+  (** [read_link t path] is the recorded target of the symbolic link at
+      [path], resolved beneath its opened root without following the final
+      link. Intermediate symlinks are resolved with the same confined
+      containment checks as {!stat}. The target text is returned as stored,
+      whether or not it resolves or stays inside the root — it is never
+      followed. Errors when [path] is not a symbolic link. *)
+
   val read :
     t ->
     Mentat_workspace.Path.t ->

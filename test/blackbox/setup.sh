@@ -77,25 +77,38 @@ use_model () {
 
 # Launch the fake OpenAI Responses server on a scripted fixture; writes its port
 # to $port_file and records requests under $capture. Serves the script's
-# requests then exits; pair with wait_fake_server.
+# requests then exits; pair with wait_fake_server. Any further arguments are
+# passed through to fake_provider_server (mode flags such as --unordered).
 start_fake_server () {
   local script="$1" capture="${2:-capture}" port_file="${3:-server-port}"
+  shift "$(( $# < 3 ? $# : 3 ))"
   mkdir -p "$capture"
   rm -f "$port_file"
   fake_provider_server --script "$script" --capture "$capture" \
-    --port-file "$port_file" --accept-timeout 30 &
+    --port-file "$port_file" --accept-timeout 30 "$@" &
   MENTAT_FAKE_PROVIDER_PID=$!
   wait_for_file "$port_file"
 }
 
 # Start the fake server and point the openai provider at it (base URL + key +
-# model), the common run/models path.
+# model), the common run/models path. Extra arguments pass through to the
+# server.
 start_fake_openai () {
   local script="$1" capture="${2:-capture}" port_file="${3:-openai-port}"
-  start_fake_server "$script" "$capture" "$port_file"
+  shift "$(( $# < 3 ? $# : 3 ))"
+  start_fake_server "$script" "$capture" "$port_file" "$@"
   export OPENAI_API_KEY=test-key
   export MENTAT_MODEL=openai/gpt-5.6-sol
   export MENTAT_OPENAI_BASE_URL="http://127.0.0.1:$(cat "$port_file")/v1"
+}
+
+# Start the fake server in unordered (content-matched) mode and point the
+# openai provider at it: each arriving request consumes the first pending
+# script item whose expectation it satisfies. The delegation path needs this —
+# a parent session and its eagerly-driven children reach the provider in
+# nondeterministic order.
+start_fake_openai_unordered () {
+  start_fake_openai "$1" "${2:-capture}" "${3:-openai-port}" --unordered
 }
 
 # Start the fake server as an OAuth issuer + readiness probe: /v1/models
@@ -212,7 +225,7 @@ start_daemon () {
 # recorded pid. A trap in the .t pairs with this so a failing test never leaks.
 stop_daemon () {
   mentat serve --stop >/dev/null 2>&1 || true
-  if [ -n "$MENTAT_DAEMON_PID" ]; then
+  if [ -n "${MENTAT_DAEMON_PID:-}" ]; then
     kill "$MENTAT_DAEMON_PID" 2>/dev/null || true
     wait "$MENTAT_DAEMON_PID" 2>/dev/null || true
     unset MENTAT_DAEMON_PID

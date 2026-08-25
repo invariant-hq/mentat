@@ -427,15 +427,7 @@ val run :
     sequence accepted by the fake client's permission-review setter. Each
     request remains held until {!finish_permission_review}; an accepted review
     becomes the sealed review of subsequent scripted turns, while a rejected
-    review leaves the preceding effective value unchanged.
-
-    Goal-screen commands likewise remain at the exact fake-client boundary.
-    {!acknowledge_goal_mutation} delivers admission without changing the owner
-    document; {!commit_goal_mutation} then appends the captured update to that
-    document and publishes its projected journal fact. Tests may instead use
-    {!fail_goal_mutation}. Model-owned declaration, blocking, completion, and
-    budget transitions enter through {!update_goal}, which uses the same real
-    document append and fact path. *)
+    review leaves the preceding effective value unchanged. *)
 
 val finish_settings_queries : t -> unit
 (** [finish_settings_queries t] releases configuration, readiness, and session
@@ -606,31 +598,6 @@ val finish_permission_review :
     permission-review setter. [Ok ()] updates the harness's next-turn review
     value; [Error _] preserves the prior value. It raises [Invalid_argument]
     when no review is pending. Call {!settle} afterwards. *)
-
-val acknowledge_goal_mutation : t -> unit
-(** [acknowledge_goal_mutation t] returns [Ok ()] for the exact held goal
-    command without mutating its owner document. The Goal screen must therefore
-    remain pending for its authoritative fact. It raises [Invalid_argument] if
-    no command is pending or that command was already acknowledged. Call
-    {!settle} afterwards before printing the acknowledged frame. *)
-
-val commit_goal_mutation : t -> unit
-(** [commit_goal_mutation t] appends the acknowledged command's exact goal
-    update to the active session document and publishes the resulting
-    [Journal_goal] fact. It raises [Invalid_argument] if no command is pending
-    or admission has not first been acknowledged. Call {!settle} afterwards
-    before printing the authoritative projection. *)
-
-val fail_goal_mutation : t -> Mentat_protocol.Error.t -> unit
-(** [fail_goal_mutation t error] rejects the exact held goal command without
-    changing its owner document. It raises [Invalid_argument] if no command is
-    pending. Call {!settle} afterwards before printing the structured error. *)
-
-val update_goal : t -> Mentat_session.Goal.Update.t -> unit
-(** [update_goal t update] appends a model- or engine-owned lifecycle [update]
-    to the real active session document and publishes the corresponding
-    [Journal_goal] fact. Replay validates the transition and a malformed fixture
-    fails loudly. Call {!settle} afterwards before printing. *)
 
 val next_login_step : t -> unit
 (** [next_login_step t] delivers the next exact result for the active scripted

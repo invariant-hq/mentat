@@ -514,6 +514,9 @@ module File = struct
     with_bound t path (fun bound ->
         Eio.Path.stat ~follow:false (bound_eio bound))
 
+  let read_link t path =
+    with_bound t path (fun bound -> Eio.Path.read_link (bound_eio bound))
+
   let read t path ~offset ~max_bytes =
     if offset < 0 then invalid_arg "offset must be non-negative";
     if max_bytes < 0 then invalid_arg "max_bytes must be non-negative";

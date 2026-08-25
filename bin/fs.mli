@@ -47,6 +47,15 @@ val atomic_write : perms:int -> string -> string -> (unit, string) result
     rename over [path]. [Error message] on any IO failure, temporary cleaned up
     on the failure path. *)
 
+val write_new :
+  perms:int -> string -> string -> ([ `Written | `Exists ], string) result
+(** [write_new ~perms path bytes] creates [path] exclusively ([O_CREAT] with
+    [O_EXCL]) at [perms] and writes [bytes] to it. [`Exists] when an entry —
+    a dangling symlink included — already occupies [path], so a caller's
+    refusal to overwrite cannot race a concurrent creator the way a
+    check-then-write would. [Error message] on any other IO failure, with the
+    partial file removed. *)
+
 val with_lock : string -> (unit -> ('a, string) result) -> ('a, string) result
 (** [with_lock lock_path f] runs [f] holding the advisory lock at [lock_path]:
     an in-process [Eio.Mutex] keyed by [lock_path] (so a second fiber in this

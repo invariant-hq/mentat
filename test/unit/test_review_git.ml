@@ -42,6 +42,23 @@ let git_parse_pure () =
       is_true ~msg:"untracked drops meta" (Rel.equal (rel "lib/c.ml") path)
   | Ok _ -> fail "meta untracked paths must be dropped"
   | Error message -> failf "untracked: %s" message);
+  (* The review's own scratch namespace is reserved: a kept or concurrent
+     review patch at the root is never review content, while the same name in
+     a subdirectory, or another root dotfile, is an ordinary untracked file. *)
+  (match
+     Review_git.Parse.untracked_paths
+       [
+         ".mentat-review-s123.patch";
+         "sub/.mentat-review-s123.patch";
+         ".mentat-review-s123.txt";
+       ]
+   with
+  | Ok [ a; b ] ->
+      is_true ~msg:"only the root-level review patch is reserved"
+        (Rel.equal (rel "sub/.mentat-review-s123.patch") a
+        && Rel.equal (rel ".mentat-review-s123.txt") b)
+  | Ok _ -> fail "the root-level review patch must be dropped"
+  | Error message -> failf "untracked: %s" message);
   (match
      Review_git.Parse.numstat [ "3\t1\tlib/a.ml"; "-\t-\tbin/logo.png" ]
    with
@@ -118,7 +135,7 @@ let scripted_loader () =
           "--dst-prefix=b/";
           "deadbeef";
         ],
-        Ok "DIFF" );
+        Ok "DIFF\n" );
       ( [ "git"; "ls-files"; "--others"; "--exclude-standard"; "-z" ],
         Ok "lib/new.ml\000" );
       ( [
@@ -154,11 +171,216 @@ let scripted_loader () =
   in
   let read rel =
     match List.assoc_opt (Rel.to_string rel) texts with
-    | Some text -> Ok text
-    | None -> Error ("no such file: " ^ Rel.to_string rel)
+    | Some text -> Ok (Review_git.Text text)
+    | None ->
+        Error (Review_git.Unreadable ("no such file: " ^ Rel.to_string rel))
   in
   let write _ ~before:_ ~after:_ = Ok () in
   Review_git.make ~run ~read ~write
+
+let git_untracked_diff_renders_new_files () =
+  let render path contents =
+    Review_git.Parse.untracked_diff ~path:(rel path) ~contents
+  in
+  equal string ~msg:"a terminated file renders as one added hunk"
+    (String.concat "\n"
+       [
+         "diff --git a/lib/new.ml b/lib/new.ml";
+         "new file mode 100644";
+         "--- /dev/null";
+         "+++ b/lib/new.ml";
+         "@@ -0,0 +1,2 @@";
+         "+let n = 0";
+         "+let m = 1";
+         "";
+       ])
+    (render "lib/new.ml" "let n = 0\nlet m = 1\n");
+  equal string ~msg:"a single line omits the count, like git"
+    (String.concat "\n"
+       [
+         "diff --git a/one.txt b/one.txt";
+         "new file mode 100644";
+         "--- /dev/null";
+         "+++ b/one.txt";
+         "@@ -0,0 +1 @@";
+         "+only";
+         "";
+       ])
+    (render "one.txt" "only\n");
+  equal string ~msg:"a missing final newline carries git's marker"
+    (String.concat "\n"
+       [
+         "diff --git a/tail.txt b/tail.txt";
+         "new file mode 100644";
+         "--- /dev/null";
+         "+++ b/tail.txt";
+         "@@ -0,0 +1,2 @@";
+         "+first";
+         "+last";
+         "\\ No newline at end of file";
+         "";
+       ])
+    (render "tail.txt" "first\nlast");
+  equal string ~msg:"an empty file contributes no hunk"
+    "diff --git a/empty b/empty\nnew file mode 100644\n" (render "empty" "");
+  equal string ~msg:"a NUL byte renders the binary stanza"
+    (String.concat "\n"
+       [
+         "diff --git a/logo.png b/logo.png";
+         "new file mode 100644";
+         "Binary files /dev/null and b/logo.png differ";
+         "";
+       ])
+    (render "logo.png" "PNG\000data");
+  equal string ~msg:"a spaced name takes git's tab suffix on the target"
+    (String.concat "\n"
+       [
+         "diff --git a/a b.txt b/a b.txt";
+         "new file mode 100644";
+         "--- /dev/null";
+         "+++ b/a b.txt\t";
+         "@@ -0,0 +1 @@";
+         "+spaced";
+         "";
+       ])
+    (render "a b.txt" "spaced\n");
+  equal string ~msg:"a symlink renders git's 120000 stanza from its target"
+    (String.concat "\n"
+       [
+         "diff --git a/link b/link";
+         "new file mode 120000";
+         "--- /dev/null";
+         "+++ b/link";
+         "@@ -0,0 +1 @@";
+         "+lib/a.ml";
+         "\\ No newline at end of file";
+         "";
+       ])
+    (Review_git.Parse.untracked_link_diff ~path:(rel "link")
+       ~target:"lib/a.ml");
+  equal string ~msg:"an over-bound file renders the binary stanza"
+    (String.concat "\n"
+       [
+         "diff --git a/big.bin b/big.bin";
+         "new file mode 100644";
+         "Binary files /dev/null and b/big.bin differ";
+         "";
+       ])
+    (Review_git.Parse.untracked_binary_diff ~path:(rel "big.bin"))
+
+let git_diff_text_appends_untracked () =
+  (* The scripted worktree modifies lib/a.ml (the tracked "DIFF\n") and adds
+     the untracked lib/new.ml; the review diff is the tracked bytes followed
+     by the synthesized new-file diff. *)
+  (match Review_git.diff_text (scripted_loader ()) ~base_sha:"deadbeef" with
+  | Error error -> failf "diff_text: %a" Review_git.Error.pp error
+  | Ok text ->
+      equal string ~msg:"tracked diff, then the untracked file as an addition"
+        ("DIFF\n"
+        ^ String.concat "\n"
+            [
+              "diff --git a/lib/new.ml b/lib/new.ml";
+              "new file mode 100644";
+              "--- /dev/null";
+              "+++ b/lib/new.ml";
+              "@@ -0,0 +1 @@";
+              "+let n = 0";
+              "";
+            ])
+        text);
+  (* A worktree whose only change is a new file: the tracked diff is empty and
+     the review diff is exactly the synthesized addition — the shape that used
+     to read as "nothing to review". *)
+  let run ?stdin:_ argv =
+    match argv with
+    | [
+     "git";
+     "-c";
+     "core.quotePath=false";
+     "diff";
+     "--no-color";
+     "--no-ext-diff";
+     "--src-prefix=a/";
+     "--dst-prefix=b/";
+     "deadbeef";
+    ] ->
+        Ok ""
+    | [ "git"; "ls-files"; "--others"; "--exclude-standard"; "-z" ] ->
+        Ok "fresh.txt\000"
+    | _ -> Error ("unscripted git: " ^ String.concat " " argv)
+  in
+  let read rel =
+    if String.equal (Rel.to_string rel) "fresh.txt" then
+      Ok (Review_git.Text "fresh content\n")
+    else Error (Review_git.Unreadable ("no such file: " ^ Rel.to_string rel))
+  in
+  let write _ ~before:_ ~after:_ = Ok () in
+  let loader = Review_git.make ~run ~read ~write in
+  match Review_git.diff_text loader ~base_sha:"deadbeef" with
+  | Error error -> failf "diff_text: %a" Review_git.Error.pp error
+  | Ok text ->
+      equal string ~msg:"an untracked-only worktree still has a review diff"
+        (String.concat "\n"
+           [
+             "diff --git a/fresh.txt b/fresh.txt";
+             "new file mode 100644";
+             "--- /dev/null";
+             "+++ b/fresh.txt";
+             "@@ -0,0 +1 @@";
+             "+fresh content";
+             "";
+           ])
+        text
+
+let git_diff_text_degrades_links_and_oversize () =
+  (* The untracked sweep classifies before reading: a symlink synthesizes the
+     120000 stanza from its target (never followed), an over-bound file
+     degrades to the binary stanza, and any other unreadable file still fails
+     the whole review loudly. *)
+  let run ?stdin:_ argv =
+    match argv with
+    | [
+     "git";
+     "-c";
+     "core.quotePath=false";
+     "diff";
+     "--no-color";
+     "--no-ext-diff";
+     "--src-prefix=a/";
+     "--dst-prefix=b/";
+     "deadbeef";
+    ] ->
+        Ok ""
+    | [ "git"; "ls-files"; "--others"; "--exclude-standard"; "-z" ] ->
+        Ok "big.bin\000link\000"
+    | _ -> Error ("unscripted git: " ^ String.concat " " argv)
+  in
+  let read rel =
+    match Rel.to_string rel with
+    | "link" -> Ok (Review_git.Link "../outside")
+    | "big.bin" -> Error Review_git.Too_large
+    | other -> Error (Review_git.Unreadable ("no such file: " ^ other))
+  in
+  let write _ ~before:_ ~after:_ = Ok () in
+  let loader = Review_git.make ~run ~read ~write in
+  (match Review_git.diff_text loader ~base_sha:"deadbeef" with
+  | Error error -> failf "diff_text: %a" Review_git.Error.pp error
+  | Ok text ->
+      equal string ~msg:"link and over-bound arms degrade in place"
+        (Review_git.Parse.untracked_binary_diff ~path:(rel "big.bin")
+        ^ Review_git.Parse.untracked_link_diff ~path:(rel "link")
+            ~target:"../outside")
+        text);
+  let read rel =
+    Error (Review_git.Unreadable ("unreadable: " ^ Rel.to_string rel))
+  in
+  let loader = Review_git.make ~run ~read ~write in
+  match Review_git.diff_text loader ~base_sha:"deadbeef" with
+  | Ok _ -> fail "an unreadable untracked file must fail the review"
+  | Error error -> (
+      match Review_git.Error.kind error with
+      | Review_git.Error.Io _ -> ()
+      | _ -> failf "expected Io, got %a" Review_git.Error.pp error)
 
 let git_resolve_base () =
   let loader = scripted_loader () in
@@ -188,7 +410,9 @@ let merge_base_loader ~upstream ~rev_list ~merge_base_ref () =
         Ok "cafebabe\n"
     | _ -> Error ("unscripted git: " ^ String.concat " " argv)
   in
-  let read rel = Error ("no such file: " ^ Rel.to_string rel) in
+  let read rel =
+    Error (Review_git.Unreadable ("no such file: " ^ Rel.to_string rel))
+  in
   let write _ ~before:_ ~after:_ = Ok () in
   Review_git.make ~run ~read ~write
 
@@ -337,8 +561,9 @@ let git_load_batches_base_blobs () =
   in
   let read rel =
     match List.assoc_opt (Rel.to_string rel) texts with
-    | Some text -> Ok text
-    | None -> Error ("no such file: " ^ Rel.to_string rel)
+    | Some text -> Ok (Review_git.Text text)
+    | None ->
+        Error (Review_git.Unreadable ("no such file: " ^ Rel.to_string rel))
   in
   let write _ ~before:_ ~after:_ = Ok () in
   let loader = Review_git.make ~run ~read ~write in
@@ -416,8 +641,9 @@ let mutation_loader ~worktree =
     | _ -> Error ("unscripted git: " ^ String.concat " " argv)
   in
   let read rel =
-    if String.equal (Rel.to_string rel) "lib/a.ml" then Ok !worktree
-    else Error ("no such file: " ^ Rel.to_string rel)
+    if String.equal (Rel.to_string rel) "lib/a.ml" then
+      Ok (Review_git.Text !worktree)
+    else Error (Review_git.Unreadable ("no such file: " ^ Rel.to_string rel))
   in
   let write rel ~before:_ ~after =
     if String.equal (Rel.to_string rel) "lib/a.ml" then (
@@ -522,7 +748,7 @@ let git_not_a_repository () =
   let loader =
     Review_git.make
       ~run:(fun ?stdin:_ _ -> Error "not a git repository")
-      ~read:(fun _ -> Error "no read")
+      ~read:(fun _ -> Error (Review_git.Unreadable "no read"))
       ~write:(fun _ ~before:_ ~after:_ -> Error "no write")
   in
   match Review_git.is_repository loader with
@@ -540,6 +766,12 @@ let () =
     [
       test "git parsing splits, filters, and fingerprints" git_parse_pure;
       test "git cat-file --batch parsing" git_cat_file_batch_parse;
+      test "git untracked_diff renders new-file diffs"
+        git_untracked_diff_renders_new_files;
+      test "git diff_text appends untracked files"
+        git_diff_text_appends_untracked;
+      test "git diff_text degrades links and over-bound files"
+        git_diff_text_degrades_links_and_oversize;
       test "git resolve_base returns the commit hash" git_resolve_base;
       test "git merge_base names the reference it compared"
         git_merge_base_names_its_reference;

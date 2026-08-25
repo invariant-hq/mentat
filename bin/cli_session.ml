@@ -396,9 +396,6 @@ let show json session_opt last cwd =
             Option.map Session.Session_view.Waiting.to_string
               (Session.Session_view.waiting view)
           in
-          let goal =
-            Option.map Session.Goal.objective (Session.Session_view.goal view)
-          in
           let last_text = Session.Session_view.last_text view in
           let session_id = Session.Summary.id summary in
           let pending = pending_decision (Document.session d) in
@@ -428,7 +425,6 @@ let show json session_opt last cwd =
                         | Some requested ->
                             decision_json ~session:session_id requested
                         | None -> Output.Json.null );
-                      ("goal", Output.Json.string_or_null goal);
                       ("last_text", Output.Json.string_or_null last_text);
                       ( "context",
                         Output.Json.obj
@@ -452,7 +448,6 @@ let show json session_opt last cwd =
             Option.iter (Output.stdout_printf "mode=%s\n") mode;
             Option.iter (Output.stdout_printf "outcome=%s\n") outcome;
             Option.iter (Output.stdout_printf "waiting=%s\n") waiting;
-            Option.iter (Output.stdout_printf "goal=%s\n") goal;
             Option.iter
               (fun text -> Output.stdout_printf "last=%s\n" (first_line text))
               last_text;

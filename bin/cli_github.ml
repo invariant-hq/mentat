@@ -4,6 +4,7 @@
  ---------------------------------------------------------------------------*)
 
 open! Cmdliner
+open Mentat_connector
 
 let docs = Cli_common.s_run
 let ( let* ) = Result.bind

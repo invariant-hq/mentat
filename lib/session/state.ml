@@ -244,7 +244,8 @@ module Error = struct
         Format.asprintf "undo anchor names unknown turn: %a" Session_turn.Id.pp
           id
     | Undo.Anchor_not_user id ->
-        Format.asprintf "undo anchor is not a user turn: %a" Session_turn.Id.pp
+        Format.asprintf "undo anchor carries no user-authored input: %a"
+          Session_turn.Id.pp
           id
     | Undo.Anchor_before_context id ->
         Format.asprintf "undo anchor is at or before the model-context head: %a"
@@ -293,9 +294,9 @@ type turn_record = {
   usage_total : int;
   first_message_index : int option;
       (* Absolute index in [full] of a [User] turn's appended user input, or
-         [None] for a non-user turn ([Continue] or a plan-build). An undo
-         boundary anchors only at a user turn, so its excluded suffix begins at
-         this index. *)
+         [None] for a turn that appended none ([Continue] or a plan-build). An
+         undo boundary anchors only at a turn carrying user-authored input, so
+         its excluded suffix begins at this index. *)
 }
 
 (* The folded undo boundary: the armed record, or [None]. Latest-wins over the
@@ -657,8 +658,8 @@ let goal_objective_edit_pending t =
                   match Turn.origin r.turn with
                   | Turn.Origin.Goal_continuation -> false
                   | Turn.Origin.User | Turn.Origin.Queued _
-                  | Turn.Origin.Plan_build | Turn.Origin.Compaction
-                  | Turn.Origin.Step_limit_wind_down ->
+                  | Turn.Origin.Triggered _ | Turn.Origin.Plan_build
+                  | Turn.Origin.Compaction | Turn.Origin.Step_limit_wind_down ->
                       true)
               | None -> true))
 
@@ -727,7 +728,8 @@ let apply_turn_started turn t =
       else
         (* The user input a [User] turn is about to append lands at the current
            length; [handle_origin] never appends, so this is the pre-append
-           index. Only a user turn is an undo anchor. *)
+           index. Only a turn carrying user-authored input is an undo
+           anchor. *)
         let first_message_index =
           match Turn.input turn with
           | Turn.Input.User _ -> Some (Transcript.length t.full)
@@ -743,8 +745,8 @@ let apply_turn_started turn t =
           | Turn.Origin.Plan_build, (Turn.Input.User _ | Turn.Input.Continue) ->
               turn_error (Error.Turn.Plan_build_mismatch id)
           | ( ( Turn.Origin.User | Turn.Origin.Goal_continuation
-              | Turn.Origin.Queued _ | Turn.Origin.Compaction
-              | Turn.Origin.Step_limit_wind_down ),
+              | Turn.Origin.Queued _ | Turn.Origin.Triggered _
+              | Turn.Origin.Compaction | Turn.Origin.Step_limit_wind_down ),
               Turn.Input.Plan_build _ ) ->
               turn_error (Error.Turn.Unexpected_plan_build_input id)
           | Turn.Origin.Compaction, Turn.Input.Continue -> Ok t
@@ -767,7 +769,7 @@ let apply_turn_started turn t =
                   }
               else turn_error (Error.Turn.Unknown_queue_entry entry)
           | ( ( Turn.Origin.User | Turn.Origin.Goal_continuation
-              | Turn.Origin.Step_limit_wind_down ),
+              | Turn.Origin.Triggered _ | Turn.Origin.Step_limit_wind_down ),
               (Turn.Input.User _ | Turn.Input.Continue) ) ->
               Ok t
         in
@@ -1591,10 +1593,11 @@ let apply_workspace_notice notice t =
   | Ok _ -> Ok { t with pending_notices = t.pending_notices @ [ notice ] }
 
 (* The undo boundary is a suffix cut over the model view, so arming is admitted
-   only at an idle head and only at a finished user turn whose first message is
-   at or after the model-context head — then the excluded suffix stays inside the
-   live tail and never overlaps the compaction/prefix cut. A [Released] update
-   clears the boundary unconditionally. Latest-wins. *)
+   only at an idle head and only at a finished turn carrying user-authored
+   input whose first message is at or after the model-context head — then the
+   excluded suffix stays inside the live tail and never overlaps the
+   compaction/prefix cut. A [Released] update clears the boundary
+   unconditionally. Latest-wins. *)
 let apply_undo_updated update t =
   match (update : Undo.Update.t) with
   | Undo.Update.Released -> Ok { t with undo = None }

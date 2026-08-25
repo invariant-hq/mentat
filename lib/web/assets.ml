@@ -268,7 +268,7 @@ ul.tools { list-style: none; margin: 0; padding: 0; display: flex; flex-directio
 .task { padding: 0.2rem 0; }
 .task.done { text-decoration: line-through; color: var(--muted); }
 .task.in_progress { font-weight: 600; }
-.goal, .queue { color: var(--muted); font-size: 0.85rem; padding: 0.3rem 0; }
+.queue { color: var(--muted); font-size: 0.85rem; padding: 0.3rem 0; }
 .delegation a { font-size: 0.9rem; }
 section.decision { border: 1px solid var(--accent); border-radius: 10px; padding: 0.9rem 1rem; margin: 0.5rem 0; }
 section.decision form { display: flex; flex-direction: column; gap: 0.6rem; }

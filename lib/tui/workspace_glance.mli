@@ -5,11 +5,10 @@
 
 (** Ambient status rows for the wide-terminal activity pane.
 
-    Four independent groups: the session goal, the workspace state — the git
-    worktree diff, this session's tool-mutation diff, and the dune build verdict
-    — the current model-context usage, and the session's live background
-    processes. Each renders status lines under its own section header; the goal
-    objective is the only default-styled text, and the diffs' additions and
+    Three independent groups: the workspace state — the git worktree diff, this
+    session's tool-mutation diff, and the dune build verdict — the current
+    model-context usage, and the session's live background processes. Each
+    renders status lines under its own section header; the diffs' additions and
     deletions, a failing build, and a failed background process carry the only
     colour. It never reads the filesystem or invents a value. *)
 
@@ -48,18 +47,6 @@ val tooling :
     [dune · n warnings] warned when a failed build printed warnings alone,
     with a [· n lint] suffix when the lint lane holds findings. A foreign
     watch's rows carry a muted [theirs ·] prefix. *)
-
-val goal :
-  palette:Theme.Palette.t ->
-  labelled:bool ->
-  objective:string option ->
-  'msg Mosaic.t list
-(** [goal ~labelled ~objective] is the session-goal objective row: the objective
-    in the default text style, word-wrapped by Mosaic. [labelled] prefixes a
-    muted [goal] tag with the shared separator — the pane's section header
-    already names the group, so the tag is for the narrow strip, which has no
-    headers. [None] yields [[]], so the enclosing section is omitted. Rows carry
-    the pane's two-column content inset; the caller supplies no width. *)
 
 val context :
   palette:Theme.Palette.t ->

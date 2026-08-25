@@ -416,18 +416,8 @@ pending decision and starts no turn.
   $ mentat session show blocked --cwd "$PWD" | grep -E '^title='
   title=Renamed
 
-A decision answer and a goal or title action cannot be combined.
+A decision answer and a title action cannot be combined.
 
   $ mentat run reply blocked --decision d --allow --title "x" --cwd "$PWD" 2>&1
-  mentat: choose one of a decision answer, a goal action, or --title
-  [2]
-
-`--goal-budget` without `--resume-goal` is a usage error; a goal action on a
-session with no declared goal reports it.
-
-  $ mentat run reply blocked --goal-budget 100 --cwd "$PWD" 2>&1
-  mentat: --goal-budget requires --resume-goal
-  [2]
-  $ mentat run reply blocked --pause-goal --cwd "$PWD" 2>&1
-  mentat: no goal declared on blocked
+  mentat: choose one of a decision answer or --title
   [2]

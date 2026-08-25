@@ -116,7 +116,7 @@ The palette is the current command catalog. Its main groups are:
   `/login`, `/logout`;
 - inspection: `/settings`, `/config`, `/status`, `/usage`;
 - display: `/thinking`, `/verbose`;
-- workflow: `/plan`, `/build`, `/review`, `/goal`;
+- workflow: `/plan`, `/build`, `/review`;
 - process: `/quit`.
 
 There is no `/skills` command: the TUI does not yet expose a skill inventory.

@@ -15,7 +15,7 @@
     The fold owns only per-turn presentation state: optimistic submit echo,
     streaming model text, open tool rows, the pending decision which drives
     the waiting line, and the live task-board mirror.
-    Goal, queue, delegation, and decision-dialog presentation remain dedicated
+    Queue, delegation, and decision-dialog presentation remain dedicated
     surface folds over their exact fact payloads; this module neither mirrors
     nor re-encodes them.
 

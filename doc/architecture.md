@@ -156,10 +156,10 @@ described under the composition root below.
 The journal is the sole durable session truth. Every fact whose lifecycle is
 scoped to a conversation lives there, in one order: turn boundaries, accepted
 model responses, provider-request claims, tool claims and settlements,
-decisions, plan/task/goal facts, compaction, delegation edges, and queue
+decisions, plan and task facts, compaction, delegation edges, and queue
 changes. The admission test is strict — a fact is journaled only if it changes
 replayed product state or is required to recover an effect. There are no sidecar
-stores for plans, todos, goals, or subagent runs; branch, rewind, export, and
+stores for plans, todos, or subagent runs; branch, rewind, export, and
 replay follow the one sequence. Value vocabularies the journal carries
 (permission, diff, LLM content, tool values) are stored through their owning
 libraries' codecs; the journal does not redefine them. The mutation ledger and
@@ -240,9 +240,8 @@ text, owns continuation or waiting policy, or persists product state — deletin
 one frontend leaves the other fully functional.
 
 What is deliberately *not* the client has four permanent homes, and naming them
-is the boundary. **The engine when idle** owns continuation, goal-driving, and
-completion detection — the client asks for the next admission and never decides
-one. **The composition root** adapts the store, workspace runtime, and provider
+is the boundary. **The engine when idle** owns continuation and completion
+detection — the client asks for the next admission and never decides one. **The composition root** adapts the store, workspace runtime, and provider
 runtime to the engine's ports; the client links none of them. **The offline
 executable** performs sessionless configuration and CLI edits with no engine.
 **The frontend itself** owns only local draft, scrollback, and opening a URL.
@@ -348,8 +347,8 @@ skills. A read-only sandbox omits native mutating and code-executing tools from
 the catalog. The shell tool remains present because its command is interpreted
 through the sealed command sandbox.
 
-Questions, plans, todos, goals, and subagents are engine verbs in that one
-catalog rather than `Mentat_tool` executables — one dispatch surface, not a
+Questions, plans, todos, and subagents are engine verbs in that one catalog
+rather than `Mentat_tool` executables — one dispatch surface, not a
 second routing system. Their state belongs to the session workflow, not to the
 workspace-tool catalog.
 
@@ -580,9 +579,8 @@ decision:
 - **A generic hook bus or plugin kernel.** Closed typed seams — catalog entries,
   context modules, decision kinds — compose in OCaml without sacrificing
   exhaustiveness.
-- **Frontend-owned drive loops.** Continuation, waiting classification, and
-  goal driving belong to the engine, never to a surface that "just needs one
-  small loop".
+- **Frontend-owned drive loops.** Continuation and waiting classification
+  belong to the engine, never to a surface that "just needs one small loop".
 - **A public effect language.** The turn unit returns its boundary as data
   interpreted by exactly one component, the engine's interpreter; nothing
   outside the engine links the planner.

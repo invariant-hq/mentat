@@ -32,7 +32,6 @@ type verb =
   | Ocaml_references
   | Skill
   | Plan
-  | Goal
   | Message
   | Follow_up
   | Cancel
@@ -153,7 +152,6 @@ let label = function
   | Ocaml_references -> "OCaml References"
   | Skill -> "Skill"
   | Plan -> "Plan"
-  | Goal -> "Goal"
   | Message -> "Message"
   | Follow_up -> "Follow-up"
   | Cancel -> "Cancel"

@@ -7,10 +7,11 @@
    module is pure — strict decode, schema value, body neutralization, and
    fingerprints — so everything is exercised on string payloads directly.
 
-   The module lives in [bin/] and is not library-linkable, so its source is
-   copied into this test executable by the [copy_files] rule in [dune]. *)
+   The module lives in the private [mentat_connector] library under
+   [bin/connector/]. *)
 
 open Windtrap
+open Mentat_connector
 module Severity = Review_finding.Severity
 
 let str_contains sub s =

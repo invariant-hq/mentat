@@ -1,8 +1,10 @@
 Headless review: `run review` resolves an explicit git diff target (--base,
---uncommitted, or --commit), materializes the diff to .mentat-review-diff.patch
-at the workspace root for the turn, and drives a review-mode run whose findings
-arrive through the built-in findings schema — validated JSON on stdout, or the
---json envelope's output member. The patch file never survives the run.
+--uncommitted, or --commit), materializes the diff to
+.mentat-review-<session-id>.patch at the workspace root for the turn — the
+session id keeps the name collision-free with user files — and drives a
+review-mode run whose findings arrive through the built-in findings schema —
+validated JSON on stdout, or the --json envelope's output member. The patch
+file survives only a run parked on a decision, for the resumed session.
 
   $ git init -q
   $ git config user.email review@test.invalid
@@ -44,14 +46,18 @@ is removed with the run.
 
   $ printf 'new line\n' >> hello.txt
   $ cat > uncommitted.jsonl <<'JSONL'
-  > {"expect":{"body_contains":[".mentat-review-diff.patch","\"name\":\"structured_output\"","anchor"]},"response":{"id":"r1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"so-item","call_id":"so-call","name":"structured_output","arguments":"{\"summary\":\"one uncommitted finding\",\"findings\":[{\"severity\":\"P1\",\"path\":\"hello.txt\",\"line\":2,\"anchor\":\"new line\",\"title\":\"Appended line lacks purpose\",\"body\":\"The appended line introduces an unused entry.\"}]}"}]}}
+  > {"expect":{"body_contains":[".mentat-review-","\"name\":\"structured_output\"","anchor"]},"response":{"id":"r1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"so-item","call_id":"so-call","name":"structured_output","arguments":"{\"summary\":\"one uncommitted finding\",\"findings\":[{\"severity\":\"P1\",\"path\":\"hello.txt\",\"line\":2,\"anchor\":\"new line\",\"title\":\"Appended line lacks purpose\",\"body\":\"The appended line introduces an unused entry.\"}]}"}]}}
   > JSONL
   $ start_fake_openai uncommitted.jsonl capture-unc port-unc
   $ mentat run review --uncommitted --cwd "$PWD" >unc.out 2>/dev/null
   $ wait_fake_server
   $ cat unc.out
   {"summary":"one uncommitted finding","findings":[{"severity":"P1","path":"hello.txt","line":2,"anchor":"new line","title":"Appended line lacks purpose","body":"The appended line introduces an unused entry."}]}
-  $ test ! -e .mentat-review-diff.patch && echo patch-removed
+
+The patch name carries the run's fresh session id, so absence is asserted by
+glob: an unmatched pattern stays literal and names no file.
+
+  $ set -- .mentat-review-*.patch; test ! -e "$1" && echo patch-removed
   patch-removed
 
 --base reviews the worktree against the merge base of the named branch and
@@ -68,7 +74,7 @@ member.
   $ wait_fake_server
   $ grep '"type":"turn.finished"' base.out | mentat_cram json .output.summary
   branch review
-  $ test ! -e .mentat-review-diff.patch && echo patch-removed
+  $ set -- .mentat-review-*.patch; test ! -e "$1" && echo patch-removed
   patch-removed
 
 --commit reviews one commit alone, against its first parent.
@@ -81,6 +87,9 @@ member.
   $ wait_fake_server
   $ mentat_cram json .summary commit.out
   commit review
+
+Untracked files in the review target — and the parked run's kept patch file —
+are exercised in review-untracked.t, which carries its own time budget.
 
 A root commit has no parent to diff against; that is a usage-class refusal.
 

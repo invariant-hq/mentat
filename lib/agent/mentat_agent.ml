@@ -20,6 +20,7 @@ type t = {
   now : unit -> Mentat_session.Time.t;
   execution_for_mode : Execution.factory;
   delegated_execution : Execution.delegated_factory;
+  child_backend : Ports.child_backend;
   scheduler : Scheduler.t;
   drivers : (string, Driver.t) Hashtbl.t;
   hubs : (string, Feed.Hub.t) Hashtbl.t;
@@ -33,8 +34,25 @@ type t = {
   mutable shutting_down : bool;
 }
 
+(* The cross-backend mint rule for a delegated child's first turn: every
+   backend derives the same turn id from the delegation id alone, so a crash
+   re-drive or a re-materialization resubmits the same turn and the
+   byte-identical prompt is idempotent. *)
+let child_first_turn delegation =
+  Mentat_session.Turn.Id.of_string
+    (Mentat_digest.key ~length:20 ~domain:"mentat.agent.child-turn.v1"
+       [ Mentat_session.Delegation.Id.to_string delegation ])
+
 let create ~sw ~store ~provider ~config ~now ?(max_children = 4)
-    ~execution_for_mode ~delegated_execution () =
+    ?(child_backend = Ports.In_process) ~execution_for_mode ~delegated_execution
+    () =
+  (match child_backend with
+  | Ports.In_process -> ()
+  | Ports.Brokered _ ->
+      (* No broker consumes the ops yet. Refusing at boot beats raising from
+         a driver hook mid-session, after a durable edge and child document
+         exist. *)
+      raise (Invalid_argument "no process backend wired"));
   {
     sw;
     store;
@@ -43,6 +61,7 @@ let create ~sw ~store ~provider ~config ~now ?(max_children = 4)
     now;
     execution_for_mode;
     delegated_execution;
+    child_backend;
     scheduler = Scheduler.create ~capacity:max_children;
     drivers = Hashtbl.create 8;
     hubs = Hashtbl.create 8;
@@ -437,7 +456,7 @@ and hooks t ~id =
   }
 
 (* Idempotent on the parent-minted child id: create the child session if
-   absent, attach a child driver as a sibling, submit its first turn.
+   absent, then materialize it through the configured backend.
    A child never runs before its edge is durable — this is called only after
    the [Delegation_recorded] commit, or from recovery's re-drive. *)
 and observe_delegation t ~parent ~parent_cwd edge =
@@ -456,33 +475,40 @@ and observe_delegation t ~parent ~parent_cwd edge =
   match ensure_child_session t ~parent ~delegation ~cwd:parent_cwd child with
   | Error e -> fail_spawn (Ports.Store_error.message e)
   | Ok () -> (
-      match attach t child with
-      | Error e -> fail_spawn (Error.message e)
-      | Ok driver ->
-          let head = Feed.Hub.head (Driver.hub driver) in
-          let started =
-            Mentat_session.State.turns (Mentat_session.state head) <> []
-          in
-          if not started then begin
-            (* Deterministic first-turn id: a crash re-drive resubmits the
-               same turn and the byte-identical prompt is idempotent. *)
-            let turn =
-              Mentat_session.Turn.Id.of_string
-                (Mentat_digest.key ~length:20
-                   ~domain:"mentat.agent.child-turn.v1"
-                   [ Mentat_session.Delegation.Id.to_string delegation ])
-            in
-            let input = Mentat_session.Delegation.task edge in
-            match
-              Mentat_protocol.Command.prompt ~session:child ~turn ~input ()
-            with
-            | Error invalid ->
-                fail_spawn (Mentat_protocol.Command.Invalid.message invalid)
-            | Ok command ->
-                (* Eager drive; never on the parent's controller fiber. *)
-                Eio.Fiber.fork ~sw:t.sw (fun () ->
-                    ignore (Driver.submit driver command))
-          end)
+      match t.child_backend with
+      | Ports.In_process -> materialize_in_process t ~fail_spawn edge
+      | Ports.Brokered _ ->
+          (* Unreachable defense: [create] already refuses a brokered
+             backend at boot. A broker must replace this arm with a real
+             materialize, never inherit the raise — from here it would
+             re-fire on every recovery re-drive of a durable edge. *)
+          raise (Invalid_argument "no process backend wired"))
+
+(* In-process materialization: attach a child driver as a sibling and submit
+   its first turn. The started guard makes a re-drive idempotent — a child
+   whose journal already holds a turn is running or settled, never
+   re-prompted. *)
+and materialize_in_process t ~fail_spawn edge =
+  let child = Mentat_session.Delegation.child edge in
+  let delegation = Mentat_session.Delegation.id edge in
+  match attach t child with
+  | Error e -> fail_spawn (Error.message e)
+  | Ok driver ->
+      let head = Feed.Hub.head (Driver.hub driver) in
+      let started =
+        Mentat_session.State.turns (Mentat_session.state head) <> []
+      in
+      if not started then begin
+        let turn = child_first_turn delegation in
+        let input = Mentat_session.Delegation.task edge in
+        match Mentat_protocol.Command.prompt ~session:child ~turn ~input () with
+        | Error invalid ->
+            fail_spawn (Mentat_protocol.Command.Invalid.message invalid)
+        | Ok command ->
+            (* Eager drive; never on the parent's controller fiber. *)
+            Eio.Fiber.fork ~sw:t.sw (fun () ->
+                ignore (Driver.submit driver command))
+      end
 
 and ensure_child_session t ~parent ~delegation ~cwd child =
   let module S = (val t.store : Ports.STORE) in

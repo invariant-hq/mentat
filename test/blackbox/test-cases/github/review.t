@@ -69,6 +69,13 @@ become summary rows, and the summary is a fresh POST with no summary id.
   $ mentat_cram json '.review[].path' fresh.json
   /repos/acme/widgets/pulls/7/comments
   /repos/acme/widgets/pulls/7/comments
+
+Line-addressed thread requests pin the diff side explicitly — GitHub rejects
+requests that omit it.
+
+  $ mentat_cram json '.review[].body.side' fresh.json
+  RIGHT
+  RIGHT
   $ mentat_cram json .summary.method fresh.json
   POST
   $ mentat_cram json .summary.path fresh.json

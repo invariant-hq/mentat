@@ -438,7 +438,7 @@ let fresh_start_client ~cwd ~mark_ready =
   let submit command =
     match command with
     | Protocol.Command.Prompt
-        { session; turn; input; options; mode; max_steps; goal = _; _ } -> (
+        { session; turn; input; options; mode; max_steps; _ } -> (
         match (input, options, mode, max_steps) with
         | ( [ Mentat_llm.Content.Text prompt ],
             None,

@@ -245,8 +245,10 @@ type requests = {
 val requests : t -> requests
 (** [requests t] are the requests that publish [t]: one [`POST] to
     [/repos/OWNER/REPO/pulls/N/comments] per thread — its body carries
-    [body], [commit_id], [path], [line], and [start_line] when the thread
-    spans lines — and exactly one summary request, a [`PATCH] of the posted
+    [body], [commit_id], [path], [line], and [side] (always ["RIGHT"]:
+    threads anchor on new-side lines), plus [start_line] and [start_side]
+    (also ["RIGHT"]) when the thread spans lines — and exactly one summary
+    request, a [`PATCH] of the posted
     summary comment when {!Posted.summary_id} knows one and a [`POST] to
     [/repos/OWNER/REPO/issues/N/comments] otherwise. A thread body renders
     the severity, title, and finding body — model text is fenced so it cannot

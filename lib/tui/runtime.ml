@@ -393,11 +393,10 @@ let run ~stdenv ~client ~(startup : Startup.t) ~(local : Local.t)
       @
       if String.equal prompt "" then [] else [ Mentat_llm.Content.text prompt ]
     in
-    let submit_prompt ~request ~session ~prompt ~media ~mode ~goal =
+    let submit_prompt ~request ~session ~prompt ~media ~mode =
       let input = prompt_input ~media ~prompt in
       match
-        Protocol.Command.prompt ~session ~turn:(fresh_turn ()) ~input ~mode
-          ?goal ()
+        Protocol.Command.prompt ~session ~turn:(fresh_turn ()) ~input ~mode ()
       with
       | Error invalid ->
           deliver
@@ -536,8 +535,7 @@ let run ~stdenv ~client ~(startup : Startup.t) ~(local : Local.t)
                                    (Printexc.to_string exn))))
                   in
                   deliver (App.attached ~request result))
-      | App.Start_session { request; prompt; media; mode; history; goal; model }
-        ->
+      | App.Start_session { request; prompt; media; mode; history; model } ->
           desire request;
           let session = !next_session in
           next_session := fresh_session ();
@@ -565,11 +563,11 @@ let run ~stdenv ~client ~(startup : Startup.t) ~(local : Local.t)
                   match follow ~request session ~from:`Now with
                   | `Admitted ->
                       auto_title ~session ~prompt;
-                      submit_prompt ~request ~session ~prompt ~media ~mode ~goal
+                      submit_prompt ~request ~session ~prompt ~media ~mode
                   | `Failed | `Stale -> ()))
-      | App.Prompt { request; session; prompt; media; mode; goal } ->
+      | App.Prompt { request; session; prompt; media; mode } ->
           perform (fun _ ->
-              submit_prompt ~request ~session ~prompt ~media ~mode ~goal)
+              submit_prompt ~request ~session ~prompt ~media ~mode)
       | App.Queue_next { request; session; prompt; media } ->
           perform (fun _ ->
               match
@@ -639,7 +637,7 @@ let run ~stdenv ~client ~(startup : Startup.t) ~(local : Local.t)
               | Error _ -> ()
               | Ok () -> ignore (follow ~request into ~from:`Beginning))
       | App.Rewind_session
-          { request; source; anchor; prompt; media; mode; history; goal } ->
+          { request; source; anchor; prompt; media; mode; history } ->
           desire request;
           let into = !next_session in
           next_session := fresh_session ();
@@ -656,7 +654,6 @@ let run ~stdenv ~client ~(startup : Startup.t) ~(local : Local.t)
                          edit to prompt history under an unrealized child id. *)
                       Option.iter (append_prompt_history (Some into)) history;
                       submit_prompt ~request ~session:into ~prompt ~media ~mode
-                        ~goal
                   | `Failed | `Stale -> ()))
       | App.Compact_session { request; session } ->
           perform (fun _ ->
@@ -822,48 +819,6 @@ let run ~stdenv ~client ~(startup : Startup.t) ~(local : Local.t)
                   deliver
                     (App.ui_theme_persisted ~request
                        (Ok (theme_shadow client name))))
-      | App.Goal_pause { request; session; goal } ->
-          perform (fun _ ->
-              deliver
-                (App.goal_mutation_finished ~request
-                   (Client.submit client
-                      (Protocol.Command.goal_pause ~session ~goal))))
-      | App.Goal_edit { request; session; goal; objective } ->
-          (* Goal_screen validates local constructor invariants before emitting
-             an effect. Build outside [perform] so a violated frontend/runtime
-             contract fails the application immediately instead of becoming an
-             operational client error or leaving the screen pending. *)
-          let command =
-            match Protocol.Command.goal_edit ~session ~goal ~objective with
-            | Ok command -> command
-            | Error invalid ->
-                invalid_arg
-                  ("goal edit escaped local validation: "
-                  ^ Protocol.Command.Invalid.message invalid)
-          in
-          perform (fun _ ->
-              deliver
-                (App.goal_mutation_finished ~request
-                   (Client.submit client command)))
-      | App.Goal_resume { request; session; goal; budget } ->
-          let command =
-            match Protocol.Command.goal_resume ~session ~goal ?budget () with
-            | Ok command -> command
-            | Error invalid ->
-                invalid_arg
-                  ("goal resume escaped local validation: "
-                  ^ Protocol.Command.Invalid.message invalid)
-          in
-          perform (fun _ ->
-              deliver
-                (App.goal_mutation_finished ~request
-                   (Client.submit client command)))
-      | App.Goal_clear { request; session; goal } ->
-          perform (fun _ ->
-              deliver
-                (App.goal_mutation_finished ~request
-                   (Client.submit client
-                      (Protocol.Command.goal_clear ~session ~goal))))
       | App.Auth_save_api_key { attempt; provider; key } ->
           perform (fun _ ->
               deliver
