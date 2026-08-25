@@ -20,12 +20,12 @@
   amended), RFC 0019 (laws C1–C8; the findings document; the §4 advisory
   table; the §5 principal correction), RFC 0020 (the pure renderer; §10's
   resident-connector invariants), and the code seams cited inline.
-- Amends: RFC 0000 S3 (§11.1) and — pending ruling — D10/D11 (§11.4);
+- Amends: RFC 0000 S3 (§11.1) and D10/D11 (§11.4, ruled 2026-08-25);
   RFC 0020 §2/§9/§10 (§11.2); RFC 0017 (residency moves to the `mentatd`
-  binary and the `Bind.public` constructor is deleted, §11.5); the
-  protocol version (v2 carries `Turn.Origin.Triggered` and, if §11.4 is
-  ruled in time, the goal-vocabulary removals, §11.6). S4 is realized,
-  not amended (§11.3).
+  binary and the `Bind.public` constructor is deleted, §11.5); the wire
+  and journal vocabulary (`Turn.Origin.Triggered` in, the goal
+  vocabulary out — ordinary pre-deployment changes, no version bump,
+  §11.6). S4 is realized, not amended (§11.3).
 - Maintainer rulings (2026-08-25, fixed): the primitive is the **charter**;
   the first funded slice is **GitHub-webhook-reactive read-only PR review**;
   charter runs are **OS processes from day 1** with RFC 0018 funded; the
@@ -48,7 +48,8 @@ exactly those holes, in one sentence:
 > charter is an owner-written file binding a typed trigger to a sealed
 > headless run; **`mentatd`** — the node, a separate binary owning all
 > residency — turns authenticated deliveries into idempotent,
-> money-fenced, OS-process runs of that file, publishes what they find
+> money-fenced, OS-process runs of that file — admitted as typed,
+> journal-recorded triggered turns — publishes what they find
 > through the connector, records receipts, alerts once per transition,
 > and re-derives everything else by folding run journals and observing
 > GitHub.
@@ -67,8 +68,8 @@ exactly those holes, in one sentence:
   that owner wants residency — a laptop for the web UI, a VPS for
   always-on — and it spawns `mentat` processes beside it, so the two
   binaries always deploy together and ship in one release artifact
-  (which is what makes node/runner version skew structurally
-  impossible). **mentatd is single-owner by law**: one owner, one trust
+  (which is what keeps node/runner version skew a refusal corner rather
+  than a routine hazard, §11.5). **mentatd is single-owner by law**: one owner, one trust
   domain, that owner's files. It is the BEAM decomposition, drawn
   honestly: the supervisor lives with the runtime that spawns the
   workers; the workers are separate processes; the external watchdog is
@@ -88,14 +89,17 @@ exit-code-contracted review run (`bin/cli_run.ml:945-1073`;
 publication path. What GitHub Actions provides today and mentatd must
 replace is four things: a trigger transport, a gate, a host that
 survives between events, and a place the bill lands. Everything else in
-this RFC is refusal — the funded slice adds **zero engine code and
-exactly one deliberate wire change**: protocol v2, which pays for typed
-trigger provenance in the journal (`Turn.Origin.Triggered`, §3) and,
-carrying §11.4's removals in the same bump, leaves the wire vocabulary
-**net smaller** than v1. §13's ledger shows the design deleting more
-than it adds: the goal machinery (superseded as the autonomy surface,
-pending §11.4's ruling), `mentat serve` as an agent subcommand, the
-`Bind.public` constructor, and the pending 0022 auto-review design.
+this RFC is refusal — the funded slice adds **zero engine behavior
+change** (no scheduler, no admission-path change beyond one vocabulary
+arm) **and one deliberate vocabulary change, with no version bump**
+(the wire is pre-deployment; §11.6): typed trigger provenance enters
+the journal (`Turn.Origin.Triggered`, §3) and the goal vocabulary
+leaves with §11.4 — a **net-smaller** vocabulary. §13
+carries the deletion ledger honestly: the slice grows the tree while
+shrinking its *surface* — the goal machinery (superseded as the
+autonomy surface, ruled in §11.4), `mentat serve` as an agent
+subcommand, the `Bind.public` constructor, and the pending 0022
+auto-review design all go.
 
 ## 1. Laws
 
@@ -110,8 +114,9 @@ pending §11.4's ruling), `mentat serve` as an agent subcommand, the
   (C4 lifted to the charter layer). *Prevents:* a PR installing the policy
   that reviews it; the OpenClaw skill-registry class.
 - **N3 — Receipt before acknowledgment.** A delivery becomes a durable
-  receipt line — under the store's own tmp-fsync-rename discipline
-  (`lib/store/disk.ml:110-113`), exactly as durable as the journal — before
+  receipt line — an fsynced append under the store's ledger discipline,
+  with the `O_EXCL` marker as the creation barrier
+  (`lib/store/disk.ml:110-119`), exactly as durable as the journal — before
   the ingress answers 202; a receipt that cannot be written is a 5xx. The
   residual power-loss window is closed by the reconcile sweep, not by a
   stronger barrier. *Prevents:* acknowledged-then-lost deliveries no
@@ -132,9 +137,13 @@ pending §11.4's ruling), `mentat serve` as an agent subcommand, the
   a retry (D1, 0018 L6). Unsettled with a pending decision at the head ⇒
   **parked** — semantic lane, decision durable, never resumed by the node.
   Unsettled with no pending decision and a dead child ⇒ **process**
-  failure: settle once honestly (§5), then dispose. A wake that never
-  becomes a run — gate skip, fence trip, dup, invalid charter — is a
-  **node event**: receipt plus `node status` plus the notify hook, never a
+  failure: settle once honestly (§5), then dispose; failures of the
+  resident machinery itself — node down, publisher failure, unwritable
+  disk, version skew — ride the same process lane: never a PR advisory,
+  surfaced on the hook and `mentatd status`, recovered mechanically. A
+  wake that never becomes a run — gate skip, fence trip, dup, forged
+  delivery, invalid charter — is a
+  **node event**: receipt plus `mentatd status` plus the notify hook, never a
   PR advisory (there is no run to report, and a fence is charter-scoped,
   not PR-scoped). *Prevents:* auto-retry of judgment; corpses masquerading
   as rest; parked runs mis-disposed as failures.
@@ -197,7 +206,7 @@ the findings schema (RFC 0019 §2, unchanged), `ingress.id`, and
               "per_charter": { "usd_per_day": 15.0, "runs_per_hour": 6 } },
   "publish": { "github": "review-threads" },
   "notify": { "on": ["failed", "parked", "fenced"],
-              "command": ["terminal-notifier", "-title", "mentat"] },
+              "command": ["~/.config/mentat/notify.sh"] },
   "suppress": { "clean_run": "silent" }
 }
 ```
@@ -263,6 +272,11 @@ mentat charter status [NAME]     # the N5 fold, rendered
 mentat charter remove NAME
 ```
 
+(The `mentat charter` verbs ride the agent binary deliberately: they are
+config-file writes plus wire-client calls — owner-facing UX, nothing
+resident — so "the agent only" refers to what the process *is*, not to
+which binary carries the admin verbs for its neighbor.)
+
 `fire` is load-bearing twice over: `--event` exercises receipt, dedup,
 gate, fence, spawn, publish — the identical path — with no network, and
 `--sweep` performs one open-PR listing with the read token and
@@ -277,7 +291,8 @@ daemon surface and lazily starts it (`Daemon.find_or_spawn`,
 ## 3. Triggers
 
 The typed sum, fixed now so every later arm rides the same pipeline
-(gate → idempotency → fence → run → receipt → report). Every arm must
+(receipt → gate → idempotency → fence → run → disposition → report).
+Every arm must
 define an **event identity** (feeding N4), a **payload fencing rule**
 (C4), and a **default rate fence** where the charter names none — or it
 does not exist:
@@ -287,11 +302,16 @@ does not exist:
   dedupes and a new push runs. Default rate fence where the charter names
   none: `runs_per_hour = 6`.
 - `cli` — **funded.** `mentat charter fire NAME [--event FILE | --sweep]
-  [--key STRING]`. Identity `(digest, key)`; `key` defaults to the fire
-  instant, so successive cron fires are distinct runs and a deliberate
-  re-fire with an explicit key exercises the dedup path — the test seam
-  for N4 itself. `--event` bytes are fenced exactly as a webhook body.
-  Rate fence: none by default — the invoker is the owner's own scheduler.
+  [--key STRING]`. A bare or `--key` fire carries identity
+  `(digest, key)`, `key` defaulting to the fire instant — distinct runs
+  per fire, and an explicit key exercises the dedup path, the test seam
+  for N4 itself; a bare fire on an event-shaped charter (nothing to
+  review) is refused with the hint to use `--event` or `--sweep`.
+  `--event` and `--sweep` fires carry the identity of the delivery they
+  decode or synthesize, so the canonical `--sweep` crontab dedupes
+  exactly as the webhook path would. `--event` bytes are fenced exactly
+  as a webhook body. Rate fence: none by default — the invoker is the
+  owner's own scheduler.
 - `schedule` — **designed, unfunded.** Identity `(digest, fire-instant)`;
   at-most-one-pending, no backfill; fresh isolated session per fire,
   always a receipt. Parses and is refused as unimplemented; lands with a
@@ -354,16 +374,18 @@ does not exist:
 — a new arm, in the journal. The derivation is first-principles: the
 journal is the sole durable truth (D16), a turn's origin is truth, and
 recording a machine-admitted turn as `User` would put a falsehood in the
-durable record with the truth exiled to side channels. The arm costs
-**protocol v2** — one codec serves journal and wire with strict
-unknown-tag rejection (`lib/session/turn.ml:53-99`,
-`lib/protocol/wire.ml:10-15`) — and this RFC pays it deliberately rather
-than waiting for a bump that happens for other reasons: versioning with
-negotiation is the mechanism the protocol was built with, the same bump
-carries §11.4's goal-vocabulary removals so v2's vocabulary is net
-*smaller* than v1's, and the ripple is enumerable (the codec arm, the
-exhaustive origin/input match in replay validation, projections, corpus
-goldens — priced in §13). Mechanically the child receives its provenance
+durable record with the truth exiled to side channels. The arm lands as
+an **ordinary vocabulary change, with no version bump** (§11.6): one
+codec serves journal and wire with strict unknown-tag rejection
+(`lib/session/turn.ml:53-99`, `lib/protocol/wire.ml:10-15`), but the
+wire is pre-deployment — its only speakers are in-tree clients shipped
+in the same release artifact — so negotiation ceremony would protect no
+one; the journal is the real compatibility surface, and §11.6's
+tombstone rule keeps existing journals replayable. The ripple is
+enumerable (the codec arm, the exhaustive origin/input match in replay
+validation, projections, corpus goldens — priced in §13); the
+vocabulary, with §11.4's removals landing alongside, comes out net
+*smaller*. Mechanically the child receives its provenance
 over the spawn channel (`mentat run start --triggered
 <charter>@<digest>:<key>`) and the engine mints the origin; provenance is
 attribution, never authority — a hand-forged `--triggered` flag misleads
@@ -458,8 +480,11 @@ submit.
 
 ## 5. The node
 
-The node is the **`mentatd`** process — one per owner per machine,
-workspace-blind, addressed by `mentatd status|install|…`. It is
+The node — the charter-owning core of the **`mentatd`** process, one per
+owner per machine, addressed by `mentatd status|install|…` — is
+workspace-blind: no charter, receipt, or run root ever enters the
+workspace registry mentatd also hosts for the attach surfaces (§11.5).
+It is
 deterministic code, not a model (**the charter is the crontab; the node
 is cron**), owning the ingress callback, gates, fence folds, checkout
 provisioning, spawn/reap, the receipt log, the sweep, the notify hook —
@@ -487,9 +512,15 @@ rewritten. A line is one of four kinds — a closed sum with
 - **alert** — the once-per-window / once-per-transition dedup record; N7
   rides this line, not memory.
 
-`notify.on` and `suppress` name members of this vocabulary and no other
-strings; §12's "carried by" column is these four kinds. Exact byte schema
-and goldens are implementation (open question 4).
+`notify.on` and `suppress` name members of the **alert** kind's closed
+transition vocabulary — v1 exactly `failed | parked | fenced`, N6's
+alertable moments, derived by the fold from dispositions and journal
+heads — and no other strings; `suppress.clean_run` governs the one
+non-alert moment (§7). Where §12's "carried by" column names a receipt,
+it names these four kinds; where no receipt exists it names the durable
+input that does carry the fact (a journal head, a counter, an HTTP
+status). Exact byte schema and goldens are implementation (open
+question 4).
 
 **The reconcile fold** — run at boot and after every reap; pure over
 durable inputs, so running it twice is running it once. Child liveness is
@@ -505,23 +536,25 @@ timestamp.
 | settled, findings | present | done |
 | settled, findings | absent | spawn publisher (safe under C2's upsert) |
 | settled, semantic failure | absent | advisory + alert, once per `(pr, head)` |
-| unsettled, pending decision, child dead | — | **parked**: advisory + alert naming the session and its retained run directory; the owner answers as `Local_user`; the node never attaches |
+| unsettled, pending decision | — | **parked**: the child stays alive, serving its session, until the park TTL; alert names the session; the owner attaches from the session list and answers as `Local_user`; a parked child that died re-materializes on the owner's attach (free fence → successor binds; the decision fact is durable) |
 | unsettled, no pending decision, child alive | — | leave it (the deadline ladder is armed) |
-| unsettled, no pending decision, child dead | — | spawn `mentat run settle SESSION` once — a new small verb: attach, let `recover` drive the head to an honest settle (a provider-claim crash settles `Interrupted` at once; a tool-claim crash continues the turn to its natural settle, spending against the charter's fences), submit nothing, exit under the existing contract — then re-enter the fold on the settled head (which may publish). One settle per receipt; a settle that dies leaves the row for the next pass; the next push remains the retry |
+| unsettled, no pending decision, child dead | — | the broker re-materializes a successor once (0018 §7.3–7.4): its own `recover` drives the head to an honest settle — a provider-claim crash settles `Interrupted` at once; a tool-claim crash continues the turn to its natural settle, spending against the charter's fences — then the fold re-enters on the settled head (which may publish). One re-materialization per receipt; a successor that dies leaves the row for the next pass; the next push remains the retry |
 
-(`mentat run settle` is necessary because no prompt-less attach exists:
-`run resume` requires a PROMPT and mints a new turn
-(`bin/cli_run.ml:1416-1423`), and `recover` is recovery, not retry — D1
-is intact because settled work is never re-run.)
+(Re-materialization is recovery, not retry — `recover` never re-runs
+settled work, so D1 is intact; and because every run child serves its
+session (§9), the settling successor is the broker's ordinary duty, not
+a special verb.)
 
-**Parked runs, end to end.** A parked run (exit 3) is an **unsettled**
-head holding a durable `Decision_requested` fact — terminal for the child
-process, alive in the journal. The alert prints the exact resumption:
-`mentat --cwd ~/.local/state/mentat/charters/pr-review/runs/c-9f3a…` —
-the owner's own process attaches (holding the fence itself; nothing
-drives the session in the daemon) and answers as a true `Local_user` via
-the ordinary decision surface. The run directory is exempt from retention
-until its decision resolves or the charter is removed. Under
+**Parked runs, end to end.** A parked run holds a durable
+`Decision_requested` fact at an **unsettled** head, and its child stays
+alive, serving — an ordinary attachable session. The alert names the
+session; the owner opens it from the TUI session list (or the §8
+dashboard), reads the question in place, and answers as a true
+`Local_user` through the ordinary decision surface — `answered_by`
+records exactly who consented. At the park TTL the node interrupts the
+child (exit 130, disposition `reaped(park_expired)`); the decision fact
+survives in the journal either way, and the run directory is exempt from
+retention until the decision resolves or the charter is removed. Under
 `permission_unattended = deny` only permission asks auto-deny; a
 `Question`/`Plan` request still parks — by design, that is the one thing
 a read-only reviewer may still need a human for.
@@ -536,8 +569,9 @@ wakes is *cold* — no fiber, no driver, no hub. The tempting one-flag
 alternative — spawning with `--attach` (`bin/cli_run.ml:884-887`) —
 parks the engine in mentatd: the model key enters the resident image,
 crash isolation is lost, and every run pins an instance for the
-process's life. Rung 2's child-serve boot is how live-follow is bought
-without that trade (§9).
+process's life. The child-serve boot (§9) is how live-follow is bought
+without that trade: the run serves its own session, and mentatd — or
+the owner's TUI — attaches as a wire client.
 
 **The crash story.** Nothing in-tree restarts a crashed resident;
 revival is lazy on the next client, which a webhook never triggers. The
@@ -552,7 +586,7 @@ version-skewed resident stays a loud refusal, never an auto-restart
 (`bin/daemon.ml:807-816`).
 
 **Escalation destinations.** Process-lane events land on the notify hook
-and `node status`; semantic-lane outcomes land where the owner already
+and `mentatd status`; semantic-lane outcomes land where the owner already
 looks — the PR advisory (0019 §4's table, reused verbatim) plus the
 notify hook; node events (N6) never reach a PR.
 
@@ -609,14 +643,16 @@ upserts so stale threads self-correct).
 arithmetic ("two writes and three reads do not fund an HTTP client") was
 computed for GitHub Actions, where `gh` is ambient — and it stands
 *there*, which is rung 0's path. For the resident node it does not
-carry: mentatd is a long-lived product that otherwise ships
-dependency-free, and `gh`+`git`-as-runtime-deps is a per-install tax
-paid forever. The node's publisher is therefore **in-process from the
-funded slice** — the renderer's request bodies posted over the HTTPS
-client stack the provider transport already vendors (no new dependency),
-with C2's GET-match-upsert unchanged and the write token confined to the
-publisher step exactly as before. `gh` remains the Actions-path
-transport only.
+carry: mentatd is a long-lived product whose only external runtime
+dependency is `git`, confined to §3's hardened checkout provisioning —
+and `gh`-as-a-second-runtime-dep is a per-install tax paid forever. The
+node's publisher is therefore **first-party from the funded slice**: a
+short-lived publisher child (spawned per publication, preserving N9's
+isolation — the write token in a process that parses no attacker text
+in the resident image) whose transport is the HTTPS client stack the
+provider transport already vendors (no new dependency), with C2's
+GET-match-upsert unchanged. `gh` remains the Actions-path transport
+only.
 
 **Reused verbatim:** the findings schema; laws C1–C8 wholesale; 0020's
 renderer design (anchoring, convergence, neutralization,
@@ -645,13 +681,14 @@ slice can consent: the grant envelope refuses at decode (§2), unattended
 may only deny in the engine, and the write token never coexists with
 untrusted input (N9). When an S4 `Integration` principal lands (0019 §5;
 0020 §10's `Principal.Github` constraints), the changes are additive: the
-charter schema admits a consent clause behind a version bump; parked
-decisions gain a connector-resolvable path bound to `(repo, pr,
-head_sha)` with `answered_by` naming the true actor; and rung 2's
-child-serve boot becomes required, because a write-capable resident run
-must be observable and commandable. This also settles the pending 0022
+charter schema admits a consent clause behind a schema-version bump;
+and parked decisions gain a connector-resolvable path bound to
+`(repo, pr, head_sha)` with `answered_by` naming the true actor — the
+observability a write-capable run demands is already there, since every
+run serves its session (§9). This also settles the pending 0022
 auto-review design's place: the charter envelope will never admit
-`permission.unattended = review` — parked-is-terminal-but-durable is this
+`permission.unattended = review` — parked-but-durable, answered by a
+human from the session list, is this
 RFC's answer to the same moment — so 0022 is re-sequenced behind the
 Integration principal (or abandoned with its fail-closed doctrine
 harvested there), and one pending design leaves the near-term roadmap
@@ -664,7 +701,15 @@ journals; `charter runs`/`status`); the **PR** for semantic outcomes of
 webhook runs (zero new transport); the **notify hook**; the **session
 list** (run sessions are ordinary sessions, titled with outcome, visible
 via `mentat sessions --all` and `charter runs` — each run's root is its
-own directory, so no per-workspace listing carries them).
+own directory, so no per-workspace listing carries them). There is
+deliberately no new frontend product: the always-on layer's unit is the
+run, not the conversation, so its oversight surface is a fold rendered
+as a page — at rung 1b, mentatd's web mount gains one server-rendered
+dashboard (the `charter status` fold with links: needs-attention first —
+parked runs with their question and attach path — then charters with
+spend-against-fence, then dispositions), while the chat surface stays
+exactly what it is, ready to become the conversational face of charters
+when `agent_message` lands.
 
 The notify hook is **one shared firing module** — spawn argv best-effort,
 output discarded, short timeout — consumed by the TUI (whose private
@@ -684,35 +729,40 @@ transports, digests, routing (no consumer); the durable
 `Workspace_notice` outbound is a named future behind its own ruling
 (§14).
 
-## 9. RFC 0018: consumed at rung 1, funded at rung 2
+## 9. RFC 0018: the local-child rung, in the funded slice
 
-**Ruling 3, honored in shape.** Every charter run is an OS process from
-day 1; there is no in-process fallback; the daemon never drives a charter
-session. The slice achieves this by spawning the shipped headless surface
-run-and-exit — the funded slice consumes **0018's laws, not yet its
-machinery**: L5 (exit codes are liveness; the head is truth), L6
-(at-most-once across the boundary — the lane law), L8 (identity over the
-spawn channel; credentials re-resolve child-side; prompt over stdin,
-never argv), L9 (the engine never names a process; the node lives at the
-composition root, and 0018's broker — "the daemon's" in that draft's
-vocabulary — is mentatd's under this RFC's cut, since mentatd now owns
-the daemon composition). Park-is-terminal (§5)
-makes run-and-exit sufficient for a read-only reviewer; the gap — live
-follow, answer-in-place, mid-run steering — is rung 2's payoff, not
-papered over.
+**Ruling 3, honored in full (ruled 2026-08-25).** Every charter run is
+an OS process serving its own session from day 1 — **0018's child-serve
+boot, in the slice**: a `mentat` process serving exactly one session
+(its own), mentatd its connect client over the same wire everything
+else speaks. The funded 0018 subset, per its §10's own staging: the
+`Child_backend` seam with `In_process` wired (the pure refactor,
+golden-gated); the local-child rung's session-serve boot; session-keyed
+registration with endpoints derived from the session id; the broker's
+spawn/observe/reap duties with fiber-native reaping and
+re-materialization; orphan rediscovery on restart; and §7.4's fence
+rule (`` `Held`` ⇒ bind-as-observer, never the in-process `` `Held`` →
+`Busy` arm). The broker — "the daemon's" in 0018's vocabulary — is
+mentatd's under this RFC's cut. 0018's laws bind as before: L5, L6, L8
+(identity over the spawn channel; credentials re-resolve child-side;
+prompt over stdin, never argv), L9.
 
-**Rung 2 — the child-serve boot, with named triggers:** an owner wants to
-watch a resident run live; parked decisions deserve answering in place;
-any write-capable charter exists. Minimum 0018 subset then (its §10's own
-staging): the `Child_backend` seam with `In_process` wired (the pure
-refactor, golden-gated); the local-child rung's session-serve boot,
-session-keyed registration with endpoints derived from the session id,
-broker observe/reap, orphan rediscovery, and §7.4's fence rule
-(`` `Held`` ⇒ bind-as-observer, never the in-process `` `Held`` → `Busy`
-arm). Not needed for charters at any rung: the delegation specialization
-codec (a charter run is a root session), the warm pool (N=0 stands — a
-spawn-per-event workload at minutes scale generates no pool consumer),
-the remote rung.
+**Why child-serve and not run-and-exit — the shape argument.** An
+earlier draft spawned the headless surface fire-and-collect, honoring
+"OS processes" while deferring 0018's machinery. That shape is rejected
+(§15.7) because its costs surfaced as special cases: a dead child's
+unsettled head needed an invented `mentat run settle` verb (no
+prompt-less attach exists — `run resume` requires a PROMPT and mints a
+turn, `bin/cli_run.ml:1416-1423`), a parked run needed a bespoke
+attach-from-this-directory dance, and charter runs became the only
+sessions in the system that could not be attached while running. Under
+child-serve all three dissolve into the broker's ordinary duties:
+re-materialization settles dead children, a parked run is an attachable
+session answered from the session list, and live-follow is the wire
+doing its job. What the slice still does not need: the delegation
+specialization codec (a charter run is a root session), the warm pool
+(N=0 stands — a spawn-per-event workload at minutes scale generates no
+pool consumer), the remote rung.
 
 **Charter runs are root sessions, not delegation children** — no
 delegation edge is minted, so all six turn-anchored delegation sites stay
@@ -764,9 +814,14 @@ is replaced:
 > receipt log, the one durable record the resident layer adds, and
 > everything else is derived by folding run journals and observing the
 > external system. Intent machinery remains rejected: no durable work
-> items, attempts, retry tables, or meters. Origins and settlement
-> vocabulary are unchanged, and charters cannot widen grants beyond the
-> read-only envelope until S4's `Integration` principal exists.
+> items, attempts, retry tables, or meters. Settlement vocabulary is
+> unchanged. Origins change exactly once: `Turn.Origin.Triggered` —
+> typed trigger provenance, attribution never authority — enters at
+> the pre-deployment vocabulary (RFC 0024 §11.6, no version bump), and
+> `Origin.Goal_continuation` leaves with the goal vocabulary
+> (RFC 0024 §11.4), legacy journals replaying through tombstone
+> decoders. Charters cannot widen grants beyond the read-only envelope
+> until S4's `Integration` principal exists.
 
 RFC 0019 C8's forward reference ("…until the daemon owns that question
 (S3)") is discharged exactly so.
@@ -790,7 +845,7 @@ node-owned for resident runs.
 **11.3 S4.** Realized, not amended: the ingress authenticates deliveries
 and resolves no decision; no new principal arrives with this RFC.
 
-**11.4 Goals — the supersession ruling this RFC requests.** Charters
+**11.4 Goals — superseded (ruled 2026-08-25).** Charters
 supersede goals as mentat's autonomy surface, and the goal machinery —
 ≈2,700 impl + ≈2,400 test LOC across the library, state fold, origin arm,
 four protocol commands, three errors, a journal fact, the `update_goal`
@@ -801,23 +856,22 @@ case (`tokens_used` sums only `Goal_continuation` turns —
 completes in its first turn is fenced by nothing), and the in-session
 self-prompting loop is the pattern this campaign rejected at charter
 scope (§15.1; §15.5 is the same rejection at session scope), surviving
-only on the attended-session defense. Staging,
-if ruled yes: **rung A** (behavior deletion — admission arm, accounting,
-tool, screen, flags, `continuation_turn_limit`; decode arms remain as
-legacy-read tombstones ≈150 LOC) gated on §13's 30-day dogfood
-succeeding; **rung B** (wire vocabulary — the four `Goal_*` commands, the
-`Prompt.goal` payload, `Journal_goal`, the errors, the origin arm) rides
-the same protocol version bump `Origin.Triggered` waits for, with a
-stated journal-compat rule (skip-or-migrate; Phase 1's zero-data-loss
-gate makes this a real decision). Requires amending RFC 0000 **D10** and
-D11's "wins over goal continuation" clause. What is genuinely lost:
-attended in-session multi-turn self-continuation (partial substitutes:
-the durable queue, the todo board, plan mode). If the maintainer keeps
-goals, the fallback ruling is recorded here instead: goals are an
-interactive convenience outside the autonomy story (deleting at least the
-mis-denominated budget half and `update_goal`), so the two-budget
-ambiguity is resolved by declaration. `Step_limit_wind_down` is not goal
-machinery and stays regardless.
+only on the attended-session defense. **RULED (2026-08-25): deleted.**
+The maintainer's test — "why would we not delete it?" — found no
+survivor: the one genuine loss, attended in-session multi-turn
+self-continuation, has partial substitutes in the durable queue, the
+todo board, and plan mode, and does not justify carrying two budget
+vocabularies of which the in-engine one is mis-denominated. The
+deletion is a design decision, not an empirical one, so it is not gated
+on dogfood: behavior and vocabulary go **with the slice** — the
+admission arm, accounting, `update_goal`, the screen, the flags,
+`continuation_turn_limit`, the four `Goal_*` commands, the
+`Prompt.goal` payload, `Journal_goal`, the errors, and
+`Origin.Goal_continuation` — with legacy-read tombstone decoders
+(≈150 LOC) keeping existing journals replayable under §11.6's rule.
+Requires amending RFC 0000 **D10** and D11's "wins over goal
+continuation" clause, carried by this RFC. `Step_limit_wind_down` is
+not goal machinery and stays.
 
 **11.5 RFC 0017 — residency moves to `mentatd`.** Two amendments. (a)
 **The daemon composition changes owners, not shape.** `mentat serve` and
@@ -845,17 +899,20 @@ provider transport keeps TLS in the tree for outbound HTTPS, which §7's
 in-process poster rides); `digestif`/`eqaf` enter as direct ingress
 deps.
 
-**11.6 Protocol v2.** One deliberate version bump, negotiated by the
-existing handshake floor (`mentat_server.mli:299-301`). It carries:
-`Turn.Origin.Triggered` (§3 — typed trigger provenance in the journal),
-and, if §11.4 is ruled in time, the goal-vocabulary removals (four
-`Goal_*` commands, the `Prompt.goal` payload, `Journal_goal`, three
-errors, `Origin.Goal_continuation`) — making v2's vocabulary net
-smaller than v1's. Journal compatibility: v1 journals replay under a
-stated skip-or-migrate rule for removed arms (a real decision under
-Phase 1's zero-data-loss gate, resolved with §11.4); old *readers*
-refuse v2 by the strict floor, which is the designed behavior, not a
-regression.
+**11.6 Wire and journal vocabulary — no version bump (ruled
+2026-08-25).** The version integer stays at 1. Version negotiation
+exists to protect deployed readers, and there are none: the wire is
+pre-deployment, its only speakers are in-tree clients shipped in the
+same release artifact — bumping would be ceremony protecting no one.
+`Turn.Origin.Triggered` enters and the goal vocabulary (§11.4) leaves
+as ordinary vocabulary changes, net smaller. The one real
+compatibility surface is the **journal on disk**: existing journals
+contain goal facts, and Phase 1's zero-data-loss gate makes their
+replay non-negotiable — so the removed arms keep **legacy-read
+tombstone decoders** (decode-only, never encoded, ≈150 LOC,
+deleted when a journal-migration story exists). The handshake floor
+(`mentat_server.mli:299-301`) stays as built, unexercised until a
+deployed reader exists to protect.
 
 ## 12. Failure semantics
 
@@ -866,9 +923,9 @@ an outcome. "Receipt" refers to §5.1's closed vocabulary.
 | Failure | Carried by | Owner sees | Recovery | Lane |
 |---|---|---|---|---|
 | non-event: duplicate/replayed delivery, gate skip, superseded head | receipt `dup`/`skipped`/`superseded` | status counters | drop (a superseded live run is SIGINTed; the new head runs) | node event (quiet extreme: receipt and counters, no alert) |
-| forged delivery (HMAC fail/absent/malformed) | throttled counter | threshold alert | 401; `rotate-secret` (rung 1b) | process |
+| forged delivery (HMAC fail/absent/malformed) | throttled counter | threshold alert | 401; `rotate-secret` (rung 1b) | node event |
 | receipt present, run never spawned (died pre-spawn) | delivery receipt, no journal | usually nothing | the fold's first row spawns it | process |
-| child dies mid-turn | unsettled head, no pending decision | alert `failed` after settle | `mentat run settle` once → honest head → fold disposes; next push retries | process |
+| child dies mid-turn | unsettled head, no pending decision | alert `failed` after settle | broker re-materializes once → honest head → fold disposes; next push retries | process |
 | node down (daemon crash; deliveries missed) | absent receipts | reviews late | OS unit restarts; fold adopts surviving children; sweep synthesizes missed deliveries | process |
 | wall-clock expiry | `reaped(wall_clock)`; head `Interrupted` or settled by the settle verb | advisory + alert | never auto-retried | semantic |
 | schema exhaustion | `run.output_schema_failed`, exit 1 | advisory naming it | never re-retried | semantic |
@@ -884,51 +941,57 @@ an outcome. "Receipt" refers to §5.1's closed vocabulary.
 ## 13. Cost, deletions, metric, kill
 
 **Build** (recomputed against the repo's measured density — `cli_run.ml`
-is 1,971 lines for one CLI family, the config codec 2,649): ingress
+is 1,971 lines for one CLI family, the config codec ~2,700): ingress
 family ~300; charter decode/validation ~500 (an executable-private module
 with an `.mli`; promotion to `mentat.charter` named at the second
 consumer); node ~1,200–1,750 (payload decode + gates, checkout
 provisioning, spawn/reap/deadline/supersession, receipts + folds + lane
 classification, sweep, notify); CLI cones ~500–750; service-unit emitter
 ~120; the in-process publisher ~200–300 (renderer bodies over the
-provider transport's HTTPS stack; C2 upsert); `mentat run settle` ~30;
-the `mentatd` binary split ~150–250 (a second composition root over the
-same libraries, build stanzas, the `serve`→`mentatd` migration shim);
-protocol v2 ~200–400 (the `Triggered` codec arm, replay-validation
-arms, projections, corpus goldens, negotiation-floor test). **In-slice
-≈ 3,200–4,300 LOC.** Required before dogfood but shared with the
-Actions path (rung 0): the 0019 §2 findings document (~200) and the
+provider transport's HTTPS stack; C2 upsert); the `mentatd` binary
+split ~150–250 (a second composition root over the same libraries,
+build stanzas, the `serve`→`mentatd` migration shim); the vocabulary
+change ~300–400 (the `Triggered` codec arm, replay-validation arms,
+projections, corpus goldens, plus the goal tombstone decoders); the
+0018 local-child subset ~1,200–2,000 (the `Child_backend` seam,
+session-serve boot, broker spawn/observe/reap with re-materialization,
+session-keyed registration, orphan rediscovery — §9; this serializes
+the slice behind 0018's first two rungs, accepted knowingly).
+**In-slice ≈ 4,500–6,400 LOC.** Required before dogfood but shared with
+the Actions path (rung 0): the 0019 §2 findings document (~200) and the
 0020 renderer (~400–800), both zero code today; plus tests per house
 norm (~600–1,000: receipt/fold/gate byte goldens, decode-refusal
 goldens, HMAC vectors, an end-to-end `fire` cram). **Path to first
-dogfood ≈ 4,400–6,300 LOC.** Contingency: if open question 1 resolves
-to child-serve-in-slice, add 1,200–2,000 and serialize behind 0018's
-first two rungs.
+dogfood ≈ 5,700–8,400 LOC.**
 
 **Deletions** (the simplification ledger; survey-verified anchors):
 
 | Deletion | Surface | When |
 |---|---|---|
-| Goal machinery (§11.4, pending ruling) | ≈ −2,700 impl, −2,400 test; −4 protocol commands, −3 errors, −1 journal fact arm, −1 origin arm, −1 TUI screen, −1 tool, −2 CLI flags, −4 reply verbs, −1 config knob (+ its planned expansion, `bin/composition.ml:1670-1674`) | rung A post-dogfood; rung B at protocol v2 (§11.6) |
+| Goal machinery (§11.4, **ruled deleted**) | ≈ −2,700 impl, −2,400 test; −4 protocol commands, −3 errors, −1 journal fact arm, −1 origin arm, −1 TUI screen, −1 tool, −2 CLI flags, −4 reply verbs, −1 config knob (+ its planned expansion, `bin/composition.ml:1783-1791`); tombstone decoders +≈150 until a journal migration | with the slice |
 | `mentat serve` as an agent subcommand (§11.5) | the agent binary sheds all residency; the composition moves, not grows | rung 1 |
 | `Bind.public` + `Unsupported` (§11.5) | ≈ −60 LOC; −2 dead dune deps from `lib/server` | in the funded slice |
-| `gh`+`git` as resident runtime deps | never incurred — the node's publisher is in-process (§7); `gh` stays Actions-only | by construction |
+| `gh` as a resident runtime dep | never incurred — the publisher posts over the vendored HTTPS stack (§7); `gh` stays Actions-only (`git` remains, confined to §3's hardened checkout provisioning) | by construction |
 | RFC 0022 (auto-review) de-funded (§7) | −651-line pending design; ~1,000 LOC never built | now |
 | TUI-private notify firing (§8) | ≈ −40 (one shared module; prevents a divergent second copy) | rung 1 |
 | Roadmap ladder rungs 3–5 → one design; goal doc surface | ≈ −50 prose; two future design campaigns collapsed into charter trigger arms | on landing |
 | Avoided outright | the ~300-LOC headless-band re-hosting (the node spawns `run start`); an in-node scheduler; a delivery/intent store; a second structured parser | by construction |
 
-**The honest net:** with §11.4 ruled yes, ≈ **−800 to −1,000 impl and
-−1,100 test LOC net**, four fewer protocol commands, a net-smaller wire
-vocabulary at v2, an agent binary with no daemon, and one fewer pending
-RFC — against one new security surface (the listener: one route, one
-verb, one header, zero content), one new durable schema (charter v1),
-one new receipt format, a second binary in the release artifact, and
-nine new CLI verbs (six `charter`, two `mentatd`, plus `run settle`).
-With goals kept as-is, the RFC is net +1,800–2,000 impl and the
-simplification claim rests on `Bind.public`, 0022, `serve`'s removal
-from the agent, and prose — the goal decision is what makes the
-maintainer's simplification directive true in code.
+**The honest net:** the tree grows in the slice — ≈ **+1,800 to +3,700
+impl** (4,500–6,400 built against ≈2,650 deleted net of tombstones:
+goals −2,700, `Bind.public` −60, notify dedup −40, tombstones +150) —
+while tests shrink ≈ **−1,400 to −1,800** (600–1,000 added against
+−2,400) and the wire loses four commands net. What shrinks is
+*surface*, not line count: an agent binary with no daemon, a
+net-smaller wire vocabulary, one origin arm swapped for a truthful one,
+one fewer pending RFC (0022: −651 design lines, ~1,000 LOC never
+built), no bespoke settle verb or parked-attach dance (dissolved by
+§9's child-serve), and two future design campaigns collapsed into
+trigger arms — against one new security surface (the listener: one
+route, one verb, one header, zero content), one new durable schema
+(charter v1), one new receipt format, a second binary in the release
+artifact, and nine new CLI verbs across rungs 1–1b (six `charter`, two
+`mentatd`, `rotate-secret`).
 
 **Ongoing.** Mentat-side, the standing costs are the listener itself,
 GitHub event-vocabulary drift in the gate, and run-directory disk
@@ -951,8 +1014,8 @@ running the same charter on a 5-minute cron sweep.
 
 **Kill criteria, split by what each rung uniquely provides.** The
 *listener* (rung 1b) lives or dies on latency and delivery integrity
-alone: if after 30 days it does not beat the cron sweep's
-push-to-review-start by an order of magnitude, or loses deliveries the
+alone: if after 30 days its p50 push-to-review-start is not at least 5×
+better than the control week's cron sweep, or it loses deliveries the
 sweep would have caught, retire the ingress family and keep the sweep as
 the trigger. The *charter/node layer* (rung 1) is judged on custody and
 discipline: if owners will not run a node even in cron form, retire the
@@ -966,21 +1029,21 @@ The charter vocabulary, receipts, and fences survive either verdict.
    Actions Stage 1 — review *quality* is proven before any resident
    machinery is funded, and the C2 origin discriminator (§7) is specified
    in 0020 now, while the renderer is unbuilt and the amendment is free.
-1. **Rung 1 (the funded slice, cron-complete):** the `mentatd` binary
-   (the server composition re-homed; `mentat` sheds `serve`) + protocol
-   v2 with `Origin.Triggered` + charter vocabulary + `fire
-   --event|--sweep` + receipts + fences + notify + the in-process
-   publisher + `run settle` + the `Bind.public` deletion. A crontab line
-   is a complete, fenced, deduplicated, publishing review charter —
-   dogfoodable with zero listener.
-2. **Rung 1b:** the ingress family + tunnel docs + periodic sweep +
-   `mentatd install` + `rotate-secret`. The webhook goes live; the sweep
-   demotes to recovery.
-3. **Rung 2 (named triggers, §9):** 0018 child-serve consumption — live
-   follow, answer-in-place; required before any write-capable charter.
-4. **Named futures, each behind a consumer or a ruling:** the in-node
-   `schedule` arm (the crontab-less fleet node); goals rung B (protocol
-   v2 if §11.4 is ruled in time, else the next bump); the in-engine
+1. **Rung 1 (the funded slice's cron-complete waypoint):** the `mentatd`
+   binary (the server composition re-homed; `mentat` sheds `serve`) +
+   the 0018 local-child subset (§9 — every run serves its session) +
+   the vocabulary change (`Origin.Triggered` in, goals out, tombstones;
+   §11.6) + charter vocabulary + `fire --event|--sweep` + receipts +
+   fences + notify + the first-party publisher + the `Bind.public`
+   deletion. A crontab line is a complete, fenced, deduplicated,
+   publishing review charter — dogfoodable with zero listener, every
+   run attachable from the session list.
+2. **Rung 1b (completes the funded slice — ruling 2 is webhook-reactive
+   review, which needs the listener):** the ingress family + tunnel docs
+   + periodic sweep + `mentatd install` + `rotate-secret` + the §8
+   dashboard page. The webhook goes live; the sweep demotes to recovery.
+3. **Named futures, each behind a consumer or a ruling:** the in-node
+   `schedule` arm (the crontab-less fleet node); the in-engine
    session-total fence (the first multi-turn charter); the public ingress
    bind (the proxyless VPS node); `Workspace_notice` outbound (its own
    ruling); the relay handshake and wire node verbs (the fleet);
@@ -1018,6 +1081,14 @@ The charter vocabulary, receipts, and fences survive either verdict.
    contradicts the product truth that an agent needs no residency. The
    one real asset of the one-binary shape — node/runner version-lock —
    survives the split via the single release artifact (§11.5).
+2c. **Run-and-exit charter runs** (spawn the headless surface
+   fire-and-collect; consume 0018's laws but not its machinery). An
+   earlier draft's shape, rejected because its costs surfaced as
+   special cases (§9): an invented settle verb for unaddressable dead
+   children, a bespoke attach dance for parked runs, and charter runs
+   as the only sessions in the system that could not be attached while
+   running — the no-special-cases test failing three ways. Its one
+   asset — less 0018 surface in the slice — was scheduling, not design.
 3. **Charters compiled to the OS** — `charter add` emits a
    socket-activated unit per delivery, cron for schedules, no resident
    node. Supersession needs a resident view of live runs; the sweep needs
@@ -1043,24 +1114,18 @@ The charter vocabulary, receipts, and fences survive either verdict.
    rule 2 kills — and S3's "no intent machinery" survives amendment
    because of it.
 
-## Open questions
+## Rulings and open questions
 
-**Blocking (resolve before `published`):**
-1. **The 0018 tempering.** Does ruling 3 require child-serve machinery in
-   the funded slice, or does run-and-exit honor it with 0018 landing at
-   rung 2's named triggers? This draft assumes the latter (§9). The price
-   of the other reading: +1,200–2,000 LOC and this campaign serialized
-   behind 0018's first two rungs.
-2. **The goal supersession (§11.4).** Charters replace goals as the
-   autonomy surface — rung A gated on the dogfood, rung B on the version
-   bump — or goals stay as a declared interactive-only feature. This is
-   the decision that determines whether the RFC simplifies mentat in code
-   or only on paper (§13).
-3. **Protocol v2 scope.** `Origin.Triggered` ships with rung 1
-   regardless; does the bump wait for §11.4's goal removals so both ride
-   one version, or does v2 ship Triggered-only with the removals at v3?
-   (Recommendation: wait iff §11.4 is ruled within the rung-1 window —
-   one bump, net-smaller vocabulary, one journal-compat rule.)
+**Ruled 2026-08-25 (formerly blocking):**
+1. **Charter runs serve their sessions — the 0018 local-child rung is in
+   the funded slice** (§9). The run-and-exit tempering is rejected with
+   its reasons recorded (§15.2c); the cost and the serialization behind
+   0018's first two rungs are accepted knowingly (§13).
+2. **Goals are deleted** (§11.4) — with the slice, not gated on dogfood;
+   tombstone decoders keep existing journals replayable.
+3. **No protocol version bump** (§11.6) — the wire is pre-deployment;
+   the vocabulary changes land in v1; the journal is the compatibility
+   surface and the tombstone rule covers it.
 
 **During implementation:**
 4. The receipt byte schema and its `status` fold — byte goldens per house
@@ -1070,3 +1135,6 @@ The charter vocabulary, receipts, and fences survive either verdict.
    §3.1's YAML gate.
 6. The notify JSON body's field set (§8), and whether `mentat run`
    completion firing is default-on or config-gated.
+7. The park TTL default and its interaction with the wall-clock deadline
+   (a parked child is alive but idle; the deadline must not reap a run
+   that is waiting on its owner).
