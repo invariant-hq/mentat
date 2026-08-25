@@ -118,8 +118,8 @@ error text, and its next request explains why:
 
 ```
 - [warning] dune: Build watch restarted (stopped responding to builds)
-A dune command that was running may have failed with "Connection terminated"
-or "Build via RPC failed"; run it again.
+A dune command that was running may have timed out, or failed with
+"Connection terminated" or "Build via RPC failed"; run it again.
 ```
 
 If you already run your own `dune build -w`, Mentat attaches to it: the row
@@ -253,7 +253,10 @@ evidence path spends nothing until something actually stalls. The signal is
 the one place a hang is observable: a shell command whose program resolves
 to dune, run while the watch holds the lock, times out — that command was
 forwarding into the watch, and its timeout is a **stall report** to the
-supervisor. The supervisor then runs one bounded `flush_file_watcher` as
+supervisor. The composition cannot see the lock, so every dune command's
+timeout reports, and the supervisor verifies only while it supervises a
+live watch of its own — a report with no such watch behind it is dropped.
+The supervisor then runs one bounded `flush_file_watcher` as
 verification: the public procedure that waits for the file watcher's sync
 round-trip and the debounce quiet period (`build_loop.mli:28-31`) — it
 exercises dune's event loop and never waits on the build, so a merely slow
@@ -657,7 +660,7 @@ cram against `fswatch.t`'s 30 lines/scenario), not hoped.
 |---|---|---|---|
 | A · attach + settle + law + status | persistent connection, two long-polls, store fold, overtake/quiet rules (`rpc.ml` +300); `Finding`/`Reading`/`Change` with `.mli`s (+250); producer render in `bin/` (`workspace_notices.*` rewritten in place); `Health` reshape + `workspace.dune` query + row + tick (+250); concurrent fake with scripted timeline (+250); cram + unit + goldens (+390) | ≈ +1,560 / −250 | **no spawn**: runs against any registered watch — the maintainer's own `dune build -w` — and already retires the 15 s guess, the head-string law, and the per-drain probe. Deleted outright: `Instance.build_health`, `Instance.Health`, the diagnostic store surface, and the glance's producer+mapping; `bin/workspace_notices.*` is rewritten to the drain producer alone. |
 | B · own it | `bin/dune_watch.{ml,mli}` supervisor (~650 with docs), lazy spawn via `start_session`, probe-before-spawn, private `XDG_RUNTIME_DIR` + host mirror, stop-before-release; describe deleted (−1,780 incl. suite and ripple); docs/eval refusals (+80); skill/prompt text; `dune.watch`/`dune.targets` | ≈ +900 / −1,800 | first deliverable is the confinement spike: FSEvents under seatbelt (statically, no `mach-lookup` for `com.apple.FSEvents` is allowed — the allowance line, profile-wide per §11, is the deliverable), registry write under the private dir, socket from a confined child; the §3 self-test backs it at runtime |
-| C · hang | dune-command tool timeout → stall report → one verification flush → restart; first-flush confinement self-test; `dune.watch` notice; `MENTAT_DUNE_WATCH_FLUSH_S`; fake `--hang-flush` | ≈ +150 | after B; insurance (the hang was old-dune); no periodic probe — the evidence path pays only on evidence |
+| C · hang | dune-command tool timeout → stall report → one verification flush → restart; first-flush confinement self-test; `dune.watch` notice; `MENTAT_DUNE_WATCH_FLUSH_S`; fake `hang`/`slow`/`hang-flush` mode directives | ≈ +230 | after B; insurance (the hang was old-dune); no periodic probe — the evidence path pays only on evidence |
 | D · lint | alias parse + backstop, marker split, litany's one-line marker (upstream), dogfood stanza + dev dep | ≈ +280 | after A; independent of B |
 | E · commands + lease | `/dune restart|stop`, doctor lines, the watch lease serving docs and eval | ≈ +350 | after B |
 
@@ -674,13 +677,19 @@ instance already serving the socket for foreign attach). Cram
 count-only silence; two saves inside the sample period ⇒ no `Build
 recovered`; an error text changed inside the sample period ⇒ `1 new, 1
 resolved`; lint-only leaves the build lane clean; alias absent ⇒ no `@lint`;
-foreign attach; hang ⇒ restart ⇒ notice naming the probe;
-`dune.watch=observe`. Unit: `Change.step` properties (idempotence, range and
+foreign attach; `dune.watch=observe`. Cram `run/dune-own.t`: a dune-command
+timeout ⇒ one verification flush ⇒ restart ⇒ notice naming the cause; the
+same timeout with an answering flush ⇒ no restart, no notice; a blocked
+first flush ⇒ `Off Blocked`, one notice, no respawn. Deliberately unpinned
+(known, not owed yet): the activity-cleared verification, the `No_server`
+verdict, the dropped-report paths (observe, foreign, between lives), and
+the `Restarting Hung`/`Off Blocked` row renders — the TUI story below owes
+the rows. Unit: `Change.step` properties (idempotence, range and
 count invariance, lane independence, recovery confirmation, no-reading
 identity). TUI: one pty story through the row states plus the notice goldens.
-Live-gated: a real watch on a fixture with a shell `lint` rule; the flush
-probe never fires during a cold build of this repository; a forwarded build
-from a confined child. A QA script on this repository drives every §8 row
+Live-gated: a real watch on a fixture with a shell `lint` rule; no stall
+report is ever raised during a cold build of this repository (no dune tool
+timeout ⇒ no flush); a forwarded build from a confined child. A QA script on this repository drives every §8 row
 and every §4 notice, ending with quit → no orphan, no socket, no mirror.
 
 **Success and kill criteria** (M1–M7; the supervisor logs one line per
@@ -690,9 +699,12 @@ derived state, logged, never persisted; notices are already journaled):
 - M1 precision: notices with `digest = stated` = 0 over a week of the
   maintainer's sessions. M2 missed transitions: readings with
   `digest ≠ stated` and no notice at the next drain = 0.
-- M3: `dune.watch` notices name the restart's cause; if two release cycles
-  journal zero hang restarts, slice C's stall machinery is deleted and only
-  the first-flush self-test stays.
+- M3: the watch notices name the restart's cause (keys `dune.watch.hung` /
+  `dune.watch.blocked`); the journal count is a lower bound — a hang on a
+  session's last claim never drains — with the `mentat.dune.watch` warn
+  line as the reconciling record. If two release cycles journal zero hang
+  restarts, slice C's stall machinery is deleted and only the first-flush
+  self-test stays.
 - M4 spawn → first settle, logged; warm p50 > 60 s ⇒ revisit `@check`/lazy.
 - M5 daemon CPU with the TUI attached during a build < 2 %, else the tick
   slows. M6 no-op iteration p50 (informs any future build probe). M7 lint
