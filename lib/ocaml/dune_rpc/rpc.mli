@@ -54,9 +54,12 @@ module Instance : sig
       | Connecting
           (** An endpoint is registered and a connection is being established.
           *)
-      | Attached of { pid : int }
+      | Attached of { pid : int; ours : bool }
           (** A live connection holds the watch's diagnostic and progress
-              subscriptions; [pid] is the watch's advertised process id. *)
+              subscriptions; [pid] is the watch's advertised process id, and
+              [ours] whether the connection opened through a supervisor's
+              {!pin} — the supervised watch — rather than through registry
+              discovery. *)
     (** The type for attach statuses. *)
 
     val equal : t -> t -> bool
@@ -87,8 +90,9 @@ module Instance : sig
     (** [health t] is the wire status a frontend glances at: nothing attached
         is {!Mentat_workspace.Health.Off} [No_server], a connection in flight
         is {!Mentat_workspace.Health.Probing}, and an attached watch is
-        {!Mentat_workspace.Health.Live} with a foreign owner — mid-build or
-        unsettled as [Building], at rest as [Settled] with the reading's
+        {!Mentat_workspace.Health.Live} — owned by us when the connection
+        opened through a supervisor's {!pin} and foreign otherwise; mid-build
+        or unsettled as [Building], at rest as [Settled] with the reading's
         verdict and lint count. The caller owes the tooling gate: a disabled
         or untrusted workspace never reaches this projection. *)
   end
@@ -116,26 +120,46 @@ module Instance : sig
   (** [snapshot t] is the attach loop's current knowledge, without IO: safe on
       any fiber, in particular the engine's drain path. Before {!attach} runs
       it is [{ status = Absent; building = false; reading = None }]. *)
-end
 
-module Probe : sig
-  (** One-shot liveness probe against a watch's known socket. *)
+  (** {1:supervision The supervisor's seams}
 
-  val socket :
-    net:_ Eio.Net.t ->
-    clock:_ Eio.Time.clock ->
-    ?timeout_s:float ->
-    root:string ->
-    path:string ->
-    unit ->
-    bool
-  (** [socket ~net ~clock ~root ~path ()] is [true] iff a Dune RPC server
-      accepted a connection on the Unix socket at [path] and completed the
-      initialize handshake, bounded to [timeout_s] wall-clock seconds
-      (default [1.]). [root] is the workspace root the socket serves, used
-      only to shorten an over-long socket path the way ordinary connections
-      do. A missing socket, a refused connection, a failed handshake, and a
-      timeout are all [false]: the caller treats an unanswering socket as no
-      server. The probe holds no subscription and closes its connection
+      A build-watch supervisor knows its own watch's socket and host pid, so
+      the observer must never rediscover that watch through the user's global
+      registry — a broken or unwritable registry would silently cost the
+      agent its own build visibility. These seams let the supervisor state
+      what it knows; everything below stays observation. *)
+
+  val socket_path : t -> string
+  (** [socket_path t] is where dune's RPC server binds for the workspace, by
+      dune's own convention: [_build/.rpc/dune] under the primary root. *)
+
+  val pin : t -> pid:int -> lint:bool -> unit
+  (** [pin t ~pid ~lint] directs the attach loop at the workspace's own
+      socket ({!socket_path}) instead of the registry: the supervisor spawned
+      a watch with host process id [pid] there. [lint] states whether the
+      requested targets make the lint lane live — a pinned watch's targets
+      are known, so the lint marker alone no longer decides a finding's lane.
+      An attachment that opens through the pin reports the watch as ours. The
+      pin holds until {!unpin}; while the socket does not answer yet the loop
+      keeps reconnecting to it, which is a spawned watch starting up. *)
+
+  val unpin : t -> unit
+  (** [unpin t] returns the attach loop to registry discovery — the
+      supervised watch is gone. An attachment already open keeps the identity
+      it was opened with until it disconnects. *)
+
+  val probe : t -> bool
+  (** [probe t] is [true] iff a Dune RPC server accepted a connection at
+      {!socket_path} and completed the initialize handshake, bounded to one
+      second. A missing socket, a refused connection, a failed handshake, and
+      a timeout are all [false]: the caller treats an unanswering socket as
+      no server. The probe holds no subscription and closes its connection
       before returning. *)
+
+  val mirror : t -> pid:int -> (Mirror.t, string) result
+  (** [mirror t ~pid] writes the user-registry mirror entry for the
+      supervised watch with host process id [pid] serving {!socket_path} —
+      see {!Mirror.write}. The instance contributes only the ambient
+      environment the registry directory derives from; the caller owns the
+      entry and its removal. *)
 end

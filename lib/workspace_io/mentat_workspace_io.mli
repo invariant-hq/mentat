@@ -711,14 +711,17 @@ module Command : sig
         Parent fiber cancellation propagates as cancellation, as everywhere
         else. *)
 
-    val signal : t -> unit
-    (** [signal t] cooperatively terminates the child: SIGTERM, a bounded grace,
-        then SIGKILL, each sent to the child's process group before the child,
-        reaps the child under [Eio.Cancel.protect], drains the final tail within
-        a bounded grace, and settles {!status} to [Terminated]. Idempotent:
-        signalling an already-settled session is a no-op that leaves its
-        recorded status — including a child that already exited on its own,
-        whose descendants are therefore never signalled.
+    val signal : ?grace:float -> t -> unit
+    (** [signal t] cooperatively terminates the child: SIGTERM, a bounded grace
+        ([grace] seconds, default a tool child's 0.2 — a daemon with real
+        SIGTERM work, like a build watch cancelling a rebuild and unlinking
+        its socket, deserves more), then SIGKILL, each sent to the child's
+        process group before the child, reaps the child under
+        [Eio.Cancel.protect], drains the final tail within a bounded grace,
+        and settles {!status} to [Terminated]. Idempotent: signalling an
+        already-settled session is a no-op that leaves its recorded status —
+        including a child that already exited on its own, whose descendants
+        are therefore never signalled.
 
         The workers a command forked go with it; a descendant that left the
         group, or that ignores a SIGTERM the child itself obeys, does not. *)
@@ -742,7 +745,7 @@ module Command : sig
     t ->
     sw:Eio.Switch.t ->
     ?cwd:Mentat_workspace.Path.t ->
-    ?env_override:(string * string) list ->
+    ?runtime_dir:string ->
     string list ->
     (Session.t, Error.t) result
   (** [start_session t ~sw argv] spawns [argv] as a supervised background child
@@ -754,16 +757,16 @@ module Command : sig
       a waiter fiber run under [sw]; releasing [sw] kills and reaps the child —
       the session's lifetime {e is} [sw].
 
-      [env_override] rebinds names in the private child environment for this
-      session's child alone: an override replaces any existing binding of the
-      same name and otherwise appends, and the capability's own environment is
-      untouched — every other launch still receives it byte-for-byte. It
-      exists for a supervised child that must be handed a private runtime
-      handle of its own, such as a build watch's session-scoped
-      [XDG_RUNTIME_DIR]; it is not a general configuration channel, and the
-      sandbox policy is not consulted about the values. Raises
-      [Invalid_argument] on an empty name, a name containing ['='], or a name
-      or value containing a NUL — a programmer error, never a launch outcome.
+      [runtime_dir] rebinds [XDG_RUNTIME_DIR] in the private child environment
+      for this session's child alone — the capability's own environment is
+      untouched, and every other launch still receives it byte-for-byte. It
+      exists for a supervised child handed a private runtime handle of its
+      own, a build watch's session-scoped registry directory, and it pairs
+      with the sealed policy's session-run write grant; it is deliberately
+      not a general environment override, so the child-environment floor
+      stays unsubtractable through this seam by construction. Raises
+      [Invalid_argument] on a value containing a NUL — a programmer error,
+      never a launch outcome.
 
       The waiter and reaper are cancellation-safe fibers on Eio's own
       [Process.await]/[signal], never a systhread [waitpid] — a systhread

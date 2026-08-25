@@ -4,6 +4,6 @@
  ---------------------------------------------------------------------------*)
 
 module Store = Store
+module Watch = Watch
 module Instance = Rpc.Instance
-module Probe = Rpc.Probe
 module Mirror = Mirror

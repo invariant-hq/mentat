@@ -99,10 +99,11 @@ end
 (** Why an owned watch is being respawned. *)
 module Restart : sig
   type t = Exited of string | Hung
-  (** The type for restart causes: the watch died on its own — the payload is
-      its exit description — or it stopped answering liveness probes and was
-      killed. The distinction is rendered differently and counted separately.
-  *)
+  (** The type for restart causes: the watch's last life ended on its own —
+      the payload describes how, an exit status tailed with the watch's dying
+      words when any were captured, or a failure to spawn at all — or it
+      stopped answering liveness probes and was killed. The distinction is
+      rendered differently and counted separately. *)
 
   val equal : t -> t -> bool
   (** [equal a b] is [true] iff [a] and [b] are the same cause with the same

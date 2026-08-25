@@ -1,6 +1,6 @@
 (library
  (name mentat_ocaml_dune_rpc)
- (private_modules error rpc mirror)
+ (private_modules error rpc mirror watch)
  (libraries
   mentat_ocaml
   mentat_ocaml_toolchain

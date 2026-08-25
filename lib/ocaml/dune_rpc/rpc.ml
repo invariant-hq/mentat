@@ -484,19 +484,22 @@ module Instance = struct
   type mono = Mono : _ Eio.Time.Mono.t -> mono
 
   module Status = struct
-    type t = Absent | Connecting | Attached of { pid : int }
+    type t = Absent | Connecting | Attached of { pid : int; ours : bool }
 
     let equal (a : t) (b : t) =
       match (a, b) with
       | Absent, Absent | Connecting, Connecting -> true
-      | Attached a, Attached b -> Int.equal a.pid b.pid
+      | Attached a, Attached b ->
+          Int.equal a.pid b.pid && Bool.equal a.ours b.ours
       | (Absent | Connecting | Attached _), _ -> false
 
     let pp ppf (t : t) =
       match t with
       | Absent -> Format.pp_print_string ppf "absent"
       | Connecting -> Format.pp_print_string ppf "connecting"
-      | Attached { pid } -> Format.fprintf ppf "attached(pid %d)" pid
+      | Attached { pid; ours } ->
+          Format.fprintf ppf "attached(pid %d%s)" pid
+            (if ours then ", ours" else "")
   end
 
   module Snapshot = struct
@@ -511,7 +514,7 @@ module Instance = struct
       | Status.Absent ->
           Mentat_workspace.Health.Off Mentat_workspace.Health.Off.No_server
       | Status.Connecting -> Mentat_workspace.Health.Probing
-      | Status.Attached { pid } ->
+      | Status.Attached { pid; ours } ->
           let phase =
             match t.reading with
             | Some reading when not t.building ->
@@ -522,9 +525,17 @@ module Instance = struct
                   }
             | Some _ | None -> Mentat_workspace.Health.Phase.Building
           in
-          Mentat_workspace.Health.Live
-            { owner = Mentat_workspace.Health.Owner.Theirs pid; phase }
+          let owner =
+            if ours then Mentat_workspace.Health.Owner.Ours
+            else Mentat_workspace.Health.Owner.Theirs pid
+          in
+          Mentat_workspace.Health.Live { owner; phase }
   end
+
+  (* A supervisor's claim on its own watch: the endpoint the attach loop uses
+     instead of the registry, the child's host pid, and whether the requested
+     targets make the lint lane live. *)
+  type pin = { pin_endpoint : Endpoint.t; pin_pid : int; pin_lint : bool }
 
   (* Single-domain writes: every mutable field is assigned whole values with
      no suspension between a read and its dependent write, so snapshots are
@@ -535,10 +546,16 @@ module Instance = struct
     net : net;
     mono : mono;
     workspace : Workspace.t;
+    env : string -> string option;
     registry : Registry.t;
+    mutable pinned : pin option;
     mutable endpoint : Endpoint.t option;
     mutable endpoint_pid : int;
     mutable status : Status.t;
+    (* The lane fact of the attached watch, captured when the connection
+       opened: a pinned watch's supervisor states it (the targets are known),
+       a foreign watch's targets are unknown so the marker alone decides. *)
+    mutable attached_lint : bool;
     mutable store : Store.t;
   }
 
@@ -548,10 +565,13 @@ module Instance = struct
       net = Net net;
       mono = Mono mono;
       workspace;
+      env;
       registry = Registry.create ~env ();
+      pinned = None;
       endpoint = None;
       endpoint_pid = 0;
       status = Status.Absent;
+      attached_lint = true;
       store = Store.initial;
     }
 
@@ -563,6 +583,51 @@ module Instance = struct
     List.map
       (fun root -> Lpath.Abs.to_string (Workspace.Root.dir root))
       (Workspace.roots workspace)
+
+  let primary_root t =
+    match workspace_root_strings t.workspace with
+    | root :: _ -> root
+    | [] -> invalid_arg "workspace admits no root"
+
+  (* Where dune's server binds for a workspace, by dune's own convention. *)
+  let socket_path t =
+    Filename.concat (primary_root t)
+      (Filename.concat "_build" (Filename.concat ".rpc" "dune"))
+
+  let pin t ~pid ~lint =
+    let endpoint =
+      Endpoint.make ~root:(primary_root t) (Endpoint.Unix (socket_path t))
+    in
+    Log.info (fun m -> m "dune rpc endpoint pinned (pid %d)" pid);
+    t.pinned <- Some { pin_endpoint = endpoint; pin_pid = pid; pin_lint = lint }
+
+  let unpin t =
+    if Option.is_some t.pinned then
+      Log.info (fun m -> m "dune rpc endpoint unpinned");
+    t.pinned <- None
+
+  let probe_timeout_s = 1.0
+
+  let probe t =
+    let (Net net) = t.net in
+    let (Mono mono) = t.mono in
+    let endpoint =
+      Endpoint.make ~root:(primary_root t) (Endpoint.Unix (socket_path t))
+    in
+    Eio.Fiber.first
+      (fun () ->
+        let result =
+          Eio.Switch.run @@ fun sw ->
+          Connection.with_connection ~sw ~net endpoint ~f:(fun _ -> Ok ())
+        in
+        match result with Ok () -> true | Error _ -> false)
+      (fun () ->
+        Eio.Time.Mono.sleep mono probe_timeout_s;
+        false)
+
+  let mirror t ~pid =
+    Mirror.write ~env:t.env ~root:(primary_root t) ~pid
+      ~socket:(socket_path t)
 
   let normalize_abs path =
     match Lpath.Abs.of_string path with
@@ -600,7 +665,7 @@ module Instance = struct
 
   (* Registry IO runs on the attach fiber alone; only the resulting endpoint
      assignment is shared state. *)
-  let refresh t =
+  let refresh_registry t =
     let (Fs fs) = t.fs in
     let previous = t.endpoint in
     let note_lost () =
@@ -626,6 +691,19 @@ module Instance = struct
         t.endpoint <- Some endpoint;
         t.endpoint_pid <- Registry.pid entry;
         Ok (Some endpoint)
+
+  (* A pinned endpoint bypasses the registry entirely: the supervisor knows
+     its own watch's socket and pid, so our own readings never ride the
+     user's global registry — a broken or unwritable registry costs editor
+     discovery, never the agent's build visibility. Registry discovery
+     survives for foreign attach only. *)
+  let refresh t =
+    match t.pinned with
+    | Some pin ->
+        t.endpoint <- Some pin.pin_endpoint;
+        t.endpoint_pid <- pin.pin_pid;
+        Ok (Some pin.pin_endpoint)
+    | None -> refresh_registry t
 
   (* Test-only scaling: a hermetic cram drives a fake watch whose whole
      exchange completes in microseconds, so it shrinks the timing windows
@@ -667,7 +745,7 @@ module Instance = struct
     | Some i -> String.sub text 0 i
     | None -> text
 
-  let finding_of_diagnostic diagnostic =
+  let finding_of_diagnostic t diagnostic =
     let severity =
       match Mentat_ocaml.Diagnostic.severity diagnostic with
       | Mentat_ocaml.Diagnostic.Severity.Error ->
@@ -691,10 +769,12 @@ module Instance = struct
           ( Some (Workspace.Path.display (Mentat_ocaml.Location.path location)),
             Some (Format.asprintf "%a" Mentat_ocaml.Location.pp location) )
     in
-    (* Every slice-A watch is foreign — its targets unknown — so the marker
-       alone decides the lane. Ownership must thread the requested-lint fact
-       here. *)
-    Mentat_ocaml.Finding.classify ~lint:true ~severity ?path ?location ~head ()
+    (* The lane is a fact about the attached watch, captured when the
+       connection opened: a foreign watch's targets are unknown so the
+       marker alone decides; a supervised watch's supervisor stated whether
+       its requested targets make the lint lane live. *)
+    Mentat_ocaml.Finding.classify ~lint:t.attached_lint ~severity ?path
+      ?location ~head ()
 
   let diagnostic_events t connection events =
     let events =
@@ -707,7 +787,7 @@ module Instance = struct
                   Some
                     (`Add
                        ( Connection.diagnostic_id diagnostic,
-                         finding_of_diagnostic converted ))
+                         finding_of_diagnostic t converted ))
               | Error _ ->
                   (* A malformed diagnostic is dropped rather than faulting
                      the stream; the set self-corrects at the next build. *)
@@ -749,8 +829,16 @@ module Instance = struct
   let hold_subscriptions t connection =
     let* diagnostics = subscribe connection Drpc.Procedures.Poll.diagnostic in
     let* progress = subscribe connection Drpc.Procedures.Poll.progress in
+    (* The attachment's identity is captured here, once: a connection that
+       opened through the pin is the supervised watch — its owner and lane
+       fact hold for the connection's whole life, even past a later unpin. *)
+    let pinned = t.pinned in
+    t.attached_lint <-
+      (match pinned with Some pin -> pin.pin_lint | None -> true);
     fold_event t Store.Connected;
-    set_status t (Status.Attached { pid = t.endpoint_pid });
+    set_status t
+      (Status.Attached
+         { pid = t.endpoint_pid; ours = Option.is_some pinned });
     Eio.Fiber.both
       (fun () ->
         stream_loop diagnostics ~on_value:(diagnostic_events t connection))
@@ -792,15 +880,3 @@ module Instance = struct
     loop ()
 end
 
-module Probe = struct
-  let socket ~net ~clock ?(timeout_s = 1.0) ~root ~path () =
-    let endpoint = Endpoint.make ~root (Endpoint.Unix path) in
-    let attempt () =
-      Eio.Switch.run @@ fun sw ->
-      Connection.with_connection ~sw ~net endpoint ~f:(fun _ -> Ok ())
-    in
-    match Eio.Time.with_timeout_exn clock timeout_s attempt with
-    | Ok () -> true
-    | Error _ -> false
-    | exception Eio.Time.Timeout -> false
-end

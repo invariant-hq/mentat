@@ -9,19 +9,24 @@
     [dune build --watch]: probe before spawning (an already-answering server
     means a foreign watch to observe, never to fight for the lock), spawn the
     watch as a confined supervised session with a private runtime directory,
-    mirror its registry entry into the user's real registry so editor tooling
-    discovers it, restart it when it exits, and give up when successive
-    spawns die before coming up. The settled readings themselves are the
-    shared attach observer's business — the supervisor only makes sure there
-    is a watch for it to observe, and says honestly which state that effort
-    is in.
+    pin the watch's endpoint into the shared attach observer so its readings
+    never depend on the user's global registry, mirror its registry entry
+    into that registry so editor tooling discovers it, restart it when it
+    exits, and give up when successive spawns die before coming up. The
+    settled readings themselves are the observer's business — the supervisor
+    only makes sure there is a watch for it to observe, and says honestly
+    which state that effort is in. The rules it says them with are the pure
+    {!Mentat_ocaml_dune_rpc.Watch}; this module is their effectful shell.
 
     Construction is pure. {!engage} forks the supervising fiber; it is called
     at the first turn's preparation, never at boot, so opening a frontend on
-    a cold workspace starts no build. Stopping is the engagement switch's
-    release: the session is signalled (SIGTERM to its group, grace, SIGKILL)
-    so dune's own exit handlers unlink its socket and private registry entry,
-    and the mirror is removed host-side either way. *)
+    a cold workspace starts no build. Stopping is {!stop} — explicit during
+    instance shutdown, and registered on the engagement switch as the
+    backstop: the session is signalled (SIGTERM to its group, a daemon-scale
+    grace, SIGKILL) so dune's own exit handlers unlink its socket and private
+    registry entry where the signal reaches them, and the supervisor unlinks
+    both host-side where it does not — the sealed route's Linux backend
+    detaches the child from the signalled group. *)
 
 type t
 (** The type for build-watch supervisors. *)
@@ -35,62 +40,57 @@ module Mode : sig
 end
 
 val make :
-  net:_ Eio.Net.t ->
-  clock:_ Eio.Time.clock ->
-  mono:_ Eio.Time.Mono.t ->
+  rpc:Mentat_ocaml_dune_rpc.Instance.t ->
   capability:Mentat_workspace_io.t ->
+  mono:_ Eio.Time.Mono.t ->
+  sw:Eio.Switch.t ->
   root:Lpath.Abs.t ->
   run_id:string ->
   mode:Mode.t ->
   program:string list option ->
   targets:string list ->
-  env:(string -> string option) ->
-  observed:(unit -> Mentat_workspace.Health.t) ->
-  unit ->
   t
-(** [make ~net ~clock ~mono ~capability ~root ~run_id ~mode ~program ~targets
-     ~env ~observed ()] is a supervisor for the workspace rooted at [root].
+(** [make ~rpc ~capability ~mono ~sw ~root ~run_id ~mode ~program ~targets]
+    is a supervisor for the workspace rooted at [root].
 
-    [capability] is the sealed workspace the watch is spawned through — the
-    watch runs confined under the same policy as every other command.
-    [program] is the resolved dune argv prefix, or [None] when no dune
-    resolves on the command PATH (the supervisor then never spawns and
-    reports it). [targets] are the watch's build targets, each passed
-    verbatim after [build --root . --watch]. [run_id] names the private
-    runtime directory [<root>/.mentat/run/<run_id>] the watch's registry
-    entry is confined to. [env] is the ambient environment the host-side
-    registry mirror derives the user's real registry directory from.
-    [observed] projects the shared attach observer's current status; the
-    supervisor composes it with its own machine — an attached watch whose
-    advertised pid is the supervised child is reported as ours.
+    [rpc] is the workspace's shared attach observer: the supervisor pins a
+    spawned watch's endpoint into it, probes through it, and writes the
+    registry mirror through it. [capability] is the sealed workspace the
+    watch is spawned through — the watch runs confined under the same policy
+    as every other command. [sw] is the engagement switch: {!engage} forks
+    under it, and its release is the teardown backstop. [program] is the
+    watch's argv prefix, or [None] when no dune resolves on the command PATH
+    (the supervisor then never spawns and reports it); the launch itself
+    resolves the program on the sealed route, as every launch does. [targets]
+    are the watch's build targets, each passed verbatim after
+    [build --root . --watch]. [run_id] names the private runtime directory
+    [<root>/.mentat/run/<run_id>] the watch's registry entry is confined to.
 
     Construction performs no IO and spawns nothing. *)
 
-val engage : t -> sw:Eio.Switch.t -> unit
-(** [engage t ~sw] forks the supervising fiber under [sw] and registers the
-    teardown that signals a live session and removes the registry mirror when
-    [sw] releases. Idempotent: later calls do nothing. In {!Mode.Observe} the
-    fiber only records that nothing is spawned; attaching remains the
-    observer's continuous work. *)
+val engage : t -> unit
+(** [engage t] forks the supervising fiber under the engagement switch and
+    registers {!stop} as the switch's teardown backstop. Idempotent: later
+    calls do nothing. In {!Mode.Observe} nothing is forked and nothing is
+    claimed; attaching remains the observer's continuous work and the
+    observer's view is what {!health} reports. *)
 
 val health : t -> Mentat_workspace.Health.t
-(** [health t] is the watch status a frontend renders, without IO: the
-    supervisor's machine composed with the observer's view. An attached watch
-    always wins — reported as ours exactly when the supervisor's own child is
-    the one attached — and otherwise the machine speaks: probing, starting, a
-    restart with its cause, no dune on the PATH, nothing to observe, or given
-    up. Before {!engage} it is the observer's view alone. *)
-
-val owns_lock : t -> bool
-(** [owns_lock t] is [true] while a supervised session holds dune's build
-    lock — from spawn until the child's exit is observed. Lock-taking
-    one-shot tools consult it to refuse honestly instead of failing with
-    dune's own lock advice. *)
+(** [health t] is the watch status a frontend renders, without IO:
+    {!Mentat_ocaml_dune_rpc.Watch.compose} of the machine's word with the
+    observer's view. An attached watch always wins and carries its own
+    owner — ours exactly when the connection opened through the supervisor's
+    pin — and otherwise the machine speaks: probing, starting, a restart with
+    its cause, no dune on the PATH, or given up. Before {!engage}, and in
+    {!Mode.Observe}, it is the observer's view alone. *)
 
 val stop : t -> unit
-(** [stop t] signals a live supervised session (SIGTERM to its group, grace,
-    SIGKILL) and removes the registry mirror. Idempotent, and safe before
-    {!engage}. Call it during instance shutdown, before the engagement
-    switch releases, so the watch dies on SIGTERM — its own exit handlers
-    unlinking socket and private registry entry — rather than on the
-    switch's kill of still-running children. *)
+(** [stop t] ends supervision: the machine stops (a pending restart never
+    respawns), a live session is signalled (SIGTERM to its group, a
+    daemon-scale grace, SIGKILL), the observer is unpinned, and the registry
+    mirror, the private runtime directory, and — when nothing answers the
+    socket — the endpoint debris a signal-starved child left behind are all
+    removed host-side. Idempotent, and safe before {!engage}. Call it during
+    instance shutdown, before the engagement switch releases, so the watch
+    dies on SIGTERM rather than on the switch's kill of still-running
+    children. *)

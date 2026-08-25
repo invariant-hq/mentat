@@ -1620,12 +1620,12 @@ module Command = struct
           in
           match waited with Ok chunk -> chunk | Error `Timeout -> read t ~from)
 
-    let signal t =
+    let signal ?grace t =
       match t.live with
       | Exited _ | Terminated -> ()
       | Running ->
           t.signalled <- true;
-          Subprocess.terminate ~mono:t.clock t.proc;
+          Subprocess.terminate ~mono:t.clock ?grace t.proc;
           (* The reap (above) is complete and protected; settle the status now,
              so a cancellation during the best-effort tail drain still leaves a
              correct [Terminated] rather than a stale [Running]. *)
@@ -1675,9 +1675,14 @@ module Command = struct
         Array.of_list
           (kept @ List.map (fun (name, value) -> name ^ "=" ^ value) overrides)
 
-  let start_session t ~sw ?cwd ?(env_override = []) argv =
+  let start_session t ~sw ?cwd ?runtime_dir argv =
     let* prepared = prepare t ~sandbox:t.sandbox ~cwd argv in
-    let env = override_environment prepared.child_environment env_override in
+    let overrides =
+      match runtime_dir with
+      | None -> []
+      | Some dir -> [ ("XDG_RUNTIME_DIR", dir) ]
+    in
+    let env = override_environment prepared.child_environment overrides in
     match
       Session.launch ~sw ~proc_mgr:t.proc_mgr ~fs:t.fs ~env ~mono:t.mono
         ~cwd:prepared.cwd ~executable:prepared.executable prepared.lowered
