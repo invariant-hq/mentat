@@ -482,6 +482,7 @@ let stub_workspace : Client.Driver.Workspace.t =
   {
     Client.Driver.Workspace.glance = (fun () -> stub_unavailable ());
     dune = (fun () -> stub_unavailable ());
+    dune_control = (fun ~op:_ -> stub_unavailable ());
   }
 
 (* Custom /commands are not exercised by the engine suite: these responders are

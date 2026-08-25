@@ -17,6 +17,8 @@ commands resolve a different dune than the override.)
   $ mkdir stub-bin
   $ printf '#!/bin/sh\ntrue\n' > stub-bin/dune
   $ chmod +x stub-bin/dune
+  $ printf '#!/bin/sh\ntrue\n' > stub-bin/litany
+  $ chmod +x stub-bin/litany
   $ export PATH="$PWD/stub-bin:$PATH"
   $ export MENTAT_DUNE="$PWD/stub-bin/dune"
   $ touch dune-project
@@ -30,6 +32,8 @@ commands resolve a different dune than the override.)
   [PASS] toolchain: dune at $TESTCASE_ROOT/stub-bin/dune (via MENTAT_* override)
   [PASS] parity: commands resolve the same dune ($TESTCASE_ROOT/stub-bin/dune)
   [PASS] project: dune project
+  [PASS] dune: auto — spawns and supervises `dune build --watch @check`
+  [PASS] lint: litany check — resolves via PATH
   [PASS] diagnostics: $TESTCASE_ROOT/state/mentat (0 log(s), 0 crash report(s))
   $ MENTAT_MODEL=openai/gpt-5.6-sol mentat doctor >/dev/null 2>&1; echo $?
   0

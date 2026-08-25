@@ -31,6 +31,7 @@ type fate =
   | Toggle_thinking
   | Toggle_verbose
   | Open_review
+  | Dune_command
   | Init_project of string
   | Quit
   (* App-level key gestures, folded from the former keymap. *)
@@ -231,6 +232,10 @@ let all =
       ~category:Session ~scope:Chat ~phase:Idle_only ~echoes:false
       ~fate:Rename_session ();
     (* App-level slash commands (Global scope: offered in every palette). *)
+    entry ~id:"dune" ~slash:"/dune" ~title:"Dune watch"
+      ~description:"Restart or stop the supervised build watch"
+      ~argument_hint:"restart|stop" ~category:Session ~scope:Chat
+      ~phase:Anytime ~echoes:false ~fate:Dune_command ();
     entry ~id:"review" ~slash:"/review" ~title:"Review"
       ~description:"Review the worktree diff against the base" ~category:View
       ~scope:Global ~phase:Anytime ~echoes:false ~fate:Open_review ();

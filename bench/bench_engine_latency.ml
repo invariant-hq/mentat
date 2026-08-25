@@ -281,6 +281,7 @@ let stub_workspace : Client.Driver.Workspace.t =
   {
     Client.Driver.Workspace.glance = (fun () -> stub_unavailable ());
     dune = (fun () -> stub_unavailable ());
+    dune_control = (fun ~op:_ -> stub_unavailable ());
   }
 
 let no_user_commands () = Ok []

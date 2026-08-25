@@ -254,6 +254,9 @@ let default_workspace : Driver.Workspace.t =
   {
     Driver.Workspace.glance = (fun () -> Ok (None, Workspace.Health.Off Workspace.Health.Off.Disabled));
     dune = (fun () -> Ok (Workspace.Health.Off Workspace.Health.Off.Disabled));
+    dune_control =
+      (fun ~op:_ ->
+        Ok (Workspace.Health.Off Workspace.Health.Off.Disabled));
   }
 
 let make_driver ?(session = default_session) ?(accounts = default_accounts)
@@ -783,9 +786,9 @@ let introspection_group =
           (* 34 rows: Session 12 (15 fields minus streaming [follow],
              [running_processes], and the in-process-only [undo]), Accounts 4 (5
              minus [login]), Settings 5 (+set_default_model, +set_ui_theme),
-             Lifecycle 7, Review 5, Workspace 1. The two streaming endpoints are
+             Lifecycle 7, Review 5, Workspace 2. The two streaming endpoints are
              absent. *)
-          equal int ~msg:"row count matches the landed cones" 35
+          equal int ~msg:"row count matches the landed cones" 36
             (List.length Server.endpoint_names);
           is_false ~msg:"the feed is not a descriptor row"
             (List.mem "session.follow" Server.endpoint_names);
@@ -1020,6 +1023,9 @@ let endpoint_reps () =
       {|{}|},
       {|{"state":"live","ours":false,"pid":4242,"phase":"settled","errors":2,"warnings":1,"lint":3}|}
     );
+    ( "workspace.dune_control",
+      {|{"op":"restart"}|},
+      {|{"state":"starting"}|} );
     ("review.diff", {|"lib/a.ml"|}, {|null|});
   ]
 
@@ -2288,6 +2294,9 @@ let glance_recording_driver served label =
           served := label :: !served;
           Ok (None, Workspace.Health.Off Workspace.Health.Off.Disabled));
       dune = (fun () -> Ok (Workspace.Health.Off Workspace.Health.Off.Disabled));
+      dune_control =
+        (fun ~op:_ ->
+          Ok (Workspace.Health.Off Workspace.Health.Off.Disabled));
     }
   in
   make_driver ~workspace ()

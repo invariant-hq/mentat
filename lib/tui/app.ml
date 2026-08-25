@@ -115,6 +115,7 @@ type command =
   | Load_review_crs of request
   | Load_workspace_glance of request
   | Load_workspace_dune of request
+  | Dune_control of { request : request; op : [ `Restart | `Stop ] }
   | Load_running_processes of { request : request; session : Session.Id.t }
   | Submit_review_command of {
       request : request;
@@ -1205,6 +1206,12 @@ let issue_workspace_dune t =
   let request, t = fresh_request t in
   ({ t with dune_request = Some request }, Load_workspace_dune request)
 
+(* The verb answers with the status after it, so it rides the same request
+   slot and the same loaded message as the row's own query — one writer. *)
+let issue_dune_control op t =
+  let request, t = fresh_request t in
+  ({ t with dune_request = Some request }, Dune_control { request; op })
+
 (* The glance and the status query travel together at the event moments: the
    glance owns the worktree half, the dune query owns the row — one writer for
    each fact, so a slow glance can never regress a fresher status. *)
@@ -2137,7 +2144,7 @@ let command_targets_conversation command =
   | Command.Open_model | Command.Open_theme | Command.Open_sessions
   | Command.Open_settings _ | Command.Open_login | Command.Open_logout
   | Command.Switch_mode _ | Command.Toggle_thinking | Command.Toggle_verbose
-  | Command.Open_review | Command.Quit ->
+  | Command.Open_review | Command.Dune_command | Command.Quit ->
       false
   (* The folded app-level gestures target the whole application, never the main
      session: Interrupt drives the Escape ladder that closes a drill, so
@@ -2287,6 +2294,16 @@ let rec dispatch_command ?argument command t =
             ( reserve_session_follow ~request (Fork { parent = session }) t,
               [ Fork_session { request; session } ] ))
     | Command.Rewind_session -> open_rewind t
+    | Command.Dune_command -> (
+        match argument with
+        | Some "restart" ->
+            let t, verb = issue_dune_control `Restart t in
+            ({ t with flash = Some "dune: restarting the watch" }, [ verb ])
+        | Some "stop" ->
+            let t, verb = issue_dune_control `Stop t in
+            ({ t with flash = Some "dune: watch stopped" }, [ verb ])
+        | Some _ | None ->
+            ({ t with flash = Some "usage: /dune restart|stop" }, []))
     | Command.Undo_session -> (
         match t.active_session with
         | None -> ({ t with flash = Some "undo: no active session" }, [])
@@ -4898,7 +4915,7 @@ let dispatch_registry_impl ?argument command t =
   | Command.Open_theme | Command.Open_sessions | Command.Open_settings _
   | Command.Open_login | Command.Open_logout | Command.Switch_mode _
   | Command.Toggle_thinking | Command.Toggle_verbose | Command.Open_review
-  | Command.Init_project _ | Command.Quit ->
+  | Command.Dune_command | Command.Init_project _ | Command.Quit ->
       dispatch_command ?argument command t
 
 let () = dispatch_registry_hook := dispatch_registry_impl
@@ -6104,8 +6121,9 @@ let sessions_verb_of_fate = function
   | Command.Open_theme | Command.Open_sessions | Command.Open_settings _
   | Command.Open_login | Command.Open_logout | Command.Switch_mode _
   | Command.Toggle_thinking | Command.Toggle_verbose | Command.Open_review
-  | Command.Init_project _ | Command.Quit | Command.Interrupt
-  | Command.Toggle_expanded | Command.Transcript_page _ | Command.Focus_switch
+  | Command.Dune_command | Command.Init_project _ | Command.Quit
+  | Command.Interrupt | Command.Toggle_expanded | Command.Transcript_page _
+  | Command.Focus_switch
   | Command.History_search | Command.Edit_in_editor | Command.Open_palette
   | Command.Copy_selection | Command.Review_toggle | Command.Review_verdict
   | Command.Review_help | Command.Review_compose _ | Command.Review_remove
@@ -6129,8 +6147,9 @@ let review_verb_of_fate = function
   | Command.Open_theme | Command.Open_sessions | Command.Open_settings _
   | Command.Open_login | Command.Open_logout | Command.Switch_mode _
   | Command.Toggle_thinking | Command.Toggle_verbose | Command.Open_review
-  | Command.Init_project _ | Command.Quit | Command.Interrupt
-  | Command.Toggle_expanded | Command.Transcript_page _ | Command.Focus_switch
+  | Command.Dune_command | Command.Init_project _ | Command.Quit
+  | Command.Interrupt | Command.Toggle_expanded | Command.Transcript_page _
+  | Command.Focus_switch
   | Command.History_search | Command.Edit_in_editor | Command.Open_palette
   | Command.Copy_selection | Command.Sessions_fork | Command.Sessions_rename
   | Command.Sessions_archive | Command.Sessions_restore
@@ -6183,7 +6202,8 @@ let key_message t event =
     | Command.Open_theme | Command.Open_sessions | Command.Open_settings _
     | Command.Open_login | Command.Open_logout | Command.Switch_mode _
     | Command.Toggle_thinking | Command.Toggle_verbose | Command.Open_review
-    | Command.Copy_selection | Command.Init_project _ | Command.Quit ->
+    | Command.Dune_command | Command.Copy_selection | Command.Init_project _
+    | Command.Quit ->
         emit (Run_command command)
     | Command.Sessions_fork | Command.Sessions_rename | Command.Sessions_archive
     | Command.Sessions_restore | Command.Sessions_delete | Command.Review_toggle

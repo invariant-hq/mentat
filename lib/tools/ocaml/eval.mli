@@ -66,11 +66,12 @@
     [-noinit] prevents a user's toplevel startup file and printers from making
     results depend on ambient home state. Dune's directives remain authoritative
     for project libraries and package-managed compiler selection. The tool
-    deliberately does not build, clean, or start a Dune watch. While a build
-    watch — this session's or anyone else's — holds Dune's build lock the
-    tool refuses up front ([`Unavailable], naming the Merlin-backed
-    alternatives) rather than letting the setup command fail with Dune's own
-    lock advice.
+    deliberately does not build, clean, or start a Dune watch. A supervised
+    build watch is paused for the call's duration (the lease) and respawns
+    after it; only a foreign watch — another session's, not ours to pause —
+    makes the tool refuse up front ([`Unavailable], naming the
+    Merlin-backed alternatives) rather than letting the setup command fail
+    with Dune's own lock advice.
 
     One wall-clock budget covers both phases, including feeding standard input.
     The first phase captures at most {!max_directive_bytes} per stream and must
@@ -162,7 +163,7 @@ val make :
   Mentat_workspace_io.t ->
   clock:_ Eio.Time.Mono.t ->
   program:string list ->
-  ?dune_lock_held:(unit -> bool) ->
+  ?dune_lease:(unit -> [ `Free | `Held | `Leased of unit -> unit ]) ->
   unit ->
   Mentat_tool.t
 (** [make workspace_io ~clock ~program ()] is the immutable OCaml-eval tool
@@ -174,12 +175,13 @@ val make :
     [program] is an argv prefix, for example [["dune"]] or a resolved wrapper
     prefix. Each token must be non-empty and NUL-free.
 
-    [dune_lock_held] reports whether a build watch — supervised or foreign —
-    currently holds Dune's build lock (default: never). While it does, every
-    call fails
-    [`Unavailable] with text naming the lock and the Merlin-backed
-    alternatives — never Dune's own lock advice, which suggests deleting
-    [_build/.lock].
+    [dune_lease] is consulted at the lock-taking moment (default: [`Free],
+    run as-is). [`Leased release] means a supervised watch was paused for
+    this call — the tool runs and returns the lease via [release], failure
+    included. [`Held] means a foreign watch holds Dune's build lock: the
+    call fails [`Unavailable] with text naming the lock and the
+    Merlin-backed alternatives — never Dune's own lock advice, which
+    suggests deleting [_build/.lock].
 
     Raises [Invalid_argument] if [program] is empty or contains an invalid
     token. *)

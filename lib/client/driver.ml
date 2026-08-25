@@ -161,6 +161,9 @@ module Workspace = struct
         Mentat_protocol.Error.t )
       result;
     dune : unit -> (Mentat_workspace.Health.t, Mentat_protocol.Error.t) result;
+    dune_control :
+      op:[ `Restart | `Stop ] ->
+      (Mentat_workspace.Health.t, Mentat_protocol.Error.t) result;
   }
 end
 

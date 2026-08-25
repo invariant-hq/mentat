@@ -289,6 +289,14 @@ val workspace_dune :
     poll on a short tick while the watch is starting, building, or
     restarting. *)
 
+val workspace_dune_control :
+  t ->
+  op:[ `Restart | `Stop ] ->
+  (Mentat_workspace.Health.t, Mentat_protocol.Error.t) result
+(** [workspace_dune_control t ~op] drives the supervised build watch:
+    restart forgives a terminal state and cycles a fresh watch, stop ends
+    supervision for the session. Answers with the status after the verb. *)
+
 (** {1:commands User commands}
 
     Both queries are read-only snapshots re-read from disk per call, so a

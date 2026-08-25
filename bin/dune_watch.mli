@@ -104,6 +104,29 @@ val health : t -> Mentat_workspace.Health.t
     its cause, no dune on the PATH, or given up. Before {!engage}, and in
     {!Mode.Observe}, it is the observer's view alone. *)
 
+val pause : t -> [ `Leased | `Held | `Free ]
+(** [pause t] is the lease's opening half, called at the moment a
+    lock-taking one-shot (docs' [dune describe], eval's [dune ocaml top])
+    would otherwise be refused. A supervised child is signalled and the
+    call waits, bounded, until it has released dune's lock — [`Leased]; the
+    caller runs its one-shot and owes {!resume}. A foreign attachment is
+    [`Held]: nothing of ours to pause, the honest refusal stands. Nothing
+    live is [`Free]: run, nothing owed. Leases nest — the machine stays
+    parked between lives while any is out — and the respawn after the last
+    {!resume} rides the ordinary probe-first cycle, so a one-shot still
+    winding down is discovered, never fought. *)
+
+val resume : t -> unit
+(** [resume t] returns a lease. The machine leaves its park when the last
+    one comes back (and shutdown overrides a lost lease — a caller that
+    never resumes costs the session its watch, not its teardown). *)
+
+val restart : t -> unit
+(** [restart t] is the user's verb: forgive a terminal state — gave up, a
+    blocked file watcher, a stop — kill the current life if one runs, and
+    ensure exactly one supervising fiber cycles again from the probe. In
+    {!Mode.Observe}, or with no dune on the PATH, it does nothing. *)
+
 val stop : t -> unit
 (** [stop t] ends supervision: the machine stops (a pending restart never
     respawns), a live session is signalled (SIGTERM to its group, a

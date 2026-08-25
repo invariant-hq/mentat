@@ -61,6 +61,10 @@ val set_model : (Codecs.set_model, unit) t
 val set_permission_review : (Codecs.set_permission_review, unit) t
 val configuration : (unit, Mentat_config.Resolved.View.t) t
 val set_default_model : (Codecs.set_default_model, unit) t
+val dune_control : (Codecs.dune_control, Mentat_workspace.Health.t) t
+(** [workspace.dune_control] drives the supervised build watch — restart or
+    stop — answering with the status after the verb. *)
+
 val set_ui_theme : (Codecs.set_ui_theme, unit) t
 
 (** {1:lifecycle Lifecycle cone} *)

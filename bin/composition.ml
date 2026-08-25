@@ -776,6 +776,8 @@ module Probe = struct
     accounts : (Account.Discovery.t list, string) result;
     default_model : (Mentat_llm.Model.t, string) result;
     state : (string, string) result;
+    dune_lane : (string, string) result;
+    lint : (string, string) result;
   }
 
   let config (p : t) = p.config
@@ -788,6 +790,8 @@ module Probe = struct
   let trusted (p : t) = p.trusted
   let accounts (p : t) = p.accounts
   let default_model (p : t) = p.default_model
+  let dune_lane (p : t) = p.dune_lane
+  let lint (p : t) = p.lint
 end
 
 (* Run every stage independently, catching each failure into a field rather than
@@ -809,6 +813,8 @@ let probe ~stdenv ~sw ~cwd : Probe.t =
         accounts = Error message;
         default_model = Error message;
         state = Error message;
+        dune_lane = Error message;
+        lint = Error message;
       }
   | Ok dirs ->
       let root_result = stage_root ~cwd in
@@ -891,6 +897,71 @@ let probe ~stdenv ~sw ~cwd : Probe.t =
               Ok "dune project"
             else Error "no dune-project (OCaml tooling inactive)"
       in
+      (* The dune-lane posture, the same ladder the composition gates on —
+         trust, the project marker, the knob — read here without an
+         instance, so the row and the running lane cannot disagree on the
+         vocabulary. *)
+      let dune_lane =
+        match (config_resolved, project) with
+        | Error message, _ -> Error message
+        | _, Error reason -> Error reason
+        | Ok config, Ok _ ->
+            if not trusted then
+              Error "lane off: workspace not trusted"
+            else (
+              match Cfg.Resolved.get Cfg.Field.dune_watch config with
+              | "off" -> Error "lane off: dune.watch = off"
+              | "observe" -> Ok "observe — attaches to a running watch only"
+              | "auto" ->
+                  Ok
+                    (Printf.sprintf
+                       "auto — spawns and supervises `dune build --watch %s`"
+                       (String.concat " "
+                          (Cfg.Resolved.get Cfg.Field.dune_targets config)))
+              | other -> Error ("unknown dune.watch value: " ^ other))
+      in
+      (* The lint command's reachability, in the two worlds the gate reaches
+         it: directly on the ambient ladder, or through dune exec — whose
+         first run, not this probe, answers whether the lock provides it. *)
+      let lint =
+        match (config_resolved, dune_lane) with
+        | Error message, _ -> Error message
+        | _, Error reason -> Error ("lint rides the dune lane: " ^ reason)
+        | Ok config, Ok _ -> (
+            match Cfg.Resolved.get Cfg.Field.dune_lint_command config with
+            | [] -> Error "disabled (dune.lint_command = [])"
+            | program :: _ as command -> (
+                let rendered = String.concat " " command in
+                let env =
+                  environment
+                  |> List.map (fun (name, value) -> name ^ "=" ^ value)
+                  |> Array.of_list
+                in
+                let tc =
+                  Mentat_ocaml_toolchain.discover ~env
+                    ~workspace_root:
+                      (match root_result with
+                      | Ok root -> Some (Lpath.Abs.to_string root)
+                      | Error _ -> None)
+                in
+                match Mentat_ocaml_toolchain.find tc program with
+                | Some (_, source) ->
+                    Ok
+                      (Printf.sprintf "%s — resolves via %s" rendered
+                         (Mentat_ocaml_toolchain.Source.to_string source))
+                | None -> (
+                    match Mentat_ocaml_toolchain.find tc "dune" with
+                    | Some _ ->
+                        Ok
+                          (Printf.sprintf
+                             "%s — via dune exec; its first run answers \
+                              whether the project provides it"
+                             rendered)
+                    | None ->
+                        Error
+                          (Printf.sprintf "%s not found (lint lane off)"
+                             program))))
+      in
       let runtime = stage_runtime ~stdenv ~dirs in
       let catalog = Runtime.catalog runtime in
       let accounts =
@@ -920,6 +991,8 @@ let probe ~stdenv ~sw ~cwd : Probe.t =
         accounts;
         default_model;
         state = Ok (User_dirs.state_home dirs);
+        dune_lane;
+        lint;
       }
 
 let with_probe ~cwd f =
@@ -1734,6 +1807,17 @@ let workspace_cone t capability ~base_spec : Client.Driver.Workspace.t =
     Client.Driver.Workspace.glance =
       (fun () -> Ok (worktree_stats (), tooling_health ()));
     dune = (fun () -> Ok (tooling_health ()));
+    (* The user's verb over the supervised watch. With no supervisor — the
+       lane off, or nothing engaged yet — the verb is an observation only:
+       there is nothing to restart that the next drain would not build, and
+       nothing to stop. *)
+    dune_control =
+      (fun ~op ->
+        (match (t.dune_watch, op) with
+        | Some supervisor, `Restart -> Dune_watch.restart supervisor
+        | Some supervisor, `Stop -> Dune_watch.stop supervisor
+        | None, (`Restart | `Stop) -> ());
+        Ok (tooling_health ()));
   }
 
 (* The engine config callback. *)
@@ -2198,36 +2282,33 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
   let project_ocaml_edit_tools =
     [ Tools.Ocaml.Rename.make build_capability ~clock ~program:merlin_program ]
   in
-  (* The two lock-taking one-shots ask whether dune's build lock is held — by
-     any watch, not only a supervised one: dune's delete-the-lock advice is
-     byte-identical when the lock holder is the user's own terminal watch,
-     the common case for a developer running [dune build -w]. The health
-     projection spans both owners — [Live] is an attached watch, ours or
-     foreign, and [Starting] is our own spawn taking the lock. The closure
-     reads the instance field so tool construction never engages the
-     supervisor. *)
-  let dune_lock_held () =
+  (* The lock-taking one-shots' moment of truth. A supervised watch is
+     paused for the call — the lease — and respawns after it; a foreign
+     watch cannot be paused, so the honest refusal stands there (dune's
+     delete-the-lock advice is byte-identical whoever holds the lock, and a
+     foreign watch is the common case for a developer running their own
+     [dune build -w]). The closure reads the instance field so tool
+     construction never engages the supervisor. *)
+  let dune_lease () =
     match t.dune_watch with
+    | None -> `Free
     | Some supervisor -> (
-        match Dune_watch.health supervisor with
-        | Mentat_workspace.Health.Live _ | Mentat_workspace.Health.Starting ->
-            true
-        | Mentat_workspace.Health.Off _ | Mentat_workspace.Health.Probing
-        | Mentat_workspace.Health.Restarting _ ->
-            false)
-    | None -> false
+        match Dune_watch.pause supervisor with
+        | `Free -> `Free
+        | `Held -> `Held
+        | `Leased -> `Leased (fun () -> Dune_watch.resume supervisor))
   in
   let project_ocaml_nonediting_tools =
     [
       Tools.Ocaml.Type_at.make build_capability ~clock ~program:merlin_program;
       Tools.Ocaml.Eval.make build_capability ~clock ~program:dune_program
-        ~dune_lock_held ();
+        ~dune_lease ();
       Tools.Ocaml.Find_definitions.make build_capability ~clock
         ~program:merlin_program;
       Tools.Ocaml.Find_references.make build_capability ~clock
         ~program:merlin_program;
       Tools.Ocaml.Docs.make build_capability ~clock ~merlin_program
-        ~dune_program ~ocamlfind_program ~opam_switch_prefix ~dune_lock_held ();
+        ~dune_program ~ocamlfind_program ~opam_switch_prefix ~dune_lease ();
     ]
   in
   let read_core_tools =

@@ -444,35 +444,40 @@ let run_setup workspace_io ~clock ~program ~started ~directory ~address
       | Supervision_failed _ ->
           result_of_output output)
 
-(* The refusal while a build watch — supervised or foreign — holds dune's
-   build lock. The
+(* The refusal while a foreign build watch holds dune's build lock. The
    setup command ([dune ocaml top .]) takes that lock and would fail with
-   dune's own advice — which suggests deleting [_build/.lock], exactly what a
-   caller must never do while a watch runs — so the tool answers honestly and
-   names the lock-free alternatives instead. *)
+   dune's own advice — which suggests deleting [_build/.lock], exactly what
+   a caller must never do while a watch runs — so the tool answers honestly
+   and names the lock-free alternatives. A supervised watch is different:
+   the lease pauses it for the call's duration, and the refusal never
+   fires. *)
 let watch_lock_message =
-  "a build watch holds dune's build lock, and ocaml_eval needs `dune ocaml \
-   top`, which cannot run beside it; use ocaml_type_at, \
+  "another session's build watch holds dune's build lock, and ocaml_eval \
+   needs `dune ocaml top`, which cannot run beside it; use ocaml_type_at, \
    ocaml_find_definitions, or ocaml_docs path queries instead"
 
-let run workspace_io ~clock ~program ~dune_lock_held ~cancelled input =
+let run workspace_io ~clock ~program ~dune_lease ~cancelled input =
   if cancelled () then interrupted ()
-  else if dune_lock_held () then
-    Mentat_tool.Result.failed `Unavailable watch_lock_message
   else
-    let timeout_ms = Input.effective_timeout_ms input in
-    if timeout_ms > max_timeout_ms then
-      Mentat_tool.Result.failed `Invalid_input
-        ("timeout_ms must be <= " ^ string_of_int max_timeout_ms)
-    else
-      match resolve_directory workspace_io input with
-      | Error result -> result
-      | Ok (directory, address) ->
-          if cancelled () then interrupted ()
-          else
-            let started = Eio.Time.Mono.now clock in
-            run_setup workspace_io ~clock ~program ~started ~directory ~address
-              ~timeout_ms ~cancelled input
+    let proceed () =
+      let timeout_ms = Input.effective_timeout_ms input in
+      if timeout_ms > max_timeout_ms then
+        Mentat_tool.Result.failed `Invalid_input
+          ("timeout_ms must be <= " ^ string_of_int max_timeout_ms)
+      else
+        match resolve_directory workspace_io input with
+        | Error result -> result
+        | Ok (directory, address) ->
+            if cancelled () then interrupted ()
+            else
+              let started = Eio.Time.Mono.now clock in
+              run_setup workspace_io ~clock ~program ~started ~directory
+                ~address ~timeout_ms ~cancelled input
+    in
+    match dune_lease () with
+    | `Held -> Mentat_tool.Result.failed `Unavailable watch_lock_message
+    | `Free -> proceed ()
+    | `Leased release -> Fun.protect ~finally:release proceed
 
 let permissions execution _input =
   [
@@ -495,12 +500,12 @@ let validate_program program =
          ^ " must not contain NUL"))
     program
 
-let make workspace_io ~clock ~program ?(dune_lock_held = fun () -> false) () =
+let make workspace_io ~clock ~program ?(dune_lease = fun () -> `Free) () =
   validate_program program;
   let execution = Confinement.confined workspace_io in
   Mentat_tool.make ~name ~description:Mentat_prompts.Tools.ocaml_eval
     ~input:Input.contract ~output:encode_output
     ~permissions:(permissions execution)
     ~run:(fun ~cancelled input ->
-      run workspace_io ~clock ~program ~dune_lock_held ~cancelled input)
+      run workspace_io ~clock ~program ~dune_lease ~cancelled input)
     ()

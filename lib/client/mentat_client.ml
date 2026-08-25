@@ -127,6 +127,10 @@ let workspace_dune t =
   protect "workspace_dune" (fun () ->
       (workspace_cone t).Driver.Workspace.dune ())
 
+let workspace_dune_control t ~op =
+  protect "workspace_dune_control" (fun () ->
+      (workspace_cone t).Driver.Workspace.dune_control ~op)
+
 (* User commands. The responders are required injection points into [make],
    parallel to the [Driver.t] cones, rather than [Driver.t] fields — a backend
    that builds a driver without a client-side command cone (the daemon, until it

@@ -79,6 +79,10 @@ type fate =
   | Toggle_thinking  (** Toggle rendering of thinking summaries. *)
   | Toggle_verbose  (** Toggle expanded reasoning detail. *)
   | Open_review  (** Open the review surface. *)
+  | Dune_command
+      (** Drive the supervised build watch: [/dune restart] forgives a
+          terminal state and cycles a fresh watch, [/dune stop] ends
+          supervision for the session. *)
   | Init_project of string
       (** Submit the carried AGENTS.md initialization prompt as a Build turn. *)
   | Quit  (** Request process exit through the shell's guarded quit flow. *)

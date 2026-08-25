@@ -1,23 +1,24 @@
 The lint runner: after each green build settle the configured lint command
 runs from the workspace root, its compiler-shaped output parses into the
 lint lane, and the lane's changes reach the model beside the build lane's.
-A fake litany on PATH prints scripted blocks and exits per script, so every
+A fake linter on PATH prints scripted blocks and exits per script, so every
 arc runs hermetically; the fake dune serves the watch protocol as in
 dune-own.t.
 
   $ use_trusted_workspace
+  $ mentat config set dune.lint_command '["lintprobe", "check"]' >/dev/null
   $ touch dune-project
   $ use_fake_dune
   $ export MENTAT_DUNE_RPC_QUIET_S=0
   $ export MENTAT_DUNE_RPC_RECONNECT_S=0.25
-  $ cat > fake-bin/litany <<'SH'
+  $ cat > fake-bin/lintprobe <<'SH'
   > #!/bin/sh
   > echo "$@" >> "$PWD/fake-litany-argv"
   > cat "$PWD/lint-output" 2>/dev/null
   > code=$(cat "$PWD/lint-exit" 2>/dev/null || echo 0)
   > exit "$code"
   > SH
-  $ chmod +x fake-bin/litany
+  $ chmod +x fake-bin/lintprobe
   $ printf clean > dune-state
   $ cat > lint-output <<'EOF'
   > File "lib/inventory.ml", line 5, characters 17-40:
@@ -83,16 +84,16 @@ where a dev-dependency's binary lives in the lock universe: the gate falls
 back to the dune exec prefix, and the shim resolves the target from its
 fake lock bin.
 
-  $ rm fake-bin/litany fake-litany-argv
+  $ rm fake-bin/lintprobe fake-litany-argv
   $ mkdir -p fake-lock-bin
-  $ cat > fake-lock-bin/litany <<'SH'
+  $ cat > fake-lock-bin/lintprobe <<'SH'
   > #!/bin/sh
   > echo "$@" >> "$PWD/fake-litany-argv"
   > cat "$PWD/lint-output" 2>/dev/null
   > code=$(cat "$PWD/lint-exit" 2>/dev/null || echo 0)
   > exit "$code"
   > SH
-  $ chmod +x fake-lock-bin/litany
+  $ chmod +x fake-lock-bin/lintprobe
   $ cat > lint-output <<'EOF'
   > File "lib/inventory.ml", line 5, characters 17-40:
   > Warning 12 [needless-list-length]: comparison through List.length is a needless emptiness test [needless-list-length]
@@ -107,7 +108,7 @@ fake lock bin.
   $ MENTAT_DUNE_WATCH=auto mentat run "lockbin prompt" --cwd "$PWD" --permission bypass --id lockbin-turn 2>/dev/null
   lock linted
   $ wait_fake_server
-  $ grep -c 'exec -- litany check' fake-dune-exec-argv
+  $ grep -c 'exec -- lintprobe check' fake-dune-exec-argv
   1
   $ cat fake-litany-argv
   check
@@ -117,7 +118,7 @@ and the lane goes off for the session after that one run: a second green
 settle triggers nothing, no findings are ever stated, and the build lane is
 untouched.
 
-  $ rm -f fake-lock-bin/litany fake-litany-argv fake-dune-exec-argv
+  $ rm -f fake-lock-bin/lintprobe fake-litany-argv fake-dune-exec-argv
   $ printf clean > dune-state
   $ cat > nolint.jsonl <<'JSONL'
   > {"expect":{"body_contains":["nolint prompt"]},"response":{"id":"n1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-n1","call_id":"call-n1","name":"shell","arguments":"{\"command\":\"for i in $(seq 100); do test -S _build/.rpc/dune && break; sleep 0.1; done; sleep 2\",\"description\":\"wait for the watch and the doomed lint run\"}"}]}}
@@ -132,7 +133,7 @@ untouched.
 One doomed run, then silence: the not-found answer took the lane off, so
 the second green settle asked nothing.
 
-  $ grep -c 'exec -- litany check' fake-dune-exec-argv
+  $ grep -c 'exec -- lintprobe check' fake-dune-exec-argv
   1
   $ test -f fake-litany-argv
   [1]

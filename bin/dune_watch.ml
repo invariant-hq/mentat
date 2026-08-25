@@ -36,6 +36,12 @@ type t = {
   mutable stalled : bool;
   mutable notices : Mentat_workspace.Notice.t list;
   mutable teardown_hooked : bool;
+  (* Outstanding leases: while positive, the machine parks between lives so
+     a lock-taking one-shot can run where the watch just was. *)
+  mutable leases : int;
+  (* The supervising fiber's liveness: a terminal word (gave up, blocked) or
+     a stop ends it, and a restart must fork a fresh one exactly then. *)
+  mutable cycling : bool;
 }
 
 (* The spawn-to-respawn pause, and the cadence at which a foreign watch's
@@ -72,6 +78,8 @@ let make ~rpc ~capability ~mono ~sw ~root ~run_id ~mode ~program ~targets =
     stalled = false;
     notices = [];
     teardown_hooked = false;
+    leases = 0;
+    cycling = false;
   }
 
 let sleep t seconds =
@@ -454,6 +462,7 @@ let live_once t session =
                 end
                 else incr self_test_strikes
           end;
+          if t.leases > 0 && Option.is_none !verdict then kill `Leased;
           (* A reported stall verifies once; between lives, or before the
              watch is up, the report has no forwarded build behind it and is
              dropped. *)
@@ -478,7 +487,9 @@ let live_once t session =
   remove_mirror t;
   let cause =
     match !verdict with
-    | Some verdict -> (verdict :> [ `Blocked | `Hung | `Stopped | `Exited of string ])
+    | Some verdict ->
+        (verdict
+          :> [ `Blocked | `Hung | `Leased | `Stopped | `Exited of string ])
     | None -> (
         match exit_cause session !tail with
         | `Terminated -> `Stopped
@@ -536,6 +547,22 @@ and spawn t deaths =
         if not t.stopped then
           match cause with
           | `Stopped -> ()
+          | `Leased ->
+              (* Parked for a lease: the lock is a one-shot's for a moment.
+                 No death is counted and nothing is announced beyond
+                 Starting — the watch is deliberately down and coming
+                 back. *)
+              set_word t
+                (Mentat_ocaml_dune_rpc.Watch.Announce
+                   Mentat_workspace.Health.Starting);
+              let rec park () =
+                if t.leases > 0 && not t.stopped then begin
+                  sleep t 0.1;
+                  park ()
+                end
+              in
+              park ();
+              cycle t 0
           | `Blocked ->
               queue_notice t (blocked_notice ());
               set_word t
@@ -601,8 +628,64 @@ let engage t =
               (Mentat_ocaml_dune_rpc.Watch.Announce
                  (Health.Off Health.Off.No_dune))
         | Some _ ->
+            t.cycling <- true;
             Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
                 sweep_stale_run_dirs t;
                 cycle t 0;
+                t.cycling <- false;
                 `Stop_daemon))
   end
+
+(* The lease: park the machine and hand the lock to a one-shot. [pause]
+   answers what the lock moment is — ours (the child is signalled and the
+   caller waits here, bounded, until it has released the lock), a foreign
+   watch's (nothing ours to pause; the caller refuses as before), or
+   nobody's. Leases nest: the machine stays parked while any is out. *)
+let pause t =
+  if t.stopped then `Free
+  else
+    match t.session with
+    | Some _ ->
+        t.leases <- t.leases + 1;
+        let rec wait remaining =
+          if Option.is_none t.session then ()
+          else if remaining <= 0 then ()
+          else begin
+            sleep t 0.05;
+            wait (remaining - 1)
+          end
+        in
+        (* The life loop notices the lease within a poll and the child dies
+           on the daemon-scale grace; the margin covers both. *)
+        wait 100;
+        `Leased
+    | None -> (
+        match health t with
+        | Mentat_workspace.Health.Live _ -> `Held
+        | _ -> `Free)
+
+let resume t = t.leases <- max 0 (t.leases - 1)
+
+(* A user's restart: forgive a terminal word — gave up, blocked, a stop —
+   kill the current life if one runs, and make sure exactly one supervising
+   fiber cycles. In observe mode there is nothing to restart. *)
+let restart t =
+  match t.mode with
+  | Mode.Observe -> ()
+  | Mode.Auto ->
+      if Option.is_none t.program then ()
+      else begin
+        t.stopped <- false;
+        (match t.session with
+        | Some session ->
+            t.session <- None;
+            Command.Session.signal ~grace:stop_grace_s session
+        | None -> ());
+        if not t.cycling then begin
+          t.cycling <- true;
+          Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
+              cycle t 0;
+              t.cycling <- false;
+              `Stop_daemon)
+        end
+      end

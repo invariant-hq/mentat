@@ -131,6 +131,12 @@ let checks_of_probe probe =
   (match Composition.Probe.project probe with
   | Ok detail -> add "project" Pass detail
   | Error reason -> add "project" Warn reason);
+  (match Composition.Probe.dune_lane probe with
+  | Ok detail -> add "dune" Pass detail
+  | Error reason -> add "dune" Warn reason);
+  (match Composition.Probe.lint probe with
+  | Ok detail -> add "lint" Pass detail
+  | Error reason -> add "lint" Warn reason);
   (* Last: the checks above are readiness, this one is a pointer to where the
      evidence lives when readiness was not the problem. *)
   (match Composition.Probe.state probe with

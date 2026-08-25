@@ -280,6 +280,15 @@ let set_ui_theme : set_ui_theme Jsont.t =
   |> Jsont.Object.mem "theme" Jsont.string ~enc:(fun r -> r.sut_theme)
   |> Jsont.Object.finish
 
+type dune_control = { dc_op : [ `Restart | `Stop ] }
+
+let dune_control : dune_control Jsont.t =
+  Jsont.Object.map ~kind:"dune_control request" (fun dc_op -> { dc_op })
+  |> Jsont.Object.mem "op"
+       (Jsont.enum ~kind:"dune op" [ ("restart", `Restart); ("stop", `Stop) ])
+       ~enc:(fun r -> r.dc_op)
+  |> Jsont.Object.finish
+
 type set_permission_review = {
   spr_session : Mentat_session.Id.t;
   spr_review : Mentat_permission.Review_behavior.t;

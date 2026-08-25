@@ -77,6 +77,7 @@ let workspace : Driver.Workspace.t =
     Driver.Workspace.glance =
       (fun () -> unavailable "workspace glance is unused");
     dune = (fun () -> unavailable "workspace dune is unused");
+    dune_control = (fun ~op:_ -> unavailable "workspace dune_control is unused");
   }
 
 let lifecycle document : Driver.Lifecycle.t =

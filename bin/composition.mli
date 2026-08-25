@@ -451,6 +451,16 @@ module Probe : sig
   val default_model : t -> (Mentat_llm.Model.t, string) result
   (** [default_model t] is the resolved main model, or the reason it could not
       resolve (including an unresolved configuration). *)
+
+  val dune_lane : t -> (string, string) result
+  (** [dune_lane t] is the build-watch posture the composition would gate —
+      the mode and its targets — or the reason the lane is off (untrusted,
+      no project marker, the knob). *)
+
+  val lint : t -> (string, string) result
+  (** [lint t] is the lint command and how it is reached — directly, or via
+      [dune exec] whose first run answers availability — or why the lane is
+      off. *)
 end
 
 val with_probe :

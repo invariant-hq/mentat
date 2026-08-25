@@ -3132,6 +3132,9 @@ let client (fixture : fixture) =
     {
       Driver.Workspace.glance = (fun () -> Ok fixture.glance);
       dune = (fun () -> Ok (snd fixture.glance));
+      dune_control =
+        (fun ~op:_ ->
+          Ok (Mentat_workspace.Health.Off Mentat_workspace.Health.Off.Disabled));
     }
   in
   let user_commands () = Ok (List.map fst fixture.user_commands) in

@@ -896,6 +896,8 @@ let default_workspace : Driver.Workspace.t =
   {
     Driver.Workspace.glance = (fun () -> fail "glance: not scripted");
     dune = (fun () -> fail "workspace dune: not scripted");
+    dune_control =
+      (fun ~op:_ -> fail "workspace dune_control: not scripted");
   }
 
 let client_of ?(session = default_session) ?(accounts = default_accounts)

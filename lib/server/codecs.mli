@@ -119,6 +119,12 @@ type set_ui_theme = { sut_theme : string }
 
 val set_ui_theme : set_ui_theme Jsont.t
 
+type dune_control = { dc_op : [ `Restart | `Stop ] }
+
+val dune_control : dune_control Jsont.t
+(** The [workspace.dune_control] request: the user verb over the supervised
+    build watch. *)
+
 type set_permission_review = {
   spr_session : Mentat_session.Id.t;
   spr_review : Mentat_permission.Review_behavior.t;
