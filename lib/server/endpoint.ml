@@ -478,6 +478,18 @@ let glance : (unit, Textdiff.stats option * Mentat_workspace.Health.t) t =
           ());
   }
 
+let dune_status : (unit, Mentat_workspace.Health.t) t =
+  {
+    name = "workspace.dune";
+    idempotency = By_value;
+    request = Codecs.empty;
+    response = Mentat_workspace.Health.jsont;
+    invoke =
+      (fun d () ->
+        d.Mentat_client.Driver.workspace.Mentat_client.Driver.Workspace.dune
+          ());
+  }
+
 (* The whole single-shot table, packed for the dispatcher's by-name lookup. *)
 
 let table : any list =
@@ -516,6 +528,7 @@ let table : any list =
     Any review_crs;
     Any review_compose;
     Any glance;
+    Any dune_status;
   ]
 
 let name_of (Any d) = d.name

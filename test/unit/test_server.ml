@@ -251,7 +251,10 @@ let default_review : Driver.Review.t =
   }
 
 let default_workspace : Driver.Workspace.t =
-  { Driver.Workspace.glance = (fun () -> Ok (None, Workspace.Health.Unknown)) }
+  {
+    Driver.Workspace.glance = (fun () -> Ok (None, Workspace.Health.Off Workspace.Health.Off.Disabled));
+    dune = (fun () -> Ok (Workspace.Health.Off Workspace.Health.Off.Disabled));
+  }
 
 let make_driver ?(session = default_session) ?(accounts = default_accounts)
     ?(settings = default_settings) ?(lifecycle = default_lifecycle)
@@ -566,8 +569,8 @@ let reads_group =
                    (readiness remote));
               (* workspace_glance. *)
               (match Client.workspace_glance remote with
-              | Ok (None, Workspace.Health.Unknown) -> ()
-              | _ -> fail "workspace_glance should be (None, Unknown)");
+              | Ok (None, Workspace.Health.Off Workspace.Health.Off.Disabled) -> ()
+              | _ -> fail "workspace_glance should be (None, Off Disabled)");
               (* sessions — the partial-diagnostics list crosses whole. *)
               match
                 Client.sessions remote
@@ -782,7 +785,7 @@ let introspection_group =
              minus [login]), Settings 5 (+set_default_model, +set_ui_theme),
              Lifecycle 7, Review 5, Workspace 1. The two streaming endpoints are
              absent. *)
-          equal int ~msg:"row count matches the landed cones" 34
+          equal int ~msg:"row count matches the landed cones" 35
             (List.length Server.endpoint_names);
           is_false ~msg:"the feed is not a descriptor row"
             (List.mem "session.follow" Server.endpoint_names);
@@ -1011,6 +1014,12 @@ let endpoint_reps () =
       {|{"scope":"cwd","lifecycles":[]}|},
       {|{"summaries":[],"diagnostics":[]}|} );
     ("review.crs", {|{}|}, {|[]|});
+    (* A Live/Theirs/Settled failing value, so every member of the flat watch
+       status object is pinned. *)
+    ( "workspace.dune",
+      {|{}|},
+      {|{"state":"live","reason":"","pid":4242,"ours":false,"phase":"settled","errors":2,"warnings":1,"lint":3}|}
+    );
     ("review.diff", {|"lib/a.ml"|}, {|null|});
   ]
 
@@ -2277,7 +2286,8 @@ let glance_recording_driver served label =
       Driver.Workspace.glance =
         (fun () ->
           served := label :: !served;
-          Ok (None, Workspace.Health.Unknown));
+          Ok (None, Workspace.Health.Off Workspace.Health.Off.Disabled));
+      dune = (fun () -> Ok (Workspace.Health.Off Workspace.Health.Off.Disabled));
     }
   in
   make_driver ~workspace ()

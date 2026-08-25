@@ -4,7 +4,7 @@
  ---------------------------------------------------------------------------*)
 
 open Windtrap
-module Health = Mentat_ocaml_dune_rpc.Instance.Health
+module Instance = Mentat_ocaml_dune_rpc.Instance
 
 let realpath_or path =
   match Unix.realpath path with p -> p | exception Unix.Unix_error _ -> path
@@ -62,17 +62,23 @@ let spawn_watch ~sw ~env ~toolchain ~dune ~root =
       | () | (exception Unix.Unix_error _) -> ());
   process
 
-(* Poll [build_health] until it settles on a verdict [wanted] accepts, or the
-   deadline passes; return the last verdict seen. A found-but-not-yet-built
-   watch reports [Disconnected]/[Clean] transiently, so we wait for the target
-   rather than trusting the first concrete answer. *)
-let await_verdict ~clock instance ~wanted ~timeout_s =
+(* Run [attach] in a sibling fiber for the duration of [f]: the loop never
+   returns, so the race ends it when [f]'s branch finishes. *)
+let with_attached ~eio_env instance f =
+  Eio.Fiber.first
+    (fun () ->
+      Instance.attach instance ~mono:(Eio.Stdenv.mono_clock eio_env);
+      assert false)
+    f
+
+(* Poll [snapshot] until [wanted] accepts it or the deadline passes; return the
+   last snapshot seen. A found-but-not-yet-built watch is transiently detached
+   or building, so we wait for the target rather than trusting the first. *)
+let await_snapshot ~clock instance ~wanted ~timeout_s =
   let deadline = Eio.Time.now clock +. timeout_s in
   let rec loop () =
-    let verdict =
-      Mentat_ocaml_dune_rpc.Instance.build_health instance ~clock ()
-    in
-    if wanted verdict || Eio.Time.now clock >= deadline then verdict
+    let snapshot = Instance.snapshot instance in
+    if wanted snapshot || Eio.Time.now clock >= deadline then snapshot
     else begin
       Eio.Time.sleep clock 0.1;
       loop ()
@@ -80,46 +86,53 @@ let await_verdict ~clock instance ~wanted ~timeout_s =
   in
   loop ()
 
-(* Hermetic: with no watch registered for a fresh workspace, [build_health]
-   returns the concrete [Disconnected] verdict promptly — it never blocks. This
-   is the registry-only path (no connection attempt). *)
-let build_health_disconnected () =
+(* Hermetic: with no watch registered for a fresh workspace, the snapshot is
+   [Absent] with no reading — before the attach loop runs, and after it has
+   polled the registry for a while. The loop never blocks its caller: the
+   snapshot is a memory read on any fiber. *)
+let snapshot_absent () =
   with_temp_dir @@ fun root ->
   make_project ~root ~broken:true;
   Eio_main.run @@ fun eio_env ->
   let instance =
-    Mentat_ocaml_dune_rpc.Instance.create ~fs:(Eio.Stdenv.fs eio_env)
-      ~net:(Eio.Stdenv.net eio_env) ~workspace:(workspace_at root) ()
+    Instance.create ~fs:(Eio.Stdenv.fs eio_env) ~net:(Eio.Stdenv.net eio_env)
+      ~workspace:(workspace_at root) ()
   in
+  let before = Instance.snapshot instance in
+  is_true ~msg:"absent before attach"
+    (Instance.Watch.equal before.Instance.Snapshot.status Instance.Watch.Absent);
+  is_true ~msg:"no reading before attach"
+    (Option.is_none before.Instance.Snapshot.reading);
   let clock = Eio.Stdenv.clock eio_env in
-  let verdict =
-    Eio.Time.with_timeout_exn clock 5.0 (fun () ->
-        Mentat_ocaml_dune_rpc.Instance.build_health instance ~clock ())
-  in
-  is_true
-    ~msg:
-      (Format.asprintf "no watch registered => Disconnected, got %a" Health.pp
-         verdict)
-    (Health.equal verdict Health.Disconnected)
+  with_attached ~eio_env instance (fun () ->
+      let snapshot =
+        await_snapshot ~clock instance ~timeout_s:1.0 ~wanted:(fun _ -> false)
+      in
+      is_true
+        ~msg:
+          (Format.asprintf "no watch registered => Absent, got %a"
+             Instance.Watch.pp snapshot.Instance.Snapshot.status)
+        (Instance.Watch.equal snapshot.Instance.Snapshot.status
+           Instance.Watch.Absent))
 
-(* Live end-to-end: connect the RPC client to a real running Dune and confirm
-   the handshake completes and the verdict is truthful — [Failing] for a
-   type-erroring project, [Clean] for a good one.
+(* Live end-to-end: attach to a real running Dune and confirm the handshake,
+   the subscriptions, and the settled reading are truthful — a failing verdict
+   for a type-erroring project, a clean one for a good project.
 
    Opt-in via [MENTAT_DUNE_RPC_LIVE_TEST]: it spawns real [dune build --watch]
    processes and reads Dune's XDG RPC registry, which the [dune runtest] sandbox
    isolates (registry entries a spawned watch writes are not observable from
    inside it). Left ungated it would flake or fail there, so the default suite
    skips it; a developer runs it directly with a compiler on PATH
-   ([MENTAT_DUNE_RPC_LIVE_TEST=1 dune exec test/unit/test_ocaml_dune.exe]) to
-   exercise the real client handshake — the concern the reducible unit tests
-   cannot reach. *)
-let build_health_live () =
+   ([MENTAT_DUNE_RPC_LIVE_TEST=1 dune exec test/unit/test_ocaml_dune_rpc.exe])
+   to exercise the real client handshake and long-polls — the concern the
+   reducible unit tests cannot reach. *)
+let attach_live () =
   match Sys.getenv_opt "MENTAT_DUNE_RPC_LIVE_TEST" with
   | None | Some "" | Some "0" ->
       Printf.eprintf
-        "[skip] live Dune RPC build-health: set MENTAT_DUNE_RPC_LIVE_TEST=1 \
-         (with dune + ocamlc discoverable) to exercise the live handshake\n\
+        "[skip] live Dune RPC attach: set MENTAT_DUNE_RPC_LIVE_TEST=1 (with \
+         dune + ocamlc discoverable) to exercise the live handshake\n\
          %!"
   | Some _ -> (
       let toolchain =
@@ -135,31 +148,49 @@ let build_health_live () =
           let fs = Eio.Stdenv.fs eio_env in
           let net = Eio.Stdenv.net eio_env in
           let clock = Eio.Stdenv.clock eio_env in
+          let settled_verdict (snapshot : Instance.Snapshot.t) =
+            match snapshot.Instance.Snapshot.reading with
+            | Some reading when not snapshot.Instance.Snapshot.building ->
+                Some (Mentat_workspace.Build_change.Reading.verdict reading)
+            | Some _ | None -> None
+          in
           let check ~broken ~wanted ~label =
             with_temp_dir @@ fun root ->
             make_project ~root ~broken;
             Eio.Switch.run @@ fun sw ->
             let _watch = spawn_watch ~sw ~env:eio_env ~toolchain ~dune ~root in
             let instance =
-              Mentat_ocaml_dune_rpc.Instance.create ~fs ~net
-                ~workspace:(workspace_at root) ()
+              Instance.create ~fs ~net ~workspace:(workspace_at root) ()
             in
-            let verdict =
-              await_verdict ~clock instance ~wanted ~timeout_s:20.0
-            in
-            is_true
-              ~msg:
-                (Format.asprintf "%s: expected %s, got %a" label
-                   (if broken then "Failing" else "Clean")
-                   Health.pp verdict)
-              (wanted verdict)
+            with_attached ~eio_env instance (fun () ->
+                let snapshot =
+                  await_snapshot ~clock instance ~timeout_s:20.0
+                    ~wanted:(fun snapshot ->
+                      match settled_verdict snapshot with
+                      | Some verdict -> wanted verdict
+                      | None -> false)
+                in
+                is_true
+                  ~msg:
+                    (Format.asprintf "%s: expected %s, got %a / %s" label
+                       (if broken then "Failing" else "Clean")
+                       Instance.Watch.pp snapshot.Instance.Snapshot.status
+                       (match settled_verdict snapshot with
+                       | Some verdict ->
+                           Format.asprintf "%a"
+                             Mentat_workspace.Health.Verdict.pp verdict
+                       | None -> "no settled reading"))
+                  (match settled_verdict snapshot with
+                  | Some verdict -> wanted verdict
+                  | None -> false))
           in
           check ~broken:true ~label:"broken project" ~wanted:(function
-            | Health.Failing n -> n >= 1
-            | _ -> false);
+            | Mentat_workspace.Health.Verdict.Failing { errors; _ } ->
+                errors >= 1
+            | Mentat_workspace.Health.Verdict.Clean -> false);
           check ~broken:false ~label:"clean project" ~wanted:(function
-            | Health.Clean -> true
-            | _ -> false)
+            | Mentat_workspace.Health.Verdict.Clean -> true
+            | Mentat_workspace.Health.Verdict.Failing _ -> false)
       | _ ->
           failf
             "MENTAT_DUNE_RPC_LIVE_TEST is set but no dune + ocamlc toolchain \
@@ -168,7 +199,6 @@ let build_health_live () =
 let () =
   run "mentat.ocaml.dune_rpc"
     [
-      test "build_health is Disconnected without a watch"
-        build_health_disconnected;
-      test "build_health against a live dune watch" build_health_live;
+      test "the snapshot is Absent without a watch" snapshot_absent;
+      test "attach against a live dune watch" attach_live;
     ]

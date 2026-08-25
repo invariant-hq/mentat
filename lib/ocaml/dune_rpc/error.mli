@@ -5,8 +5,8 @@
 
 (** Structured failures of a Dune RPC exchange.
 
-    Every caller inside this library collapses a failed exchange into a
-    {!Rpc.Instance.Health} verdict, so no accessor or renderer is declared here:
+    Every caller inside this library collapses a failed exchange into the
+    attach loop's detached state, so no accessor or renderer is declared here:
     the constructors carry their detail for the debugger and for the day a
     surface reports why Dune could not be reached. Adding a reader is the moment
     to decide which surface shows it. *)

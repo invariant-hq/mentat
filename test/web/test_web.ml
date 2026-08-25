@@ -893,7 +893,10 @@ let default_review : Driver.Review.t =
   }
 
 let default_workspace : Driver.Workspace.t =
-  { Driver.Workspace.glance = (fun () -> fail "glance: not scripted") }
+  {
+    Driver.Workspace.glance = (fun () -> fail "glance: not scripted");
+    dune = (fun () -> fail "workspace dune: not scripted");
+  }
 
 let client_of ?(session = default_session) ?(accounts = default_accounts)
     ?(settings = default_settings) ?(lifecycle = default_lifecycle)

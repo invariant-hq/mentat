@@ -6,8 +6,9 @@
 (** Dune RPC observation for OCaml project tooling.
 
     This library observes an already-running Dune RPC server: it polls the
-    registry, selects the endpoint matching a workspace, and reports Dune's
-    latest-known diagnostics. It never starts Dune.
+    registry, attaches to the endpoint matching a workspace, and folds the
+    watch's own diagnostic events into settled readings. It never starts
+    Dune.
 
     It is a separate library from {!Mentat_ocaml} for one reason: it contains
     the Dune RPC protocol stack ([dune-rpc], [csexp], [xdg]) and the [eio]
@@ -15,7 +16,7 @@
     description needs none of that and lives in {!Mentat_ocaml.Describe}. *)
 
 module Diagnostic = Rpc.Diagnostic
-(** Dune diagnostic identifiers and latest-known stores. *)
+(** Dune diagnostic identifiers. *)
 
 module Instance = Rpc.Instance
-(** Workspace-level Dune RPC state shared by tools and watchers. *)
+(** Workspace-level Dune RPC state shared by every observer. *)

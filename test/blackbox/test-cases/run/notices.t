@@ -46,23 +46,30 @@ built), so the same marker-present workspace stays silent through a second turn.
 
 A failing build the producer CAN observe emits an Error notice into the turn's
 request. `start_fake_dune failing` registers a Dune RPC endpoint for this root
-serving one failing diagnostic; the trusted, tooling-engaged workspace polls it
-at turn prep, the [Clean]->[Failing] transition fires, and the request carries
-the `Workspace notices:` prelude headed by the build-failure title and its head
-diagnostic. No dune or compiler is on PATH — the endpoint is the fake alone.
+serving one failing diagnostic set over the watch's own poll protocol. The
+observer attaches lazily at the first drain, so the turn-prep request carries
+nothing yet; the tool claim's settlement is the next drain — the boundary a
+request all but always follows — and by then the attach loop holds a settled
+reading, so the change law states the failure into request 2. The quiet window
+is shrunk to zero because the fake's whole exchange is local and instantaneous.
+No dune or compiler is on PATH — the endpoint is the fake alone.
 
   $ start_fake_dune failing
   $ cat > fail.jsonl <<'JSONL'
-  > {"expect":{"body_contains":["failing prompt"]},"response":{"id":"n3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"noticed"}]}]}}
+  > {"expect":{"body_contains":["failing prompt"]},"response":{"id":"n3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-n3","call_id":"call-n3","name":"shell","arguments":"{\"command\":\"printf probed\",\"description\":\"one claim to settle\"}"}]}}
+  > {"expect":{"body_contains":["function_call_output","call-n3"]},"response":{"id":"n4","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"noticed"}]}]}}
   > JSONL
   $ start_fake_openai fail.jsonl capture-fail port-fail
-  $ mentat run "failing prompt" --cwd "$PWD" --id fail-turn 2>/dev/null
+  $ MENTAT_DUNE_RPC_QUIET_S=0 mentat run "failing prompt" --cwd "$PWD" --permission bypass --id fail-turn 2>/dev/null
   noticed
   $ wait_fake_server
   $ stop_fake_dune
   $ grep -c 'Workspace notices' capture-fail/request-1.json
+  0
+  [1]
+  $ grep -c 'Workspace notices' capture-fail/request-2.json
   1
-  $ grep -c 'Build failing (1 diagnostic)' capture-fail/request-1.json
+  $ grep -c 'Build failing (1 error: 1 new)' capture-fail/request-2.json
   1
-  $ grep -c 'This expression has type string' capture-fail/request-1.json
+  $ grep -c 'This expression has type string' capture-fail/request-2.json
   1

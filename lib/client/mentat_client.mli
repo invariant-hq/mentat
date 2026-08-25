@@ -276,11 +276,18 @@ val workspace_glance :
     worktree change summary against the review base — changed files with summed
     line additions and deletions as {!Textdiff.stats}, or [None] when the
     workspace is not a git worktree or git is unavailable — paired with the
-    tooling build-health verdict {!Mentat_workspace.Health.t}, which is
-    {!Mentat_workspace.Health.Unknown} when [workspace.tooling] is disabled.
-    Both are derived on demand: the responder re-reads git and the dune watch
-    per call, and a frontend holds the answer as a last observation, never
-    persisted derived state. *)
+    dune watch status {!Mentat_workspace.Health.t}, which is
+    {!Mentat_workspace.Health.Off} [Disabled] when [workspace.tooling] is
+    disabled. Both are derived on demand: the responder re-reads git and the
+    watch observer's snapshot per call, and a frontend holds the answer as a
+    last observation, never persisted derived state. *)
+
+val workspace_dune :
+  t -> (Mentat_workspace.Health.t, Mentat_protocol.Error.t) result
+(** [workspace_dune t] is the watch status alone — the dune half of
+    {!workspace_glance} without the git read, cheap enough for a frontend to
+    poll on a short tick while the watch is starting, building, or
+    restarting. *)
 
 (** {1:commands User commands}
 

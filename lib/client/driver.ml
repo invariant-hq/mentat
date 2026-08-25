@@ -160,6 +160,7 @@ module Workspace = struct
       ( Textdiff.stats option * Mentat_workspace.Health.t,
         Mentat_protocol.Error.t )
       result;
+    dune : unit -> (Mentat_workspace.Health.t, Mentat_protocol.Error.t) result;
   }
 end
 

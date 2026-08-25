@@ -32,10 +32,14 @@ val tooling :
   palette:Theme.Palette.t ->
   tooling:Mentat_workspace.Health.t ->
   'msg Mosaic.t list
-(** [tooling ~tooling] is the dune build-health row. Fail-honest: only the
-    affirmative verdicts render — [Clean] as a muted [dune · clean], [Failing n]
-    as [dune · n errors] with the count in {!Theme.error}. [Disconnected] and
-    [Unknown] yield [[]], never a guessed verdict. *)
+(** [tooling ~tooling] is the dune watch row. Fail-honest: an absent watch
+    ([Off]) and a connection in flight ([Probing]) yield [[]], never a guessed
+    verdict. A live watch renders its phase — a muted [dune · building], a
+    warned [dune · unresponsive], or the settled verdict: [dune · clean]
+    muted, [dune · n errors] with the count in the error style,
+    [dune · n warnings] warned when a failed build printed warnings alone —
+    with a [· n lint] suffix when the lint lane holds findings. [Starting] and
+    [Restarting] render their status words. *)
 
 val goal :
   palette:Theme.Palette.t ->

@@ -479,7 +479,10 @@ let stub_review : Client.Driver.Review.t =
   }
 
 let stub_workspace : Client.Driver.Workspace.t =
-  { Client.Driver.Workspace.glance = (fun () -> stub_unavailable ()) }
+  {
+    Client.Driver.Workspace.glance = (fun () -> stub_unavailable ());
+    dune = (fun () -> stub_unavailable ());
+  }
 
 (* Custom /commands are not exercised by the engine suite: these responders are
    inert no-ops, present only to satisfy [Client.make]'s required arguments. *)

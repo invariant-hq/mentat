@@ -458,7 +458,18 @@ let%expect_test "workspace section shows the worktree diff and dune verdict" =
      two same-shaped rows are visibly distinct signals. *)
   let glance =
     ( Some (Textdiff.Stats.v ~files:5 ~additions:40 ~deletions:8),
-      Mentat_workspace.Health.Failing 2 )
+      Mentat_workspace.Health.Live
+        {
+          owner = Mentat_workspace.Health.Owner.Theirs 4242;
+          phase =
+            Mentat_workspace.Health.Phase.Settled
+              {
+                build =
+                  Mentat_workspace.Health.Verdict.Failing
+                    { errors = 2; warnings = 0 };
+                lint = None;
+              };
+        } )
   in
   Tui.run ~name:"pane-worktree" ~size:(120, 24) ~providers
     ~workspace_glance:glance ~turns:[ turn ]
@@ -780,7 +791,13 @@ let%expect_test "a long transcript line never moves the fixed activity column" =
   let turn = Tui.Turn_script.complete ~prompt long_line in
   let glance =
     ( Some (Textdiff.Stats.v ~files:116 ~additions:2154 ~deletions:88),
-      Mentat_workspace.Health.Clean )
+      Mentat_workspace.Health.Live
+        {
+          owner = Mentat_workspace.Health.Owner.Theirs 4242;
+          phase =
+            Mentat_workspace.Health.Phase.Settled
+              { build = Mentat_workspace.Health.Verdict.Clean; lint = None };
+        } )
   in
   Tui.run ~name:"pane-repro" ~size:(220, 24) ~workspace_glance:glance
     ~turns:[ turn ]
@@ -815,4 +832,76 @@ let%expect_test "a long transcript line never moves the fixed activity column" =
     22 | ❯ message mentat
     23 | ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     24 |   ! not logged in · /login · ~/mentat-tui-pa9e6e3b9b · openai/gpt-5.5 · ! full access                                                                                                                      ? for shortcuts
+    |}]
+
+(* The dune row's remaining shapes: a failed build that printed only warnings
+   warns rather than erroring, a lint count rides as a suffix, and a mid-build
+   watch shows its status word instead of a verdict. *)
+let%expect_test "dune row renders warnings with lint, and a building watch" =
+  let prompt = "just answer" in
+  let turn = Tui.Turn_script.complete ~prompt "Done." in
+  let warned =
+    ( None,
+      Mentat_workspace.Health.Live
+        {
+          owner = Mentat_workspace.Health.Owner.Theirs 4242;
+          phase =
+            Mentat_workspace.Health.Phase.Settled
+              {
+                build =
+                  Mentat_workspace.Health.Verdict.Failing
+                    { errors = 0; warnings = 2 };
+                lint = Some 3;
+              };
+        } )
+  in
+  Tui.run ~name:"pane-dune-warned" ~size:(120, 12) ~workspace_glance:warned
+    ~turns:[ turn ]
+  @@ fun t ->
+  submit t prompt;
+  Tui.finish_turn t;
+  Tui.settle t;
+  Tui.print t;
+  [%expect {|
+    01 |                                                                                 │ workspace
+    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium                     │   dune · 2 warnings · 3 lint
+    03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-pane-dun794b9825                   │
+    04 |                                                                                 │
+    05 | ❯ just answer                                                                   │
+    06 |                                                                                 │
+    07 | ⏺ Done.                                                                         │
+    08 |
+    09 | ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    10 | ❯ message mentat
+    11 | ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    12 |   ! not logged in · /login · ~/mentat-tui-pane-dun794b9825 · openai/gpt-5.5 · ! full access            ? for shortcuts
+    |}];
+  let building =
+    ( None,
+      Mentat_workspace.Health.Live
+        {
+          owner = Mentat_workspace.Health.Owner.Theirs 4242;
+          phase = Mentat_workspace.Health.Phase.Building;
+        } )
+  in
+  Tui.run ~name:"pane-dune-building" ~size:(120, 12) ~workspace_glance:building
+    ~turns:[ turn ]
+  @@ fun t ->
+  submit t prompt;
+  Tui.finish_turn t;
+  Tui.settle t;
+  Tui.print t;
+  [%expect {|
+    01 |                                                                                 │ workspace
+    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium                     │   dune · building
+    03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-pane-dune-1d74279b                 │
+    04 |                                                                                 │
+    05 | ❯ just answer                                                                   │
+    06 |                                                                                 │
+    07 | ⏺ Done.                                                                         │
+    08 |
+    09 | ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    10 | ❯ message mentat
+    11 | ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    12 |   ! not logged in · /login · ~/mentat-tui-pane-dune-1d74279b · openai/gpt-5.5 · ! full access          ? for shortcuts
     |}]
