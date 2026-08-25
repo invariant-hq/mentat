@@ -791,3 +791,16 @@ module Instance = struct
     in
     loop ()
 end
+
+module Probe = struct
+  let socket ~net ~clock ?(timeout_s = 1.0) ~root ~path () =
+    let endpoint = Endpoint.make ~root (Endpoint.Unix path) in
+    let attempt () =
+      Eio.Switch.run @@ fun sw ->
+      Connection.with_connection ~sw ~net endpoint ~f:(fun _ -> Ok ())
+    in
+    match Eio.Time.with_timeout_exn clock timeout_s attempt with
+    | Ok () -> true
+    | Error _ -> false
+    | exception Eio.Time.Timeout -> false
+end

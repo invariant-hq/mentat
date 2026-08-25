@@ -5,3 +5,5 @@
 
 module Store = Store
 module Instance = Rpc.Instance
+module Probe = Rpc.Probe
+module Mirror = Mirror

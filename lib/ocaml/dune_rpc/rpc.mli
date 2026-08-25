@@ -117,3 +117,25 @@ module Instance : sig
       any fiber, in particular the engine's drain path. Before {!attach} runs
       it is [{ status = Absent; building = false; reading = None }]. *)
 end
+
+module Probe : sig
+  (** One-shot liveness probe against a watch's known socket. *)
+
+  val socket :
+    net:_ Eio.Net.t ->
+    clock:_ Eio.Time.clock ->
+    ?timeout_s:float ->
+    root:string ->
+    path:string ->
+    unit ->
+    bool
+  (** [socket ~net ~clock ~root ~path ()] is [true] iff a Dune RPC server
+      accepted a connection on the Unix socket at [path] and completed the
+      initialize handshake, bounded to [timeout_s] wall-clock seconds
+      (default [1.]). [root] is the workspace root the socket serves, used
+      only to shorten an over-long socket path the way ordinary connections
+      do. A missing socket, a refused connection, a failed handshake, and a
+      timeout are all [false]: the caller treats an unanswering socket as no
+      server. The probe holds no subscription and closes its connection
+      before returning. *)
+end
