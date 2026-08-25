@@ -97,5 +97,5 @@ wins after local removal, the canonical post-settlement discovery names it.
 An unknown provider is rejected as command input before any runtime mutation.
 
   $ mentat auth logout bogusprovider 2>&1
-  mentat: unknown provider "bogusprovider"; known providers: openai, anthropic, google, local, ollama
+  mentat: unknown provider "bogusprovider"; known providers: openai, anthropic, google, local, ollama, opencode-go
   [2]

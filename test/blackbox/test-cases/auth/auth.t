@@ -52,5 +52,5 @@ AUTH-5 — an unknown provider is a usage error naming the known set, not an emp
 table with exit 1.
 
   $ mentat auth status bogusprovider 2>&1
-  mentat: unknown provider "bogusprovider"; known providers: openai, anthropic, google, local, ollama
+  mentat: unknown provider "bogusprovider"; known providers: openai, anthropic, google, local, ollama, opencode-go
   [2]
