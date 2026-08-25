@@ -175,7 +175,7 @@ let make_tool world ?(merlin_program = [ world.fake; world.plan_dir; "merlin" ])
     ?(ocamlfind_program = [ world.fake; world.plan_dir; "ocamlfind" ])
     ?opam_switch_prefix clock =
   Docs.make world.io ~clock ~merlin_program ~dune_program ~ocamlfind_program
-    ~opam_switch_prefix
+    ~opam_switch_prefix ()
 
 let with_world_using ~clock ?(switch = true) name fn =
   Eio_main.run @@ fun stdenv ->
@@ -1178,4 +1178,33 @@ let%expect_test "constructor rejects invalid fixed programs and switch roots" =
     non-normal switch: rejected
     valid: accepted
     invocations: dune=0 merlin=0 ocamlfind=0
+    |}]
+
+let%expect_test "name queries refuse while a supervised watch holds dune's lock"
+    =
+  with_world "watch-lock" @@ fun world ->
+  let clock = Eio_mock.Clock.Mono.make () in
+  let tool =
+    Docs.make world.base.io ~clock
+      ~merlin_program:[ world.base.fake; world.base.plan_dir; "merlin" ]
+      ~dune_program:[ world.base.fake; world.base.plan_dir; "dune" ]
+      ~ocamlfind_program:[ world.base.fake; world.base.plan_dir; "ocamlfind" ]
+      ~opam_switch_prefix:None
+      ~dune_lock_held:(fun () -> true)
+      ()
+  in
+  let result =
+    Tool.Call.run (decode_call tool (input "fmt")) ~cancelled:(fun () -> false)
+    |> finished
+  in
+  print_status result;
+  Printf.printf "invocations: dune=%d merlin=%d\n"
+    (invocation_count world "dune")
+    (invocation_count world "merlin");
+  [%expect
+    {|
+    status: failed unavailable
+    message: the build watch holds dune's build lock, and the docs universe needs `dune describe`, which cannot run beside it; use ocaml_find_definitions or ocaml_type_at for name lookups, or query ocaml_docs by path
+    metadata: false
+    invocations: dune=0 merlin=0
     |}]

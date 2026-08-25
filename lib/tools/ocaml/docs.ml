@@ -1850,7 +1850,22 @@ let logical_workspace workspace_io =
       in
       Ok (Workspace.single ~cwd:(Workspace.Path.rel cwd) root)
 
-let resolve_universe workspace_io ~clock ~dune_program ~cancelled =
+(* The refusal while a supervised build watch holds dune's build lock: the
+   universe command ([dune describe workspace]) takes that lock and would
+   fail with dune's own advice — which suggests deleting [_build/.lock],
+   exactly what a caller must never do while a watch runs — so name queries
+   answer honestly and point at the lock-free alternatives. Path queries
+   never reach this command and stay available. *)
+let watch_lock_message =
+  "the build watch holds dune's build lock, and the docs universe needs \
+   `dune describe`, which cannot run beside it; use ocaml_find_definitions \
+   or ocaml_type_at for name lookups, or query ocaml_docs by path"
+
+let resolve_universe workspace_io ~clock ~dune_program ~dune_lock_held
+    ~cancelled =
+  if dune_lock_held () then
+    Error (Run_failed { kind = `Unavailable; message = watch_lock_message })
+  else
   match logical_workspace workspace_io with
   | Error message -> Error (Run_failed { kind = `Failed; message })
   | Ok workspace -> (
@@ -1881,7 +1896,7 @@ let resolve_universe workspace_io ~clock ~dune_program ~cancelled =
                    })))
 
 let run workspace_io ~clock ~merlin_program ~dune_program ~ocamlfind_program
-    ~opam_switch_prefix ~cancelled input =
+    ~opam_switch_prefix ~dune_lock_held ~cancelled input =
   if cancelled () then interrupted ()
   else
     let max_bytes =
@@ -1894,7 +1909,10 @@ let run workspace_io ~clock ~merlin_program ~dune_program ~ocamlfind_program
         run_path_form workspace_io ~clock ~program:merlin_program ~max_bytes
           ~cancelled input
     | (Library _ | Module_path _ | Focused _) as form -> (
-        match resolve_universe workspace_io ~clock ~dune_program ~cancelled with
+        match
+          resolve_universe workspace_io ~clock ~dune_program ~dune_lock_held
+            ~cancelled
+        with
         | Error Cancelled -> interrupted ()
         | Error (Run_failed { kind; message }) ->
             Tool.Result.failed kind message
@@ -1944,7 +1962,7 @@ let validate_switch_prefix = function
            ^ Lpath.Error.message error))
 
 let make workspace_io ~clock ~merlin_program ~dune_program ~ocamlfind_program
-    ~opam_switch_prefix =
+    ~opam_switch_prefix ?(dune_lock_held = fun () -> false) () =
   validate_program "Merlin program" merlin_program;
   validate_program "Dune program" dune_program;
   validate_program "ocamlfind program" ocamlfind_program;
@@ -1954,5 +1972,5 @@ let make workspace_io ~clock ~merlin_program ~dune_program ~ocamlfind_program
     ~permissions:(permissions workspace_io ~execution ~opam_switch_prefix)
     ~run:(fun ~cancelled input ->
       run workspace_io ~clock ~merlin_program ~dune_program ~ocamlfind_program
-        ~opam_switch_prefix ~cancelled input)
+        ~opam_switch_prefix ~dune_lock_held ~cancelled input)
     ()

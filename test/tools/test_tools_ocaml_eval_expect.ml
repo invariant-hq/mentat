@@ -206,8 +206,8 @@ let with_world ?(cwd = Root) ?(mode = Mentat_config.Mode.Danger_full_access)
   let program = Option.value program ~default:[ fake; plan_dir ] in
   let tool =
     match clock with
-    | None -> Eval.make io ~clock:(Eio.Stdenv.mono_clock stdenv) ~program
-    | Some clock -> Eval.make io ~clock ~program
+    | None -> Eval.make io ~clock:(Eio.Stdenv.mono_clock stdenv) ~program ()
+    | Some clock -> Eval.make io ~clock ~program ()
   in
   fn { sw; ws_dir; outside_dir; plan_dir; io; tool }
 
@@ -1115,7 +1115,7 @@ let%expect_test "constructor rejects invalid immutable program prefixes" =
   List.iter
     (fun (label, program) ->
       let raised =
-        match Eval.make world.io ~clock ~program with
+        match Eval.make world.io ~clock ~program () with
         | _ -> false
         | exception Invalid_argument diagnostic ->
             Printf.printf "%s: %s\n" label diagnostic;
@@ -1136,5 +1136,24 @@ let%expect_test "constructor rejects invalid immutable program prefixes" =
     empty-token-raised: true
     NUL-token: Ocaml.Eval.make: program token 0 must not contain NUL
     NUL-token-raised: true
+    invocations: 0
+    |}]
+
+let%expect_test "the tool refuses while a supervised watch holds dune's lock" =
+  with_world "watch-lock" @@ fun world ->
+  let clock = Eio_mock.Clock.Mono.make () in
+  let tool =
+    Eval.make world.io ~clock ~program:[ "dune" ]
+      ~dune_lock_held:(fun () -> true)
+      ()
+  in
+  let result = run_call (decode_call tool (input "1 + 1")) in
+  print_status result;
+  Printf.printf "invocations: %d\n" (invocation_count world);
+  [%expect
+    {|
+    status: failed unavailable
+    message: the build watch holds dune's build lock, and ocaml_eval needs `dune ocaml top`, which cannot run beside it; use ocaml_type_at, ocaml_find_definitions, or ocaml_docs path queries instead
+    metadata: false
     invocations: 0
     |}]

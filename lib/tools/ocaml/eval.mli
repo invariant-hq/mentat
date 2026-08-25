@@ -66,9 +66,12 @@
     [-noinit] prevents a user's toplevel startup file and printers from making
     results depend on ambient home state. Dune's directives remain authoritative
     for project libraries and package-managed compiler selection. The tool
-    deliberately does not build, clean, or start a Dune watch. A live process
-    that already holds Dune's build lock may make the setup command fail; that
-    ordinary process failure is reported with its bounded transcript.
+    deliberately does not build, clean, or start a Dune watch. While a
+    supervised build watch holds Dune's build lock the tool refuses up front
+    ([`Unavailable], naming the Merlin-backed alternatives) rather than
+    letting the setup command fail with Dune's own lock advice; a foreign
+    lock holder still surfaces as an ordinary process failure with its
+    bounded transcript.
 
     One wall-clock budget covers both phases, including feeding standard input.
     The first phase captures at most {!max_directive_bytes} per stream and must
@@ -160,8 +163,10 @@ val make :
   Mentat_workspace_io.t ->
   clock:_ Eio.Time.Mono.t ->
   program:string list ->
+  ?dune_lock_held:(unit -> bool) ->
+  unit ->
   Mentat_tool.t
-(** [make workspace_io ~clock ~program] is the immutable OCaml-eval tool
+(** [make workspace_io ~clock ~program ()] is the immutable OCaml-eval tool
     definition. It closes the workspace capability, monotonic clock, and
     boot-resolved Dune program prefix for the definition's lifetime, and
     projects command confinement once. Construction starts no process and
@@ -169,6 +174,12 @@ val make :
 
     [program] is an argv prefix, for example [["dune"]] or a resolved wrapper
     prefix. Each token must be non-empty and NUL-free.
+
+    [dune_lock_held] reports whether a supervised build watch currently holds
+    Dune's build lock (default: never). While it does, every call fails
+    [`Unavailable] with text naming the lock and the Merlin-backed
+    alternatives — never Dune's own lock advice, which suggests deleting
+    [_build/.lock].
 
     Raises [Invalid_argument] if [program] is empty or contains an invalid
     token. *)
