@@ -707,6 +707,39 @@ let sandbox_roots_codec =
         validate_sandbox_roots label values);
   }
 
+(* [dune.targets] entries are passed verbatim after [dune build --watch], and
+   the field is workspace-shared — so a leading dash would let a project
+   config smuggle dune flags ([-j1], [--force], a second [--root]) into the
+   supervised argv under a knob documented as targets. *)
+let validate_dune_targets label values =
+  let rec loop index = function
+    | [] -> Ok values
+    | target :: rest ->
+        if String.starts_with ~prefix:"-" target then
+          error
+            (Printf.sprintf "%s[%d] is a dune flag, not a build target: %s"
+               label index target)
+        else loop (index + 1) rest
+  in
+  loop 0 values
+
+let dune_targets_codec =
+  {
+    string_list_codec with
+    parse_text =
+      (fun ~label raw ->
+        let* values = parse_string_list label raw in
+        validate_dune_targets label values);
+    check =
+      (fun ~label values ->
+        let* values = check_string_elements label values in
+        validate_dune_targets label values);
+    decode_json =
+      (fun ~label leaf ->
+        let* values = decode_string_list_leaf label leaf in
+        validate_dune_targets label values);
+  }
+
 let merlin_codec =
   {
     string_list_codec with
@@ -1377,7 +1410,7 @@ module Field = struct
           ~default:(builtin field "auto")
           ~env:("MENTAT_DUNE_WATCH", dune_watch_of_string)
     | Dune_targets ->
-        defaulted string_list_codec ~shared:true
+        defaulted dune_targets_codec ~shared:true
           ~default:(builtin field [ "@check" ])
     | Workspace_tooling ->
         defaulted workspace_tooling_codec ~shared:true
