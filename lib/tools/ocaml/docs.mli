@@ -173,7 +173,10 @@ val make :
     universe through [dune describe workspace] (default: [`Free], run
     as-is). [`Leased release] means a supervised watch was paused for the
     command — it runs, and the lease returns via [release], failure
-    included. [`Held] means a foreign watch holds Dune's build lock: the
+    included. Two concurrently leased calls still contend with each other
+    for Dune's lock — the lease serializes them against the watch, not
+    against their siblings. [`Held] means a foreign watch holds Dune's build
+    lock: the
     query fails [`Unavailable] with text naming the lock and the
     Merlin-backed alternatives, never Dune's own lock advice. Path queries
     never consult it.

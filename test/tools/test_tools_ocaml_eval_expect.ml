@@ -1139,6 +1139,52 @@ let%expect_test "constructor rejects invalid immutable program prefixes" =
     invocations: 0
     |}]
 
+let%expect_test "a leased run returns the lease however the call ends" =
+  with_world "lease-success" @@ fun world ->
+  let leased_tool world taken returned =
+    Eval.make world.io
+      ~clock:(Eio_mock.Clock.Mono.make ())
+      ~program:[ Filename.concat world.ws_dir "fake-dune"; world.plan_dir ]
+      ~dune_lease:(fun () ->
+        incr taken;
+        `Leased (fun () -> incr returned))
+      ()
+  in
+  let taken = ref 0 and returned = ref 0 in
+  let ok = run_call (decode_call (leased_tool world taken returned) (input "1 + 1")) in
+  (match Tool.Result.status ok with
+  | Tool.Result.Completed -> print_endline "successful run: completed"
+  | _ -> fail "expected the run to complete");
+  Printf.printf "leases: taken=%d returned=%d\n" !taken !returned;
+  with_world "lease-failure" @@ fun world ->
+  let taken = ref 0 and returned = ref 0 in
+  let tool = leased_tool world taken returned in
+  (* A refusal that needs no lock never consults the lease. *)
+  let refused =
+    run_call (decode_call tool (input ~timeout_ms:99_999_999 "1"))
+  in
+  (match Tool.Result.status refused with
+  | Tool.Result.Failed { kind = `Invalid_input; _ } ->
+      print_endline "malformed: refused before the lease"
+  | _ -> fail "expected an input refusal");
+  Printf.printf "leases: taken=%d returned=%d\n" !taken !returned;
+  (* A failing run still returns the lease: the bracket, not the outcome,
+     owns the release. *)
+  set_behavior world 1 "response_exit7";
+  let failed = run_call (decode_call tool (input "1 + 1")) in
+  (match Tool.Result.status failed with
+  | Tool.Result.Failed _ -> print_endline "failing run: completed the bracket"
+  | _ -> fail "expected the run to fail");
+  Printf.printf "leases: taken=%d returned=%d\n" !taken !returned;
+  [%expect {|
+    successful run: completed
+    leases: taken=1 returned=1
+    malformed: refused before the lease
+    leases: taken=0 returned=0
+    failing run: completed the bracket
+    leases: taken=1 returned=1
+    |}]
+
 let%expect_test "the tool refuses while a foreign watch holds dune's lock" =
   with_world "watch-lock" @@ fun world ->
   let clock = Eio_mock.Clock.Mono.make () in

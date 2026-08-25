@@ -239,8 +239,10 @@ lock-acquired branch), so the lock message never reaches a supervisor.
 Probing connects to `<root>/_build/.rpc/dune` and initializes; an answering
 server means **foreign attach**: the same readings run against it, the row
 says `theirs`, and it is never signalled (L7). A watch that reached `Live`
-resets the give-up counter; `Off Gave_up` is left by `/dune restart` or the
-next session.
+resets the give-up counter. `/dune restart` forgives every terminal off —
+`Gave_up`, `Blocked`, and the user's own `/dune stop` — by clearing the stop
+latch and cycling from `Probing`; a new session does the same by
+construction.
 
 ## 3. Hang detection
 
@@ -544,8 +546,8 @@ moment.
 | `Off Disabled` | no row |
 
 The footer keeps its ruling (`footer.mli:8-13`): no room at 80 columns; the
-side pane is the status surface. Transcript rendering is unchanged. Two
-palette commands, `/dune restart` and `/dune stop`.
+side pane is the status surface. Transcript rendering is unchanged. One
+palette entry, `/dune`, taking `restart` or `stop` as its argument.
 
 ## 9. Config
 
@@ -702,8 +704,8 @@ cram against `fswatch.t`'s 30 lines/scenario), not hoped.
 | A · attach + settle + law + status | persistent connection, two long-polls, store fold, overtake/quiet rules (`rpc.ml` +300); `Finding`/`Reading`/`Change` with `.mli`s (+250); producer render in `bin/` (`workspace_notices.*` rewritten in place); `Health` reshape + `workspace.dune` query + row + tick (+250); concurrent fake with scripted timeline (+250); cram + unit + goldens (+390) | ≈ +1,560 / −250 | **no spawn**: runs against any registered watch — the maintainer's own `dune build -w` — and already retires the 15 s guess, the head-string law, and the per-drain probe. Deleted outright: `Instance.build_health`, `Instance.Health`, the diagnostic store surface, and the glance's producer+mapping; `bin/workspace_notices.*` is rewritten to the drain producer alone. |
 | B · own it | `bin/dune_watch.{ml,mli}` supervisor (~650 with docs), lazy spawn via `start_session`, probe-before-spawn, private `XDG_RUNTIME_DIR` + host mirror, stop-before-release; describe deleted (−1,780 incl. suite and ripple); docs/eval refusals (+80); skill/prompt text; `dune.watch`/`dune.targets` | ≈ +900 / −1,800 | first deliverable is the confinement spike: FSEvents under seatbelt (statically, no `mach-lookup` for `com.apple.FSEvents` is allowed — the allowance line, profile-wide per §11, is the deliverable), registry write under the private dir, socket from a confined child; the §3 self-test backs it at runtime |
 | C · hang | dune-command tool timeout → stall report → one verification flush → restart; first-flush confinement self-test; `dune.watch` notice; `MENTAT_DUNE_WATCH_FLUSH_S`; fake `hang`/`slow`/`hang-flush` mode directives | ≈ +230 | after B; insurance (the hang was old-dune); no periodic probe — the evidence path pays only on evidence |
-| D · lint | the green-settle runner (bounded confined one-shot, no dune in the loop), `ocamlc-loc` parse into the lint lane, `dune.lint_command` knob with the watch-shaped availability gate; classifier and marker convention deleted; no litany change; dogfood dev dep still owed (maintainer's relock) | ≈ +300 / −150 | after B (rides the instance); no upstream work |
-| E · commands + lease | `/dune restart|stop` (one `workspace.dune_control` endpoint, the row refreshed from the verb's answer), doctor's `dune` and `lint` rows (posture, reachability, and the off reasons), the watch lease (pause/park/resume on the supervisor, `Leased/Held/Free` at the tools' lock moment) | ≈ +350 | after B; the Leased bracket is pinned by the tools' foreign-refusal expects and the QA script — a hermetic lease cram needs a real one-shot beside a fake watch and is deliberately unpinned |
+| D · lint | the green-settle runner (bounded confined one-shot, no dune in the loop), `ocamlc-loc` parse into the lint lane, `dune.lint_command` knob with the watch-shaped availability gate; classifier and marker convention deleted; no litany change; the dogfood dev dep landed with the maintainer's relock (litany is a with-test dependency of this repository) | ≈ +300 / −150 | after B (rides the instance); no upstream work |
+| E · commands + lease | `/dune restart|stop` (one `workspace.dune_control` endpoint, the row refreshed from the verb's answer), doctor's `dune` and `lint` rows (posture, reachability, and the off reasons), the watch lease (pause/park/resume on the supervisor, `Leased/Held/Free` at the tools' lock moment) | ≈ +350 | after B; the Leased bracket's release is pinned by tool expects on both run outcomes; the pause/park/respawn machine rides the QA script — a hermetic lease cram needs a real one-shot beside a fake watch and is deliberately unpinned |
 
 **Sequencing.** A ships alone and is useful alone, with no sandbox question
 and nothing new holding the lock. B is not shippable without describe's
@@ -731,7 +733,9 @@ taking the lane off after exactly one run. Deliberately unpinned (known,
 not owed yet): the activity-cleared verification, the `No_server` verdict,
 the dropped-report paths (observe, foreign, between lives), the
 `Restarting Hung`/`Off Blocked` row renders — the TUI story below owes the
-rows — and, for the lint lane: re-arm mid-run (timing-fragile by nature),
+rows — the lease machine's park/respawn arcs and the `/dune` verbs end to
+end (the codec arms, the doctor rows, and the release bracket are pinned;
+the verb-to-row ride is owed with the TUI story), and, for the lint lane: re-arm mid-run (timing-fragile by nature),
 the 600 s run bound (no scaling env until a test wants it), the
 transient-launch-failure keep, and the signal-death keep. Unit: `Change.step` properties (idempotence, range and
 count invariance, lane independence, recovery confirmation, no-reading

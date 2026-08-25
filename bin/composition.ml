@@ -897,32 +897,62 @@ let probe ~stdenv ~sw ~cwd : Probe.t =
               Ok "dune project"
             else Error "no dune-project (OCaml tooling inactive)"
       in
-      (* The dune-lane posture, the same ladder the composition gates on —
-         trust, the project marker, the knob — read here without an
-         instance, so the row and the running lane cannot disagree on the
-         vocabulary. *)
+      (* The dune-lane posture: every rung the composition gates on —
+         trust, the workspace.tooling knob, the project marker, dune.watch,
+         and the read-only demotion — read here without an instance, so
+         the row and the running lane cannot disagree. *)
       let dune_lane =
-        match (config_resolved, project) with
-        | Error message, _ -> Error message
-        | _, Error reason -> Error reason
-        | Ok config, Ok _ ->
-            if not trusted then
-              Error "lane off: workspace not trusted"
+        match config_resolved with
+        | Error message -> Error message
+        | Ok config ->
+            if not trusted then Error "lane off: workspace not trusted"
             else (
-              match Cfg.Resolved.get Cfg.Field.dune_watch config with
-              | "off" -> Error "lane off: dune.watch = off"
-              | "observe" -> Ok "observe — attaches to a running watch only"
-              | "auto" ->
-                  Ok
-                    (Printf.sprintf
-                       "auto — spawns and supervises `dune build --watch %s`"
-                       (String.concat " "
-                          (Cfg.Resolved.get Cfg.Field.dune_targets config)))
-              | other -> Error ("unknown dune.watch value: " ^ other))
+              let tooling =
+                match
+                  Cfg.Resolved.get Cfg.Field.workspace_tooling config
+                with
+                | "on" -> Ok ()
+                | "off" -> Error "lane off: workspace.tooling = off"
+                | "auto" | _ -> (
+                    match project with
+                    | Ok _ -> Ok ()
+                    | Error reason -> Error reason)
+              in
+              match tooling with
+              | Error _ as off -> off
+              | Ok () -> (
+                  match Cfg.Resolved.get Cfg.Field.dune_watch config with
+                  | "off" -> Error "lane off: dune.watch = off"
+                  | "observe" ->
+                      Ok "observe — attaches to a running watch only"
+                  | "auto" -> (
+                      let read_only =
+                        match
+                          Cfg.Resolved.find Cfg.Field.sandbox_mode config
+                        with
+                        | Some Cfg.Mode.Read_only -> true
+                        | Some _ | None -> false
+                      in
+                      if read_only then
+                        Ok
+                          "observe — auto demoted by sandbox.mode = \
+                           read-only"
+                      else
+                        Ok
+                          (Printf.sprintf
+                             "auto — spawns and supervises `dune build \
+                              --watch %s`"
+                             (String.concat " "
+                                (Cfg.Resolved.get Cfg.Field.dune_targets
+                                   config))))
+                  | other -> Error ("unknown dune.watch value: " ^ other)))
       in
-      (* The lint command's reachability, in the two worlds the gate reaches
-         it: directly on the ambient ladder, or through dune exec — whose
-         first run, not this probe, answers whether the lock provides it. *)
+      (* The lint command's reachability, answered on the ambient toolchain
+         ladder — doctor is a local diagnostic, and the sealed child PATH
+         the gate itself resolves on can differ (the parity row exists for
+         exactly that divergence, for dune). The fallback order matches the
+         gate's: directly, else through dune exec — whose first run, not
+         this probe, answers whether the lock provides it. *)
       let lint =
         match (config_resolved, dune_lane) with
         | Error message, _ -> Error message
@@ -1807,13 +1837,33 @@ let workspace_cone t capability ~base_spec : Client.Driver.Workspace.t =
     Client.Driver.Workspace.glance =
       (fun () -> Ok (worktree_stats (), tooling_health ()));
     dune = (fun () -> Ok (tooling_health ()));
-    (* The user's verb over the supervised watch. With no supervisor — the
-       lane off, or nothing engaged yet — the verb is an observation only:
-       there is nothing to restart that the next drain would not build, and
-       nothing to stop. *)
+    (* The user's verb over the supervised watch. Before the first drain
+       nothing is engaged yet, but the verb must still stick — a stop
+       issued from a fresh frontend holds through the drain's engage, and
+       a restart is the eager engage a user asking for a watch plainly
+       wants — so the verb constructs the supervisor on demand exactly as
+       the drain would (construction is pure and memoized; the lane's gate
+       still decides whether there is one to construct). With the lane off
+       the verb is an observation only. *)
     dune_control =
       (fun ~op ->
-        (match (t.dune_watch, op) with
+        let supervisor =
+          match t.dune_watch with
+          | Some supervisor -> Some supervisor
+          | None -> (
+              match dune_watch_mode t capability with
+              | None -> None
+              | Some mode ->
+                  Option.map
+                    (fun instance ->
+                      let supervisor =
+                        dune_watch_supervisor t capability ~mode ~instance
+                      in
+                      Dune_watch.engage supervisor;
+                      supervisor)
+                    (dune_rpc_instance t capability))
+        in
+        (match (supervisor, op) with
         | Some supervisor, `Restart -> Dune_watch.restart supervisor
         | Some supervisor, `Stop -> Dune_watch.stop supervisor
         | None, (`Restart | `Stop) -> ());
@@ -2292,11 +2342,7 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
   let dune_lease () =
     match t.dune_watch with
     | None -> `Free
-    | Some supervisor -> (
-        match Dune_watch.pause supervisor with
-        | `Free -> `Free
-        | `Held -> `Held
-        | `Leased -> `Leased (fun () -> Dune_watch.resume supervisor))
+    | Some supervisor -> Dune_watch.lease supervisor
   in
   let project_ocaml_nonediting_tools =
     [

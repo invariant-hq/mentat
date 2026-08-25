@@ -303,7 +303,10 @@ let retain_tail previous appended =
 
 let exit_cause session tail =
   match Command.Session.status session with
-  | Command.Session.Running -> `Terminated (* unreachable by construction *)
+  (* Reachable when a stop's cancelled-await returns early, mid-grace:
+     the status still reads Running, and mapping it to the deliberate-stop
+     cause is exactly right. *)
+  | Command.Session.Running -> `Terminated
   | Command.Session.Terminated -> `Terminated
   | Command.Session.Exited status ->
       let base =
@@ -508,6 +511,22 @@ let rec wait_while_foreign t =
   if t.stopped then ()
   else if observed_live t || probe t then wait_while_foreign t
 
+(* While any lease is out the machine parks between lives: a one-shot has
+   dune's lock, and probing or spawning beside it would fight the very
+   caller the lease protects. *)
+let park_while_leased t =
+  if t.leases > 0 then begin
+    set_word t
+      (Mentat_ocaml_dune_rpc.Watch.Announce Mentat_workspace.Health.Starting);
+    let rec park () =
+      if t.leases > 0 && not t.stopped then begin
+        sleep t 0.1;
+        park ()
+      end
+    in
+    park ()
+  end
+
 (* The machine. [deaths] counts consecutive lives that died before reaching
    Live; the give-up rule is {!Mentat_ocaml_dune_rpc.Watch.after_death}. A
    spawn that exits while the socket answers forwarded its build to a lock
@@ -515,6 +534,7 @@ let rec wait_while_foreign t =
    never a death. *)
 let rec cycle t deaths =
   if not t.stopped then begin
+    park_while_leased t;
     set_word t
       (Mentat_ocaml_dune_rpc.Watch.Announce Mentat_workspace.Health.Probing);
     if observed_live t || probe t then begin
@@ -546,22 +566,18 @@ and spawn t deaths =
         remove_endpoint_debris t;
         if not t.stopped then
           match cause with
-          | `Stopped -> ()
+          | `Stopped ->
+              (* A deliberate kill without the stop latch: a restart's
+                 preemption, or a lease signalling the child directly. Not
+                 a death — cycle from the probe; the cycle's own park gate
+                 honours an outstanding lease first. *)
+              cycle t 0
           | `Leased ->
               (* Parked for a lease: the lock is a one-shot's for a moment.
-                 No death is counted and nothing is announced beyond
+                 No death is counted, and nothing is announced beyond
                  Starting — the watch is deliberately down and coming
                  back. *)
-              set_word t
-                (Mentat_ocaml_dune_rpc.Watch.Announce
-                   Mentat_workspace.Health.Starting);
-              let rec park () =
-                if t.leases > 0 && not t.stopped then begin
-                  sleep t 0.1;
-                  park ()
-                end
-              in
-              park ();
+              park_while_leased t;
               cycle t 0
           | `Blocked ->
               queue_notice t (blocked_notice ());
@@ -630,45 +646,64 @@ let engage t =
         | Some _ ->
             t.cycling <- true;
             Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
-                sweep_stale_run_dirs t;
-                cycle t 0;
-                t.cycling <- false;
+                Fun.protect
+                  ~finally:(fun () -> t.cycling <- false)
+                  (fun () ->
+                    sweep_stale_run_dirs t;
+                    cycle t 0);
                 `Stop_daemon))
   end
 
-(* The lease: park the machine and hand the lock to a one-shot. [pause]
-   answers what the lock moment is — ours (the child is signalled and the
-   caller waits here, bounded, until it has released the lock), a foreign
-   watch's (nothing ours to pause; the caller refuses as before), or
-   nobody's. Leases nest: the machine stays parked while any is out. *)
-let pause t =
+(* The lease: park the machine and hand the lock to a one-shot. The
+   release is minted beside the counter it decrements and latches — a
+   double release returns nothing twice, so one caller's bug can never end
+   another caller's park. Leases nest whether the child is up or the
+   machine is already between lives: an outstanding count joins rather
+   than re-signals. *)
+let release t =
+  let returned = ref false in
+  fun () ->
+    if not !returned then begin
+      returned := true;
+      t.leases <- max 0 (t.leases - 1)
+    end
+
+let lease t =
   if t.stopped then `Free
   else
     match t.session with
-    | Some _ ->
+    | Some session -> (
         t.leases <- t.leases + 1;
-        let rec wait remaining =
-          if Option.is_none t.session then ()
-          else if remaining <= 0 then ()
-          else begin
-            sleep t 0.05;
-            wait (remaining - 1)
-          end
-        in
-        (* The life loop notices the lease within a poll and the child dies
-           on the daemon-scale grace; the margin covers both. *)
-        wait 100;
-        `Leased
-    | None -> (
-        match health t with
-        | Mentat_workspace.Health.Live _ -> `Held
-        | _ -> `Free)
-
-let resume t = t.leases <- max 0 (t.leases - 1)
+        (* Signal the child here, not through the life loop's poll — the
+           loop can be inside a bounded flush for many seconds, and the
+           lock is only free once the child is reaped, which [signal]'s
+           return guarantees. A cancellation mid-signal rolls the count
+           back: a lease never leaks past its taker. *)
+        match Command.Session.signal ~grace:stop_grace_s session with
+        | () -> `Leased (release t)
+        | exception exn ->
+            t.leases <- max 0 (t.leases - 1);
+            raise exn)
+    | None ->
+        (* Between lives: a running machine parks on the count alone —
+           nothing to signal, the cycle's park gate honours it. A machine
+           that is not cycling (observe, gave up, blocked, pre-engage) has
+           nothing to pause: an observed foreign attachment is the one
+           lock-holder that is not ours, and everything else is free. *)
+        if t.cycling then begin
+          t.leases <- t.leases + 1;
+          `Leased (release t)
+        end
+        else (
+          match health t with
+          | Mentat_workspace.Health.Live _ -> `Held
+          | _ -> `Free)
 
 (* A user's restart: forgive a terminal word — gave up, blocked, a stop —
-   kill the current life if one runs, and make sure exactly one supervising
-   fiber cycles. In observe mode there is nothing to restart. *)
+   announce the committed state synchronously so the verb's reply is never
+   the forgiven word, preempt the current life if one runs (its kill reads
+   back as a deliberate stop and cycles), and make sure exactly one
+   supervising fiber runs. In observe mode there is nothing to restart. *)
 let restart t =
   match t.mode with
   | Mode.Observe -> ()
@@ -676,6 +711,9 @@ let restart t =
       if Option.is_none t.program then ()
       else begin
         t.stopped <- false;
+        set_word t
+          (Mentat_ocaml_dune_rpc.Watch.Announce
+             Mentat_workspace.Health.Probing);
         (match t.session with
         | Some session ->
             t.session <- None;
@@ -684,8 +722,9 @@ let restart t =
         if not t.cycling then begin
           t.cycling <- true;
           Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
-              cycle t 0;
-              t.cycling <- false;
+              Fun.protect
+                ~finally:(fun () -> t.cycling <- false)
+                (fun () -> cycle t 0);
               `Stop_daemon)
         end
       end

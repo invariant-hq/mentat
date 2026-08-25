@@ -1180,7 +1180,59 @@ let%expect_test "constructor rejects invalid fixed programs and switch roots" =
     invocations: dune=0 merlin=0 ocamlfind=0
     |}]
 
-let%expect_test "name queries refuse while a supervised watch holds dune's lock"
+let%expect_test "a leased name query returns the lease; path queries never consult it"
+    =
+  with_world "watch-lease" @@ fun world ->
+  let clock = Eio_mock.Clock.Mono.make () in
+  let taken = ref 0 and returned = ref 0 in
+  let leased =
+    Docs.make world.base.io ~clock
+      ~merlin_program:[ world.base.fake; world.base.plan_dir; "merlin" ]
+      ~dune_program:[ world.base.fake; world.base.plan_dir; "dune" ]
+      ~ocamlfind_program:[ world.base.fake; world.base.plan_dir; "ocamlfind" ]
+      ~opam_switch_prefix:None
+      ~dune_lease:(fun () ->
+        incr taken;
+        `Leased (fun () -> incr returned))
+      ()
+  in
+  let result =
+    Tool.Call.run
+      (decode_call leased (input "fmt"))
+      ~cancelled:(fun () -> false)
+    |> finished
+  in
+  (match Tool.Result.status result with
+  | Tool.Result.Completed -> print_endline "name query: completed"
+  | Tool.Result.Failed _ -> print_endline "name query: failed"
+  | Tool.Result.Interrupted _ -> fail "unexpected interruption");
+  Printf.printf "leases: taken=%d returned=%d\n" !taken !returned;
+  let untouchable =
+    Docs.make world.base.io ~clock
+      ~merlin_program:[ world.base.fake; world.base.plan_dir; "merlin" ]
+      ~dune_program:[ world.base.fake; world.base.plan_dir; "dune" ]
+      ~ocamlfind_program:[ world.base.fake; world.base.plan_dir; "ocamlfind" ]
+      ~opam_switch_prefix:None
+      ~dune_lease:(fun () -> failwith "path queries must not consult the lease")
+      ()
+  in
+  let path_result =
+    Tool.Call.run
+      (decode_call untouchable (input "lib/inventory.ml"))
+      ~cancelled:(fun () -> false)
+    |> finished
+  in
+  (match Tool.Result.status path_result with
+  | Tool.Result.Completed | Tool.Result.Failed _ ->
+      print_endline "path query: never consulted the lease"
+  | Tool.Result.Interrupted _ -> fail "unexpected interruption");
+  [%expect {|
+    name query: failed
+    leases: taken=1 returned=1
+    path query: never consulted the lease
+    |}]
+
+let%expect_test "name queries refuse while a foreign watch holds dune's lock"
     =
   with_world "watch-lock" @@ fun world ->
   let clock = Eio_mock.Clock.Mono.make () in

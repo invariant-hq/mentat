@@ -104,28 +104,35 @@ val health : t -> Mentat_workspace.Health.t
     its cause, no dune on the PATH, or given up. Before {!engage}, and in
     {!Mode.Observe}, it is the observer's view alone. *)
 
-val pause : t -> [ `Leased | `Held | `Free ]
-(** [pause t] is the lease's opening half, called at the moment a
-    lock-taking one-shot (docs' [dune describe], eval's [dune ocaml top])
-    would otherwise be refused. A supervised child is signalled and the
-    call waits, bounded, until it has released dune's lock — [`Leased]; the
-    caller runs its one-shot and owes {!resume}. A foreign attachment is
-    [`Held]: nothing of ours to pause, the honest refusal stands. Nothing
-    live is [`Free]: run, nothing owed. Leases nest — the machine stays
-    parked between lives while any is out — and the respawn after the last
-    {!resume} rides the ordinary probe-first cycle, so a one-shot still
-    winding down is discovered, never fought. *)
-
-val resume : t -> unit
-(** [resume t] returns a lease. The machine leaves its park when the last
-    one comes back (and shutdown overrides a lost lease — a caller that
-    never resumes costs the session its watch, not its teardown). *)
+val lease : t -> [ `Leased of unit -> unit | `Held | `Free ]
+(** [lease t] is the lock moment, asked at the point a lock-taking one-shot
+    (docs' [dune describe], eval's [dune ocaml top]) would otherwise be
+    refused. [`Leased release] means the lock is the caller's: a supervised
+    child was signalled and reaped before the call returned, or the machine
+    was already between lives and the outstanding count now covers the
+    caller too — run the one-shot and return the lease via [release],
+    failure included. The release is minted here, beside the counter it
+    decrements, and latches: a double call returns nothing twice, so one
+    caller's bug can never end another's park. A cancellation inside
+    [lease] rolls its own count back — a lease never leaks past its taker.
+    [`Held] is a foreign attachment: nothing of ours to pause, the honest
+    refusal stands. [`Free] is nobody's lock: run, nothing owed. Leases
+    nest — the machine stays parked between lives while any is out, and
+    shutdown overrides a lost one — and the respawn after the last release
+    rides the ordinary probe-first cycle, so a one-shot still winding down
+    is discovered, never fought. Two concurrently leased one-shots still
+    contend with each other for dune's lock; the lease serializes them
+    against the watch, not against their siblings. *)
 
 val restart : t -> unit
 (** [restart t] is the user's verb: forgive a terminal state — gave up, a
-    blocked file watcher, a stop — kill the current life if one runs, and
-    ensure exactly one supervising fiber cycles again from the probe. In
-    {!Mode.Observe}, or with no dune on the PATH, it does nothing. *)
+    blocked file watcher, a stop — announce the committed state
+    synchronously (so the verb's reply is never the forgiven word), preempt
+    the current life if one runs, and ensure exactly one supervising fiber
+    cycles again from the probe. In {!Mode.Observe}, or with no dune on the
+    PATH, it does nothing. Call it only on an engaged supervisor: the
+    composition constructs and engages in one moment, so this holds by
+    construction. *)
 
 val stop : t -> unit
 (** [stop t] ends supervision: the machine stops (a pending restart never

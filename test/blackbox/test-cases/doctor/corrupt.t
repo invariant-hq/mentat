@@ -18,8 +18,8 @@ The toolchain probe is pinned to a missing [MENTAT_DUNE] for a host-independent 
   [WARN] toolchain: dune not found on PATH or opam switch
   [WARN] parity: no dune to compare (see toolchain)
   [WARN] project: no dune-project (OCaml tooling inactive)
-  [WARN] dune: no dune-project (OCaml tooling inactive)
-  [WARN] lint: lint rides the dune lane: no dune-project (OCaml tooling inactive)
+  [WARN] dune: lane off: workspace not trusted
+  [WARN] lint: lint rides the dune lane: lane off: workspace not trusted
   [PASS] diagnostics: $TESTCASE_ROOT/state/mentat (0 log(s), 0 crash report(s))
   [1]
   $ MENTAT_MODEL=openai/gpt-5.6-sol mentat doctor -C . >/dev/null 2>&1; echo $?

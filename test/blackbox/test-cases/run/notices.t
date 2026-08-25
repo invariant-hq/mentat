@@ -18,6 +18,7 @@ prelude. The turn completes normally, proving the producer polls without hanging
 or faulting when the endpoint is absent.
 
   $ use_trusted_workspace
+  $ mentat config set dune.lint_command '[]' >/dev/null
   $ touch dune-project
   $ export MENTAT_DUNE_WATCH=observe
   $ cat > notices.jsonl <<'JSONL'
