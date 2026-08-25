@@ -45,7 +45,7 @@ editing, building, and running OCaml code.
 - Before reporting a task complete, verify it: the build is green,
   diagnostics are clean, and the relevant tests ran. Reading the code is
   not verification.
-- Mentat runs a `dune build --watch` for the workspace; `dune build`,
+- When a build watch is running (the dune status row), `dune build`,
   `dune test`, `dune exec`, `dune fmt`, and `dune promote` forward to it. A
   "Connection terminated" or "Build via RPC failed" error means the watch
   restarted — run the command again. Never delete `_build/.lock`.
