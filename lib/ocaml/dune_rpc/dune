@@ -11,5 +11,6 @@
   dune-rpc
   eio
   logs
+  mtime
   unix
   xdg))

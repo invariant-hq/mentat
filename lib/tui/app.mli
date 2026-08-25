@@ -274,6 +274,11 @@ type command =
           for the wide-terminal side pane. Answered with
           {!workspace_glance_loaded}. Issued at session start and each turn
           settle; the result is held as a last observation, never persisted. *)
+  | Load_workspace_dune of request
+      (** Query the watch status alone — the glance's dune half without the
+          git read. Answered with {!workspace_dune_loaded}. Issued on a short
+          tick while the watch is starting, building, or restarting, so the
+          row follows the watch between turn boundaries. *)
   | Load_running_processes of {
       request : request;
       session : Mentat_session.Id.t;
@@ -727,6 +732,14 @@ val workspace_glance_loaded :
     replaces the held observation — the worktree change summary and the tooling
     verdict — a failure keeps the previous one (retry in place, no blank flash),
     and a stale result is dropped. *)
+
+val workspace_dune_loaded :
+  request:request ->
+  (Mentat_workspace.Health.t, Mentat_protocol.Error.t) result ->
+  msg
+(** [workspace_dune_loaded ~request result] folds a watch-status poll only
+    while [request] is the current generation, with {!workspace_glance_loaded}'s
+    replace-on-success, keep-on-failure law. *)
 
 val review_command_finished :
   request:request -> (unit, Mentat_protocol.Error.t) result -> msg

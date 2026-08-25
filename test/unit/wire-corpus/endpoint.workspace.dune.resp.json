@@ -1,0 +1,10 @@
+{
+  "state": "live",
+  "reason": "",
+  "pid": 4242,
+  "ours": false,
+  "phase": "settled",
+  "errors": 2,
+  "warnings": 1,
+  "lint": 3
+}

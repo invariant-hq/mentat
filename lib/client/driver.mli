@@ -352,11 +352,16 @@ module Workspace : sig
       result;
         (** [glance ()] is the ambient workspace status: the git worktree change
             summary against the review base ([None] when the workspace is not a
-            git worktree or git is unavailable), paired with the tooling
-            build-health verdict ({!Mentat_workspace.Health.Unknown} when
-            [workspace.tooling] is disabled). It re-reads git and the dune watch
-            per call and holds no cache; the frontend keeps the result as a last
-            observation. *)
+            git worktree or git is unavailable), paired with the dune watch
+            status ({!Mentat_workspace.Health.Off} [Disabled] when
+            [workspace.tooling] is disabled). It re-reads git and the watch
+            observer's snapshot per call and holds no cache; the frontend keeps
+            the result as a last observation. *)
+    dune : unit -> (Mentat_workspace.Health.t, Mentat_protocol.Error.t) result;
+        (** [dune ()] is the watch status alone — the same observation
+            [glance] pairs with the worktree summary, without the git read, so
+            a frontend may poll it on a tick while the watch is transitional.
+            Backs {!Mentat_client.workspace_dune}. *)
   }
 end
 

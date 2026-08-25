@@ -3,51 +3,36 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(** Dune RPC workspace-level diagnostic state.
+(** Dune RPC workspace observation.
 
-    {!Instance} is the shareable workspace object that polls the Dune registry,
-    selects the matching endpoint, and reports the latest-known diagnostic state
-    for tools and host watchers. *)
+    {!Instance} is the shareable workspace object that polls the Dune
+    registry, attaches to the matching endpoint, and folds the watch's own
+    diagnostic events into the settled readings every consumer snapshots. *)
 
 module Diagnostic : sig
-  (** Dune diagnostic identifiers and latest-known stores. *)
+  (** Dune diagnostic identifiers. *)
 
   module Id : sig
     (** Stable identifier for a Dune diagnostic event. *)
 
     type t
-    (** The type for non-empty diagnostic identifiers. Diagnostics are keyed by
-        this id inside the store; the projection consumers read the diagnostic
-        value and ignore the id, so it stays opaque. *)
+    (** The type for non-empty diagnostic identifiers. Diagnostics are keyed
+        by this id inside the attach loop's store; consumers read findings and
+        never the id, so it stays opaque. *)
   end
 
   type id = Id.t
   (** The type for diagnostic identifiers. *)
-
-  module Store : sig
-    (** Latest-known Dune diagnostic set, keyed by Dune diagnostic id. *)
-
-    type t
-    (** The type for a diagnostic set keyed by Dune diagnostic id. *)
-
-    val to_list : t -> (id * Mentat_ocaml.Diagnostic.t) list
-    (** [to_list store] is the diagnostics in deterministic adapter order. *)
-  end
 end
 
 module Instance : sig
-  (** Workspace-level Dune RPC state shared by tools and watchers.
+  (** Workspace-level Dune RPC state shared by every observer.
 
-      One instance should be created per Mentat workspace and reused by the
-      diagnostics tool and the host Dune watcher. The instance discovers
-      already-running Dune RPC servers through the registry; it never starts
-      Dune. This shared state keeps explicit tools and proactive host notices on
-      the same endpoint and diagnostic store.
-
-      The instance observes Dune one-shot: {!build_health} re-queries the full
-      diagnostic set per call. A live diagnostics panel (a future milestone)
-      would restore a streaming subscription over this same
-      registry-and-connection core; that is wiring, not new design. *)
+      One instance should be created per Mentat workspace: its {!attach} loop
+      holds the watch's diagnostic and progress subscriptions, and every
+      consumer — the drain-time notice producer, a status glance — reads the
+      same {!snapshot}. The instance discovers already-running Dune RPC
+      servers through the registry; it never starts Dune. *)
 
   type t
   (** The type for a workspace-level Dune RPC instance. *)
@@ -69,51 +54,68 @@ module Instance : sig
       [workspace]. It never starts Dune; it only observes an already-running RPC
       instance. *)
 
-  val diagnostics : t -> Diagnostic.Store.t
-  (** [diagnostics t] is the latest-known diagnostic set observed through [t].
-      It is updated by successful {!build_health} queries. *)
+  (** The attach-side view of the observed watch. *)
+  module Watch : sig
+    type status =
+      | Absent
+          (** No matching endpoint is registered for the workspace, or nothing
+              answered. Build diagnostics are unavailable, which is not an
+              error. *)
+      | Connecting of { pid : int }
+          (** An endpoint is registered and a connection is being established.
+          *)
+      | Attached of { pid : int }
+          (** A live connection holds the watch's diagnostic and progress
+              subscriptions. *)
+    (** The type for attach statuses. [pid] is the watch's advertised process
+        id. *)
 
-  module Health : sig
-    (** One-shot build-health verdict from Dune's current diagnostics.
+    val equal : status -> status -> bool
+    (** [equal a b] is [true] iff [a] and [b] are the same status with the
+        same pid. *)
 
-        A verdict is the collapse of connectivity and diagnostic count into the
-        fact a frontend shows at a glance. It is derived by {!build_health} and
-        is not latched: each call re-queries Dune. *)
-
-    type t =
-      | Disconnected
-          (** No matching Dune RPC endpoint is registered for the workspace, or
-              registry discovery failed. Build diagnostics are unavailable,
-              which is not an error. *)
-      | Clean  (** Connected, with an empty current diagnostic set. *)
-      | Failing of int
-          (** Connected, with the current diagnostic count, which is at least
-              [1]. *)
-      | Unknown
-          (** Connected, but the current diagnostic set could not be retrieved
-              within the query bound. *)
-
-    val equal : t -> t -> bool
-    (** [equal a b] is [true] iff [a] and [b] are the same verdict. *)
-
-    val pp : Format.formatter -> t -> unit
-    (** [pp ppf t] formats [t] for diagnostics. *)
+    val pp : Format.formatter -> status -> unit
+    (** [pp ppf status] formats [status] for diagnostics. *)
   end
 
-  val build_health :
-    t -> clock:_ Eio.Time.clock -> ?timeout_s:float -> unit -> Health.t
-  (** [build_health t ~clock ()] is a one-shot build-health verdict for the
-      workspace, derived from Dune's current diagnostic set.
+  (** What the attach loop knows right now, taken without IO. *)
+  module Snapshot : sig
+    type t = {
+      status : Watch.status;
+      building : bool;
+          (** A build is in progress, or no build has settled since the
+              connection opened. Meaningful only when attached. *)
+      reading : Mentat_workspace.Build_change.Reading.t option;
+          (** The settled reading, when one exists: the connection is attached,
+              the last progress sample is a settle, and the diagnostic stream
+              has been quiet long enough to be at rest. [None] otherwise —
+              mid-build, mid-churn, or detached — and lost visibility is the
+              change law's business, never invented here. *)
+    }
+    (** The type for snapshots. *)
+  end
 
-      It polls the Dune RPC registry for a matching endpoint and, when one is
-      found, opens a short-lived connection and requests the current diagnostic
-      set, bounded to [timeout_s] wall-clock seconds (default [0.5]). A
-      successful request updates {!diagnostics} and yields {!Health.Clean} for
-      an empty set or {!Health.Failing} for a non-empty one; a missing endpoint
-      or a discovery failure yields {!Health.Disconnected}; a connection failure
-      or a timeout yields {!Health.Unknown}.
+  val attach : t -> mono:_ Eio.Time.Mono.t -> unit
+  (** [attach t ~mono] runs the attach loop and never returns: poll the
+      registry for a matching endpoint, connect, hold the watch's [diagnostic]
+      and [progress] subscriptions — folding dune's own add/remove events into
+      the finding store — and on any disconnect fall back to polling. Run it
+      in its own fiber; cancelling that fiber (its switch releasing) detaches
+      and ends the loop.
 
-      This query never spawns Dune: it only observes an already-running RPC
-      instance. It is intended to be cheap enough to call at frontend startup.
-  *)
+      The [diagnostic] stream doubles as a build witness: dune mints fresh
+      diagnostic ids per build, so any build that touches an error produces
+      events even when its content is identical. A reading's emptiness is
+      confirmed — and a recovery therefore statable — only when a settle was
+      witnessed after the last removal, or after two seconds of total quiet,
+      because dune's progress source is sampled and a sub-sample rebuild can
+      settle without an event.
+
+      This loop never spawns dune and never writes; it only observes an
+      already-running RPC instance. *)
+
+  val snapshot : t -> Snapshot.t
+  (** [snapshot t] is the attach loop's current knowledge, without IO: safe on
+      any fiber, in particular the engine's drain path. Before {!attach} runs
+      it is [{ status = Absent; building = false; reading = None }]. *)
 end

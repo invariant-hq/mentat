@@ -278,7 +278,10 @@ let stub_review : Client.Driver.Review.t =
   }
 
 let stub_workspace : Client.Driver.Workspace.t =
-  { Client.Driver.Workspace.glance = (fun () -> stub_unavailable ()) }
+  {
+    Client.Driver.Workspace.glance = (fun () -> stub_unavailable ());
+    dune = (fun () -> stub_unavailable ());
+  }
 
 let no_user_commands () = Ok []
 let no_expand_command ~name:_ ~arguments:_ = Ok []

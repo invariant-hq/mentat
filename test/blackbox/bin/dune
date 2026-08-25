@@ -6,4 +6,4 @@
 (executable
  (name mentat_fake_dune_rpc_server)
  (modules mentat_fake_dune_rpc_server)
- (libraries dune-rpc csexp pp xdg unix))
+ (libraries dune-rpc csexp pp xdg unix threads.posix))

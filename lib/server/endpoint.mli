@@ -90,6 +90,10 @@ val review_compose : (Mentat_review.Cr.Edit.t, unit) t
 
 val glance : (unit, Textdiff.stats option * Mentat_workspace.Health.t) t
 
+val dune_status : (unit, Mentat_workspace.Health.t) t
+(** The watch status alone — [glance]'s dune half without the git read, for a
+    frontend's transitional tick. *)
+
 (** {1:lookup Lookup} *)
 
 val table : any list

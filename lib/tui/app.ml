@@ -114,6 +114,7 @@ type command =
   | Load_review_diff of { request : request; path : Lpath.Rel.t }
   | Load_review_crs of request
   | Load_workspace_glance of request
+  | Load_workspace_dune of request
   | Load_running_processes of { request : request; session : Session.Id.t }
   | Submit_review_command of {
       request : request;
@@ -462,6 +463,10 @@ type t = {
          persisted derived state — the workspace owns both facts. [None] until
          the first poll returns. *)
   glance_request : request option;
+  dune_status : Mentat_workspace.Health.t option;
+      (* The freshest watch-status observation, written by both the glance and
+         the status tick; the side pane's dune row reads this alone. *)
+  dune_request : request option;
   running : Mentat_protocol.Process.View.t list;
       (* The active session's live background processes (the [shell] tool's
          [background:true] children), projected on demand from the driver's
@@ -645,6 +650,9 @@ type msg =
       * ( Textdiff.stats option * Mentat_workspace.Health.t,
           Protocol.Error.t )
         result
+  | Workspace_dune_loaded of
+      request * (Mentat_workspace.Health.t, Protocol.Error.t) result
+  | Workspace_dune_tick
   | Running_processes_loaded of {
       request : request;
       session : Session.Id.t;
@@ -769,6 +777,9 @@ let review_crs_loaded ~request result = Review_crs_loaded (request, result)
 
 let workspace_glance_loaded ~request result =
   Workspace_glance_loaded (request, result)
+
+let workspace_dune_loaded ~request result =
+  Workspace_dune_loaded (request, result)
 
 let review_command_finished ~request result =
   Review_command_finished (request, result)
@@ -1129,6 +1140,8 @@ let initial_model ~now ~(startup : Startup.t) ~capabilities ~reduced_motion
     last_usage = None;
     glance = None;
     glance_request = None;
+    dune_status = None;
+    dune_request = None;
     running = [];
     running_request = None;
     children = [];
@@ -1187,6 +1200,10 @@ let issue_configuration t =
 let issue_workspace_glance t =
   let request, t = fresh_request t in
   ({ t with glance_request = Some request }, Load_workspace_glance request)
+
+let issue_workspace_dune t =
+  let request, t = fresh_request t in
+  ({ t with dune_request = Some request }, Load_workspace_dune request)
 
 let issue_session_view session t =
   let request, t = fresh_request t in
@@ -1272,6 +1289,8 @@ let reset_conversation t =
     last_usage = None;
     glance = None;
     glance_request = None;
+    dune_status = None;
+    dune_request = None;
     running = [];
     running_request = None;
     children = [];
@@ -4109,7 +4128,17 @@ let load_workspace_glance_result request result t =
   guard_request t.glance_request request t @@ fun t ->
   let t = { t with glance_request = None } in
   match result with
-  | Ok value -> ({ t with glance = Some value }, [])
+  | Ok value ->
+      ({ t with glance = Some value; dune_status = Some (snd value) }, [])
+  | Error _ -> (t, [])
+
+(* The status tick's fold: the same replace-on-success law over the dune half
+   alone. *)
+let load_workspace_dune_result request result t =
+  guard_request t.dune_request request t @@ fun t ->
+  let t = { t with dune_request = None } in
+  match result with
+  | Ok status -> ({ t with dune_status = Some status }, [])
   | Error _ -> (t, [])
 
 (* Fold a running-processes poll only while its request is current and its
@@ -5004,6 +5033,13 @@ let update msg t =
       load_configuration_result request result t
   | Workspace_glance_loaded (request, result) ->
       load_workspace_glance_result request result t
+  | Workspace_dune_loaded (request, result) ->
+      load_workspace_dune_result request result t
+  | Workspace_dune_tick ->
+      if Option.is_some t.dune_request then (t, [])
+      else
+        let t, command = issue_workspace_dune t in
+        (t, [ command ])
   | Running_processes_loaded { request; session; result } ->
       load_running_processes_result ~request ~session result t
   | Account_readiness_loaded (request, result) ->
@@ -5488,15 +5524,37 @@ let workspace_spent t =
   | _, None | None, _ | Some _, Some _ -> None
 
 (* The last polled workspace glance, split into its two independent signals. The
-   worktree diff is absent until the first poll returns; the tooling verdict
-   defaults to [Unknown] (no row) until then, honoring the fail-honest law. *)
+   worktree diff is absent until the first poll returns; the tooling status
+   defaults to [Off Disabled] (no row) until then, honoring the fail-honest
+   law. *)
 let workspace_worktree t =
   match t.glance with Some (worktree, _) -> worktree | None -> None
 
 let workspace_tooling t =
-  match t.glance with
-  | Some (_, tooling) -> tooling
-  | None -> Mentat_workspace.Health.Unknown
+  match t.dune_status with
+  | Some status -> status
+  | None -> Mentat_workspace.Health.Off Mentat_workspace.Health.Off.Disabled
+
+(* The watch is worth following on a tick only while it is between settled
+   states; at rest the event-driven glance moments are enough, and an absent
+   watch is not polled at all. *)
+let workspace_dune_transitional t =
+  match workspace_tooling t with
+  | Mentat_workspace.Health.Probing | Mentat_workspace.Health.Starting
+  | Mentat_workspace.Health.Restarting _ ->
+      true
+  | Mentat_workspace.Health.Live
+      {
+        phase =
+          ( Mentat_workspace.Health.Phase.Building
+          | Mentat_workspace.Health.Phase.Unresponsive );
+        _;
+      } ->
+      true
+  | Mentat_workspace.Health.Live
+      { phase = Mentat_workspace.Health.Phase.Settled _; _ }
+  | Mentat_workspace.Health.Off _ ->
+      false
 
 let workspace_section t =
   Pane_sections.section ~label:"workspace"
@@ -6326,6 +6384,9 @@ let subscriptions t =
       (if home_motion then Mosaic.Sub.on_tick (fun ~dt -> Frame_tick dt)
        else Mosaic.Sub.none);
       Mosaic.Sub.every 1. (fun () -> Clock_tick);
+      (if workspace_dune_transitional t then
+         Mosaic.Sub.every 2. (fun () -> Workspace_dune_tick)
+       else Mosaic.Sub.none);
       (if turn_in_flight t || Option.is_some (compaction_started t) then
          Mosaic.Sub.every spinner_frame_interval (fun () -> Turn_tick)
        else Mosaic.Sub.none);

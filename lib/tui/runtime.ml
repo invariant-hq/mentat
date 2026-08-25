@@ -758,6 +758,11 @@ let run ~stdenv ~client ~(startup : Startup.t) ~(local : Local.t)
               deliver
                 (App.workspace_glance_loaded ~request
                    (Client.workspace_glance client)))
+      | App.Load_workspace_dune request ->
+          perform (fun _ ->
+              deliver
+                (App.workspace_dune_loaded ~request
+                   (Client.workspace_dune client)))
       | App.Load_running_processes { request; session } ->
           perform (fun _ ->
               deliver

@@ -3,41 +3,116 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(** The workspace tooling build-health verdict — the ambient glance's dune
+(** The workspace build-watch status and verdict — the ambient glance's dune
     signal.
 
-    A wire-safe projection of an OCaml dev loop's build health, owned in this
-    pure library so every layer above the workspace can name it without linking
-    a build-tool effect library: the protocol embeds {!jsont} on its query
-    response lane, and a frontend renders the verdict directly. It carries only
-    the verdict, never diagnostics.
+    A wire-safe projection of one workspace's dune watch, owned in this pure
+    library so every layer above the workspace can name it without linking a
+    build-tool effect library: the protocol embeds {!jsont} on its query
+    response lane, and a frontend renders it directly.
 
-    {b The fail-honest law.} Only {!Clean} and {!Failing} are affirmative
-    verdicts a frontend renders as a status row. {!Disconnected} (no build watch
-    is reachable) and {!Unknown} (a probe lost visibility, or the workspace's
-    [workspace.tooling] is disabled) carry no verdict — a frontend omits the row
-    rather than inventing one. A verdict is a point-in-time observation a
+    {b The fail-honest law, as a type.} A build verdict exists only inside
+    {!Phase.Settled}: every other state carries no verdict, so a frontend
+    cannot invent one while a build runs, a connection is being established,
+    or nothing is attached. The status itself is a fact about the watch — a
+    frontend may always render it. A value is a point-in-time observation a
     frontend holds as a last observation and re-reads on demand; it is never
     persisted derived state. *)
 
+(** Build verdicts of a settled reading. *)
+module Verdict : sig
+  type t = Clean | Failing of { errors : int; warnings : int }
+  (** The type for verdicts. [Failing] counts the build lane's diagnostics by
+      severity; a failed build that printed only warnings is
+      [Failing { errors = 0; warnings = n }], never [Clean] — the build tool's
+      own verdict is failure. Invariant: [Failing] has [errors + warnings >=
+      1]. *)
+
+  val equal : t -> t -> bool
+  (** [equal a b] is [true] iff [a] and [b] are the same verdict with the same
+      counts. *)
+
+  val pp : Format.formatter -> t -> unit
+  (** [pp ppf t] formats [t] for diagnostics. *)
+end
+
+(** Watch owners. *)
+module Owner : sig
+  type t = Ours | Theirs of int
+  (** The type for owners: the watch this instance spawned and supervises, or
+      an already-running one attached to by its advertised pid. A foreign
+      watch is observed, never signalled. *)
+
+  val equal : t -> t -> bool
+  (** [equal a b] is [true] iff [a] and [b] are the same owner with the same
+      pid. *)
+
+  val pp : Format.formatter -> t -> unit
+  (** [pp ppf t] formats [t] for diagnostics. *)
+end
+
+(** Phases of a live, attached watch. *)
+module Phase : sig
+  type t =
+    | Building
+        (** A build is in progress, or none has settled since attaching. No
+            verdict. *)
+    | Settled of { build : Verdict.t; lint : int option }
+        (** The last build settled: the build verdict, and the lint lane's
+            finding count — [None] when the lane is off or the watch's lint
+            targets are unknown, which is absence, never cleanliness. *)
+    | Unresponsive
+        (** The watch stopped answering liveness probes. Reachable only for a
+            foreign watch: an owned one is restarted instead. *)
+  (** The type for phases. *)
+
+  val equal : t -> t -> bool
+  (** [equal a b] is [true] iff [a] and [b] are the same phase with the same
+      verdict and lint count. *)
+
+  val pp : Format.formatter -> t -> unit
+  (** [pp ppf t] formats [t] for diagnostics. *)
+end
+
+(** Why no watch is running. *)
+module Off : sig
+  type t =
+    | Disabled  (** Workspace tooling is disabled or the workspace untrusted. *)
+    | No_dune  (** No dune executable resolves. *)
+    | No_server
+        (** Nothing is attached and this instance does not spawn: no endpoint
+            is registered, or nothing answered. Not an error. *)
+    | Blocked of string
+        (** The watch cannot run here; the payload names why (for example a
+            sandbox denying its file watcher). *)
+    | Gave_up  (** Successive spawned watches died before coming up. *)
+  (** The type for off reasons. *)
+
+  val equal : t -> t -> bool
+  (** [equal a b] is [true] iff [a] and [b] are the same reason with the same
+      payload. *)
+
+  val pp : Format.formatter -> t -> unit
+  (** [pp ppf t] formats [t] for diagnostics. *)
+end
+
 type t =
-  | Disconnected
-      (** No build watch is reachable; there is nothing to report. *)
-  | Clean  (** A reachable build watch reports an empty diagnostic set. *)
-  | Failing of int
-      (** A reachable build watch reports [n >= 1] outstanding diagnostics. *)
-  | Unknown
-      (** Visibility was lost — a probe timeout or failure — or the workspace's
-          tooling is disabled. No verdict. *)
+  | Off of Off.t  (** No watch and no attachment. *)
+  | Probing  (** Discovery or connection establishment is in flight. *)
+  | Starting  (** A spawned watch has not yet accepted a connection. *)
+  | Live of { owner : Owner.t; phase : Phase.t }  (** Attached. *)
+  | Restarting of { cause : string }
+      (** An owned watch is being respawned; [cause] names why (["exit 1"],
+          ["hang"]). *)
+(** The type for watch statuses. *)
 
 val equal : t -> t -> bool
-(** [equal a b] is [true] iff [a] and [b] are the same verdict, the {!Failing}
-    count included. *)
+(** [equal a b] is [true] iff [a] and [b] are the same status, every payload
+    included. *)
 
 val pp : Format.formatter -> t -> unit
 (** [pp ppf t] formats [t] for diagnostics. *)
 
 val jsont : t Jsont.t
-(** [jsont] is the JSON codec for a verdict — the one wire form the protocol's
-    query response embeds. It round-trips every case, the {!Failing} count
-    included. *)
+(** [jsont] is the JSON codec for a status — the one wire form the protocol's
+    query response embeds. It round-trips every case, payloads included. *)

@@ -1738,6 +1738,7 @@ let build_driver ctx : Mentat_client.Driver.t =
     {
       Mentat_client.Driver.Workspace.glance =
         (fun () -> call ctx Endpoint.glance ());
+      dune = (fun () -> call ctx Endpoint.dune_status ());
     }
   in
   {

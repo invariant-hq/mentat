@@ -3129,7 +3129,10 @@ let client (fixture : fixture) =
     }
   in
   let workspace : Driver.Workspace.t =
-    { Driver.Workspace.glance = (fun () -> Ok fixture.glance) }
+    {
+      Driver.Workspace.glance = (fun () -> Ok fixture.glance);
+      dune = (fun () -> Ok (snd fixture.glance));
+    }
   in
   let user_commands () = Ok (List.map fst fixture.user_commands) in
   let expand_command ~name ~arguments =
@@ -3243,7 +3246,7 @@ let run ?(size = (80, 24)) ?(env = []) ?(reduced_motion = true)
     ?model_readiness_results ?save_api_key ?logout ?(login_scripts = [])
     ?(model_selections = []) ?(permission_reviews = []) ?(decision_answers = [])
     ?(decision_continuations = []) ?(turns = []) ?(compactions = [])
-    ?(review = []) ?(workspace_glance = (None, Workspace.Health.Unknown))
+    ?(review = []) ?(workspace_glance = (None, Workspace.Health.Off Workspace.Health.Off.Disabled))
     ?(running_processes = fun () -> []) ?(user_commands = []) ?lifecycle_results
     ?(hold_lifecycle_results = false) ?screen_session_results
     ?(hold_screen_session_results = false) ?queue_edit_results

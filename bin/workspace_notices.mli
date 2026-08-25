@@ -3,66 +3,43 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(** The drain-time dune build-health notice producer.
+(** The drain-time dune notice producer.
 
     This is one of [drain_notices]' two v1 sources, alongside
-    {!Workspace_watch}. It observes the workspace's Dune RPC — registry-first,
-    {b never spawning dune} — at each drain and lowers build-health
-    {e transitions} into {!Mentat_workspace.Notice.t}. It reads diagnostics from
-    an already-running [dune build --watch] (the standard OCaml dev loop); it
-    starts no build of its own. When no watch is registered the probe is a
-    single cheap registry read and no notice is produced — build diagnostics
-    being unavailable is not an error, so the channel stays silent rather than
-    fabricating one.
+    {!Workspace_watch}. It reads the shared attach observer's settled reading
+    — a memory read, never IO on the drain path — and lowers the change law's
+    verdicts into {!Mentat_workspace.Notice.t}: what the last settled build
+    says that the model has not heard, per lane, and nothing when the finding
+    set is unchanged, the watch is mid-build, or nothing is attached.
 
     Notices are deduplicated in the producer because the port has no queue:
-    {!drain} returns the empty list unless the verdict changed since the last
-    drain, and — for a recovery — has stayed changed long enough to be believed.
-    The last {e concrete} verdict ([Clean]/[Failing]) is the baseline;
-    [Disconnected]/[Unknown] are lost visibility and neither emit nor move it,
-    so a reconnect to the same failure does not re-notice. *)
+    the law's baseline advances only when a change is stated, so a producer
+    drained many times within one turn repeats nothing, and lost visibility
+    neither states nor forgets anything. *)
 
 type t
-(** A stateful producer: a workspace Dune RPC instance and the build-health
-    verdicts read through it. *)
+(** A stateful producer: the shared observer and the change law's stated
+    baseline. *)
 
-val make :
-  stdenv:Eio_unix.Stdenv.base ->
-  ?env:(string -> string option) ->
-  workspace:Mentat_workspace.t ->
-  unit ->
-  t
-(** [make ~stdenv ~workspace ()] is a producer over [workspace]'s Dune RPC.
-    [stdenv]'s filesystem and [env] (default {!Sys.getenv_opt}) drive XDG
-    registry discovery, its network connects to a discovered endpoint, and its
-    clock bounds each diagnostics request. Construction performs no IO; the
-    first {!drain} polls. *)
+val make : instance:Mentat_ocaml_dune_rpc.Instance.t -> unit -> t
+(** [make ~instance ()] is a producer over [instance]'s attach observer.
+    Construction performs no IO; {!drain} reads the observer's snapshot. *)
 
 val drain : t -> Mentat_workspace.Notice.t list
-(** [drain t] polls build health once and is the transition notice, if any:
+(** [drain t] is the changes the current settled reading states over the
+    baseline, as notices — build lane first, then lint — advancing the
+    baseline exactly by what it returns. No settled reading is the empty
+    list. *)
 
-    - a fresh or changed failure is one [Error] notice whose body is the head
-      Dune diagnostic ([path:line:col: message]);
-    - a recovery from a known failure is one [Info] notice, on the first clean
-      verdict read at least fifteen seconds after the clean verdict that
-      preceded it with no failure in between;
-    - an unchanged verdict, a clean baseline, or lost visibility
-      ([Disconnected]/[Unknown]) is [[]]. Lost visibility leaves the baseline
-      alone but discards a pending recovery, so a gap in observation cannot
-      supply the separation that confirms one.
+val health_of : Mentat_ocaml_dune_rpc.Instance.t -> Mentat_workspace.Health.t
+(** [health_of instance] is the watch status a frontend glances at, projected
+    from [instance]'s snapshot without IO: nothing attached is
+    {!Mentat_workspace.Health.Off} [No_server], a connection in flight is
+    {!Mentat_workspace.Health.Probing}, and an attached watch is
+    {!Mentat_workspace.Health.Live} with a foreign owner — mid-build or
+    unsettled as [Building], at rest as [Settled] with the reading's verdict
+    and lint count. The caller owes the tooling gate: a disabled or untrusted
+    workspace never reaches this projection. *)
 
-    Recovery is confirmed against the clock and failure is not, because dune
-    clears a rebuilt file's diagnostics before the rebuild republishes them: a
-    drain landing in that window reads an empty set that does not mean the build
-    is fixed, and two drains a tool call apart can both land there. A false
-    recovery would tell the model to stop working on a build that is still
-    broken, while a late one costs almost nothing. The separation is a heuristic
-    and not a guarantee — a rebuild slower than it still reads as a recovery.
-
-    The single 0.5s-bounded probe never spawns dune. A turn's total probe cost
-    scales with the tool claims it settles, since each one drains. *)
-
-val health : t -> Mentat_ocaml_dune_rpc.Instance.Health.t
-(** [health t] is the raw verdict of the last {!drain} ([Disconnected] before
-    the first). Exposed for a frontend at-a-glance build indicator that must not
-    run a second probe — one endpoint, one poll per drain. *)
+val health : t -> Mentat_workspace.Health.t
+(** [health t] is {!health_of} over [t]'s observer. *)

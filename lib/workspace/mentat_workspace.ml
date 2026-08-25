@@ -9,6 +9,8 @@ module Resolve_error = Resolve_error
 module Path = Path
 module Notice = Notice
 module Health = Health
+module Finding = Finding
+module Build_change = Build_change
 
 type t = { primary : Root.t; read_only : Root.t list; cwd : Path.t }
 

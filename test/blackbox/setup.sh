@@ -133,6 +133,18 @@ start_fake_dune () {
   wait_for_file fake-dune-ready
 }
 
+# Like start_fake_dune, but dynamic: the server re-reads STATE_FILE
+# (clean|failing|error2) on a short tick and answers its parked long-polls on a
+# change, so a turn's own tool command can flip the build state mid-turn.
+start_fake_dune_state () {
+  local state_file="$1"
+  rm -f fake-dune-ready
+  fake_dune_rpc_server --root "$PWD" --state-file "$state_file" \
+    --ready fake-dune-ready &
+  MENTAT_FAKE_DUNE_PID=$!
+  wait_for_file fake-dune-ready
+}
+
 stop_fake_dune () {
   kill "$MENTAT_FAKE_DUNE_PID" 2>/dev/null
   wait "$MENTAT_FAKE_DUNE_PID" 2>/dev/null

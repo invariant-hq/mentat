@@ -104,6 +104,11 @@ type t = {
   mutable engine : Engine.t option;
   mutable assembled :
     (Client.Driver.t * Mentat_workspace_io.t * Mentat_tool.t) option;
+  (* The shared dune-RPC observer: one per instance, created and attached on
+     first demand — a projection layer that never drains or glances also never
+     starts the fiber — and shared by the notice producer and the status
+     glance so both read one store. *)
+  mutable dune_rpc : Mentat_ocaml_dune_rpc.Instance.t option;
 }
 
 let dirs t = t.shared.dirs
@@ -384,6 +389,7 @@ let make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
     listing_refresh_at = Hashtbl.create 4;
     engine = None;
     assembled = None;
+    dune_rpc = None;
   }
 
 (* The single-workspace CLI path: the exact staging sequence [with_base]
@@ -1275,6 +1281,32 @@ let dune_health_enabled t capability =
   project_tools_enabled t capability
   && Cfg.Resolved.get Cfg.Field.notices_dune_diagnostics t.config
 
+(* The shared observer, created on first demand under the instance switch. The
+   attach loop holds the watch's diagnostic and progress subscriptions on its
+   own fiber; every consumer — the drain-time producer, the glance — reads its
+   snapshot without IO. The gate is the caller's: this accessor is reached only
+   behind {!dune_health_enabled}. *)
+let dune_rpc_instance t =
+  match t.dune_rpc with
+  | Some instance -> instance
+  | None ->
+      let stdenv = t.shared.stdenv in
+      let instance =
+        Mentat_ocaml_dune_rpc.Instance.create ~fs:(Eio.Stdenv.fs stdenv)
+          ~net:(Eio.Stdenv.net stdenv)
+          ~workspace:
+            (Mentat_workspace.single (Mentat_workspace.Root.of_dir t.root))
+          ~env:(getenv t) ()
+      in
+      t.dune_rpc <- Some instance;
+      (* A daemon fiber: the attach loop must never hold the instance switch
+         open past its main flow — teardown cancels it. *)
+      Eio.Fiber.fork_daemon ~sw:t.switch (fun () ->
+          Mentat_ocaml_dune_rpc.Instance.attach instance
+            ~mono:(Eio.Stdenv.mono_clock stdenv);
+          `Stop_daemon);
+      instance
+
 (* The review git loader wiring: the effect closures that adapt the workspace
    capability's sealed boundaries into the [run]/[read]/[write] the pure
    {!Review_git} loader takes. This is the executable-side half of the review
@@ -1545,47 +1577,20 @@ let workspace_cone t capability ~base_spec : Client.Driver.Workspace.t =
         | Ok stats -> Some stats
         | Error _ -> None)
   in
-  (* The dune-RPC producer is built once — on the first probe and only when
-     tooling health is enabled — then reused, so its verdict is a stable last
-     observation rather than a per-glance reconnect. A tooling-disabled or
-     untrusted workspace constructs none and reports [Unknown], which the
-     frontend renders as an absent row (Health's fail-honest law). The probe is
-     registry-first and never spawns dune. *)
-  let producer = ref None in
+  (* The glance's dune half is a projection of the shared observer's snapshot
+     — a memory read, never IO and never a drain: the transition notices are
+     the notice producer's business, and a read that consumed them would eat
+     the model's observations. A tooling-disabled or untrusted workspace
+     reports [Off Disabled], which the frontend renders as an absent row. *)
   let tooling_health () =
     if not (dune_health_enabled t capability) then
-      Mentat_workspace.Health.Unknown
-    else
-      let p =
-        match !producer with
-        | Some p -> p
-        | None ->
-            let p =
-              Workspace_notices.make ~stdenv:t.shared.stdenv ~env:(getenv t)
-                ~workspace:
-                  (Mentat_workspace.single
-                     (Mentat_workspace.Root.of_dir t.root))
-                ()
-            in
-            producer := Some p;
-            p
-      in
-      (* The transition notices are the notice producer's business; here only
-         the resulting verdict is wanted, so drain to poll and read it back. *)
-      let (_ : Mentat_workspace.Notice.t list) = Workspace_notices.drain p in
-      match Workspace_notices.health p with
-      | Mentat_ocaml_dune_rpc.Instance.Health.Disconnected ->
-          Mentat_workspace.Health.Disconnected
-      | Mentat_ocaml_dune_rpc.Instance.Health.Clean ->
-          Mentat_workspace.Health.Clean
-      | Mentat_ocaml_dune_rpc.Instance.Health.Failing count ->
-          Mentat_workspace.Health.Failing count
-      | Mentat_ocaml_dune_rpc.Instance.Health.Unknown ->
-          Mentat_workspace.Health.Unknown
+      Mentat_workspace.Health.Off Mentat_workspace.Health.Off.Disabled
+    else Workspace_notices.health_of (dune_rpc_instance t)
   in
   {
     Client.Driver.Workspace.glance =
       (fun () -> Ok (worktree_stats (), tooling_health ()));
+    dune = (fun () -> Ok (tooling_health ()));
   }
 
 (* The engine config callback. *)
@@ -2086,23 +2091,24 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
   let review_verbs = Verb.Ask_user :: collaboration in
   let snapshot_store = snapshot_store t in
   let snapshot_self_prefix = snapshot_self_prefix t in
-  (* The dune build-health notice producer is gated by project tooling (trust +
-     [workspace.tooling]) and the [notices.dune_diagnostics] flag it derives its
-     verdict from: mentat observes an already-running [dune build --watch] only
-     for a trusted, tooling-engaged workspace that has not disabled dune
-     notices, and never for an untrusted, tooling-off, or opted-out one. It
-     spawns no dune. Attached to the build workspace alone — build breakage is a
-     build-mode concern. *)
+  (* The dune notice producer is gated by project tooling (trust +
+     [workspace.tooling]) and the [notices.dune_diagnostics] flag: mentat
+     observes an already-running [dune build --watch] only for a trusted,
+     tooling-engaged workspace that has not disabled dune notices, and never
+     for an untrusted, tooling-off, or opted-out one. It spawns no dune. The
+     drain is a memory read of the shared observer plus the pure change law —
+     no IO on the driver fiber. Attached to the build workspace alone — build
+     breakage is a build-mode concern. *)
   let build_health_notices =
     if not (dune_health_enabled t read_capability) then None
     else
+      (* Lazily, so a projection layer that never drains — the offline tool
+         and capability listings — neither creates the observer nor starts its
+         fiber. The first engine drain does both. *)
       let producer =
-        Workspace_notices.make ~stdenv:t.shared.stdenv ~env:(getenv t)
-          ~workspace:
-            (Mentat_workspace.single (Mentat_workspace.Root.of_dir t.root))
-          ()
+        lazy (Workspace_notices.make ~instance:(dune_rpc_instance t) ())
       in
-      Some (fun () -> Workspace_notices.drain producer)
+      Some (fun () -> Workspace_notices.drain (Lazy.force producer))
   in
   (* The watch lane is attached to the build workspace alone: its poll
      boundaries advance on the root driver's fiber (claim brackets and
@@ -2120,10 +2126,12 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
     match (build_health_notices, watch) with
     | None, None -> None
     | health, watch ->
+        (* Cause before consequence: what changed on disk, then what the build
+           made of it. *)
         Some
           (fun () ->
-            Option.fold ~none:[] ~some:(fun drain -> drain ()) health
-            @ Option.fold ~none:[] ~some:Workspace_watch.drain watch)
+            Option.fold ~none:[] ~some:Workspace_watch.drain watch
+            @ Option.fold ~none:[] ~some:(fun drain -> drain ()) health)
   in
   let build_workspace =
     Workspace_adapter.make ~store:snapshot_store

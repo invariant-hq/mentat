@@ -71,32 +71,73 @@ let goal ~palette ~labelled ~objective =
         ]
       else [ row [ content ] ]
 
-(* Fail-honest: only affirmative verdicts earn a row. A lost or disabled build
-   watch ([Disconnected]/[Unknown]) renders nothing rather than a reassuring or
-   alarming guess. *)
+(* Fail-honest: a verdict exists only inside a settled phase, and an absent
+   watch renders nothing rather than a reassuring or alarming guess. Status
+   words — building, starting, restarting, unresponsive — are facts about the
+   watch itself and render muted, except unresponsiveness, which warns. *)
+let dune_row ~palette segs =
+  [ row (Prims.seg (Theme.Palette.muted_style palette) "dune" :: segs) ]
+
+let verdict_segs ~palette (verdict : Mentat_workspace.Health.Verdict.t) =
+  match verdict with
+  | Mentat_workspace.Health.Verdict.Clean ->
+      [ Prims.seg (Theme.Palette.muted_style palette) "clean" ]
+  | Mentat_workspace.Health.Verdict.Failing { errors = 0; warnings } ->
+      [
+        Prims.seg
+          (Theme.Palette.warning_style palette)
+          (Printf.sprintf "%d warning%s" warnings (plural warnings));
+      ]
+  | Mentat_workspace.Health.Verdict.Failing { errors; warnings = _ } ->
+      [
+        Prims.seg
+          (Theme.Palette.error_style palette)
+          (Printf.sprintf "%d error%s" errors (plural errors));
+      ]
+
+let lint_segs ~palette ~sep:sep_seg lint =
+  match lint with
+  | Some n when n > 0 ->
+      [
+        sep_seg;
+        Prims.seg
+          (Theme.Palette.warning_style palette)
+          (Printf.sprintf "%d lint" n);
+      ]
+  | Some _ | None -> []
+
 let tooling ~palette ~tooling =
   match (tooling : Mentat_workspace.Health.t) with
-  | Mentat_workspace.Health.Clean ->
-      [
-        row
-          [
-            Prims.seg (Theme.Palette.muted_style palette) "dune";
-            sep ~palette;
-            Prims.seg (Theme.Palette.muted_style palette) "clean";
-          ];
-      ]
-  | Mentat_workspace.Health.Failing n ->
-      [
-        row
-          [
-            Prims.seg (Theme.Palette.muted_style palette) "dune";
-            sep ~palette;
-            Prims.seg
-              (Theme.Palette.error_style palette)
-              (Printf.sprintf "%d error%s" n (plural n));
-          ];
-      ]
-  | Mentat_workspace.Health.Disconnected | Mentat_workspace.Health.Unknown -> []
+  | Mentat_workspace.Health.Off _ | Mentat_workspace.Health.Probing -> []
+  | Mentat_workspace.Health.Starting ->
+      dune_row ~palette
+        [ sep ~palette; Prims.seg (Theme.Palette.muted_style palette) "starting" ]
+  | Mentat_workspace.Health.Restarting { cause } ->
+      dune_row ~palette
+        [
+          sep ~palette;
+          Prims.seg
+            (Theme.Palette.warning_style palette)
+            (Printf.sprintf "restarting (%s)" cause);
+        ]
+  | Mentat_workspace.Health.Live { owner = _; phase } -> (
+      match phase with
+      | Mentat_workspace.Health.Phase.Building ->
+          dune_row ~palette
+            [
+              sep ~palette;
+              Prims.seg (Theme.Palette.muted_style palette) "building";
+            ]
+      | Mentat_workspace.Health.Phase.Unresponsive ->
+          dune_row ~palette
+            [
+              sep ~palette;
+              Prims.seg (Theme.Palette.warning_style palette) "unresponsive";
+            ]
+      | Mentat_workspace.Health.Phase.Settled { build; lint } ->
+          dune_row ~palette
+            ((sep ~palette :: verdict_segs ~palette build)
+            @ lint_segs ~palette ~sep:(sep ~palette) lint))
 
 let muted_row ~palette value =
   row [ Prims.seg (Theme.Palette.muted_style palette) value ]

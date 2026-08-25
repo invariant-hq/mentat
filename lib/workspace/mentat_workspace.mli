@@ -52,6 +52,14 @@ module Health = Health
 (** The tooling build-health verdict a frontend glances at, wire-safe and
     fail-honest: only affirmative verdicts render, absence is honest. *)
 
+module Finding = Finding
+(** Build and lint diagnostic identities — the content keys the change law
+    compares. *)
+
+module Build_change = Build_change
+(** The build-change law: the pure diff between consecutive settled diagnostic
+    readings, per lane, rendered as {!Notice.t}. *)
+
 type t
 (** An admitted workspace. Exactly one root is primary and writable; every
     auxiliary root is read-only. Across all admitted roots, durable keys and
