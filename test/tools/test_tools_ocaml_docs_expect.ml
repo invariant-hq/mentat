@@ -1204,7 +1204,7 @@ let%expect_test "name queries refuse while a supervised watch holds dune's lock"
   [%expect
     {|
     status: failed unavailable
-    message: the build watch holds dune's build lock, and the docs universe needs `dune describe`, which cannot run beside it; use ocaml_find_definitions or ocaml_type_at for name lookups, or query ocaml_docs by path
+    message: a build watch holds dune's build lock, and the docs universe needs `dune describe`, which cannot run beside it; use ocaml_find_definitions or ocaml_type_at for name lookups, or query ocaml_docs by path
     metadata: false
     invocations: dune=0 merlin=0
     |}]

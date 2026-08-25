@@ -1153,7 +1153,7 @@ let%expect_test "the tool refuses while a supervised watch holds dune's lock" =
   [%expect
     {|
     status: failed unavailable
-    message: the build watch holds dune's build lock, and ocaml_eval needs `dune ocaml top`, which cannot run beside it; use ocaml_type_at, ocaml_find_definitions, or ocaml_docs path queries instead
+    message: a build watch holds dune's build lock, and ocaml_eval needs `dune ocaml top`, which cannot run beside it; use ocaml_type_at, ocaml_find_definitions, or ocaml_docs path queries instead
     metadata: false
     invocations: 0
     |}]

@@ -1850,14 +1850,15 @@ let logical_workspace workspace_io =
       in
       Ok (Workspace.single ~cwd:(Workspace.Path.rel cwd) root)
 
-(* The refusal while a supervised build watch holds dune's build lock: the
+(* The refusal while a build watch — supervised or foreign — holds dune's
+   build lock: the
    universe command ([dune describe workspace]) takes that lock and would
    fail with dune's own advice — which suggests deleting [_build/.lock],
    exactly what a caller must never do while a watch runs — so name queries
    answer honestly and point at the lock-free alternatives. Path queries
    never reach this command and stay available. *)
 let watch_lock_message =
-  "the build watch holds dune's build lock, and the docs universe needs \
+  "a build watch holds dune's build lock, and the docs universe needs \
    `dune describe`, which cannot run beside it; use ocaml_find_definitions \
    or ocaml_type_at for name lookups, or query ocaml_docs by path"
 

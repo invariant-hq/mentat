@@ -444,13 +444,14 @@ let run_setup workspace_io ~clock ~program ~started ~directory ~address
       | Supervision_failed _ ->
           result_of_output output)
 
-(* The refusal while a supervised build watch holds dune's build lock. The
+(* The refusal while a build watch — supervised or foreign — holds dune's
+   build lock. The
    setup command ([dune ocaml top .]) takes that lock and would fail with
    dune's own advice — which suggests deleting [_build/.lock], exactly what a
    caller must never do while a watch runs — so the tool answers honestly and
    names the lock-free alternatives instead. *)
 let watch_lock_message =
-  "the build watch holds dune's build lock, and ocaml_eval needs `dune ocaml \
+  "a build watch holds dune's build lock, and ocaml_eval needs `dune ocaml \
    top`, which cannot run beside it; use ocaml_type_at, \
    ocaml_find_definitions, or ocaml_docs path queries instead"
 
