@@ -1324,6 +1324,13 @@ let dune_watch_mode t capability =
    snapshot without IO. The accessor owns its own gate: an untrusted,
    tooling-off, or watch-off workspace never constructs an observer, so no
    future caller can attach one around the gate by accident. *)
+(* The one logical-workspace value the dune lane resolves paths against:
+   the observer's stream diagnostics and the lint runner's parsed output
+   must agree on it, or the "resolved exactly as stream diagnostics are"
+   parity silently breaks. *)
+let dune_workspace t =
+  Mentat_workspace.single (Mentat_workspace.Root.of_dir t.root)
+
 let dune_rpc_instance t capability =
   match dune_watch_mode t capability with
   | None -> None
@@ -1340,9 +1347,7 @@ let dune_rpc_instance t capability =
             Mentat_ocaml_dune_rpc.Instance.create ~fs:(Eio.Stdenv.fs stdenv)
               ~net:(Eio.Stdenv.net stdenv)
               ~mono:(Eio.Stdenv.mono_clock stdenv)
-              ~workspace:
-                (Mentat_workspace.single (Mentat_workspace.Root.of_dir t.root))
-              ~env:(getenv t) ()
+              ~workspace:(dune_workspace t) ~env:(getenv t) ()
           in
           (match t.dune_rpc with
           | Some raced -> Some raced
@@ -1427,10 +1432,7 @@ let dune_lint_runner t capability ~instance =
                 Dune_lint.make ~rpc:instance ~capability
                   ~mono:(Eio.Stdenv.mono_clock t.shared.stdenv)
                   ~sw:t.switch
-                  ~workspace:
-                    (Mentat_workspace.single
-                       (Mentat_workspace.Root.of_dir t.root))
-                  ~command
+                  ~workspace:(dune_workspace t) ~command
               in
               t.dune_lint <- Some runner;
               Some runner))

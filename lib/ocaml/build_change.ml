@@ -112,6 +112,10 @@ let step (state : State.t) reading =
           (Some build)
       in
       let lint_change, lint_stated =
+        (* The lint lane borrows the build stream's settle-witness gate:
+           runner-attested emptiness needs no witness, so the borrowing can
+           only delay a Lint clean by the fallback window — deliberate, and
+           cheaper than a second confirmation vocabulary. *)
         step_lane Finding.Lane.Lint state.State.lint ~empty_confirmed lint
       in
       ( List.filter_map Fun.id [ build_change; lint_change ],
