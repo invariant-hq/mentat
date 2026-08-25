@@ -334,10 +334,73 @@ let store_rules =
             (Option.is_none (read store ~now:9.)));
     ]
 
+module Watch = Mentat_ocaml_dune_rpc.Watch
+module Health = Mentat_workspace.Health
+
+let live owner = Health.Live { owner; phase = Health.Phase.Building }
+
+let watch_law =
+  group "watch law"
+    [
+      test "an observed attachment wins, whatever the machine claims"
+        (fun () ->
+          let observed = live (Health.Owner.Theirs 42) in
+          List.iter
+            (fun word ->
+              is_true ~msg:"an attached connection is ground truth"
+                (Health.equal observed (Watch.compose word ~observed)))
+            [
+              Watch.Defer;
+              Watch.Announce Health.Probing;
+              Watch.Announce Health.Starting;
+              Watch.Announce
+                (Health.Restarting (Health.Restart.Exited "exit 1"));
+              Watch.Announce (Health.Off Health.Off.Gave_up);
+            ]);
+      test "Defer hands the observer's view through unchanged" (fun () ->
+          List.iter
+            (fun observed ->
+              is_true ~msg:"the observer speaks"
+                (Health.equal observed (Watch.compose Watch.Defer ~observed)))
+            [
+              Health.Off Health.Off.No_server;
+              Health.Probing;
+              live Health.Owner.Ours;
+            ]);
+      test "an announcement outranks a non-live observer" (fun () ->
+          List.iter
+            (fun observed ->
+              is_true ~msg:"the machine's claim shows"
+                (Health.equal Health.Starting
+                   (Watch.compose (Watch.Announce Health.Starting) ~observed)))
+            [ Health.Off Health.Off.No_server; Health.Probing ]);
+      test "two consecutive pre-Live deaths give up" (fun () ->
+          match Watch.after_death ~reached:false ~deaths:0 with
+          | `Give_up -> fail "the first death restarts"
+          | `Retry deaths -> (
+              equal int ~msg:"one strike" 1 deaths;
+              match Watch.after_death ~reached:false ~deaths with
+              | `Retry _ -> fail "the second consecutive death gives up"
+              | `Give_up -> ()));
+      test "a life that reached Live buys the respawn two fresh strikes"
+        (fun () ->
+          match Watch.after_death ~reached:true ~deaths:1 with
+          | `Give_up -> fail "a reached life's death always restarts"
+          | `Retry deaths -> (
+              equal int ~msg:"the count is reset, not set to one" 0 deaths;
+              match Watch.after_death ~reached:false ~deaths with
+              | `Give_up -> fail "the respawn keeps both strikes"
+              | `Retry deaths -> (
+                  match Watch.after_death ~reached:false ~deaths with
+                  | `Give_up -> ()
+                  | `Retry _ -> fail "the second strike gives up")));
+    ]
+
 let () =
   run "mentat.ocaml.dune_rpc"
     [
       test "the snapshot is Absent without a watch" snapshot_absent;
       store_rules;
+      watch_law;
       test "attach against a live dune watch" attach_live;
     ]

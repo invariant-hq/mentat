@@ -64,6 +64,13 @@ let message_for_state = function
         "This expression has type string but an expression was expected of \
          type int"
   | "error2" -> Some "Unbound value restock"
+  (* A lint-marked head: the lane it lands in depends on who owns the watch —
+     a foreign watch's targets are unknown so the marker decides, an owned
+     watch's supervisor stated its lane fact. *)
+  | "marker" ->
+      Some
+        "comparison through List.length is a needless emptiness test \
+         [needless-list-length]"
   | _ -> None
 
 let progress_for_state = function
@@ -406,7 +413,10 @@ let serve_forever ~mode ~root ~socket ~bind_in ~ready =
   if not (String.equal ready "") then write_file ready "ready\n";
   let rec accept_loop () =
     let fd, _ = Unix.accept listen in
-    serve mode fd;
+    (* A probe torn down between connect and close — a supervisor cancelled
+       mid-handshake — vanishes mid-write; the disconnection must never kill
+       the fake. *)
+    (try serve mode fd with Sys_error _ -> ());
     (try Unix.close fd with Unix.Unix_error _ -> ());
     accept_loop ()
   in

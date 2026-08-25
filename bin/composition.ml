@@ -1289,20 +1289,21 @@ let project_tools_enabled t capability =
       || project_marker_is_regular capability "dune-workspace"
   | tooling -> invalid_arg ("unknown workspace.tooling value: " ^ tooling)
 
-(* The [dune.watch] posture for one capability: [`Off] for an untrusted or
-   tooling-disabled workspace and for the knob's [off]; otherwise the knob's
-   mode, with a read-only build posture demoted to [`Observe] — a watch that
-   could not write [_build] would only die at startup. The notice flag is a
-   separate, narrower gate: [notices.dune_diagnostics] silences the model's
-   build notices without turning the watch or its status row off. *)
+(* The [dune.watch] posture for one capability: [None] for an untrusted or
+   tooling-disabled workspace and for the knob's [off] — off constructs no
+   supervisor at all; otherwise the knob's mode, with a read-only build
+   posture demoted to observe — a watch that could not write [_build] would
+   only die at startup. The notice flag is a separate, narrower gate:
+   [notices.dune_diagnostics] silences the model's build notices without
+   turning the watch or its status row off. *)
 let dune_watch_mode t capability =
-  if not (project_tools_enabled t capability) then `Off
+  if not (project_tools_enabled t capability) then None
   else
     let mode =
       match Cfg.Resolved.get Cfg.Field.dune_watch t.config with
-      | "off" -> `Off
-      | "observe" -> `Observe
-      | "auto" -> `Auto
+      | "off" -> None
+      | "observe" -> Some Dune_watch.Mode.Observe
+      | "auto" -> Some Dune_watch.Mode.Auto
       | mode -> invalid_arg ("unknown dune.watch value: " ^ mode)
     in
     let sandbox_mode =
@@ -1311,11 +1312,9 @@ let dune_watch_mode t capability =
         ~default:product_default_mode
     in
     match (mode, sandbox_mode) with
-    | `Auto, Cfg.Mode.Read_only -> `Observe
+    | Some Dune_watch.Mode.Auto, Cfg.Mode.Read_only ->
+        Some Dune_watch.Mode.Observe
     | mode, _ -> mode
-
-let dune_notices_enabled t =
-  Cfg.Resolved.get Cfg.Field.notices_dune_diagnostics t.config
 
 (* The shared observer, created on first demand under the instance switch. The
    attach loop holds the watch's diagnostic and progress subscriptions on its
@@ -1325,8 +1324,8 @@ let dune_notices_enabled t =
    future caller can attach one around the gate by accident. *)
 let dune_rpc_instance t capability =
   match dune_watch_mode t capability with
-  | `Off -> None
-  | `Observe | `Auto -> (
+  | None -> None
+  | Some _ -> (
       match t.dune_rpc with
       | Some instance -> Some instance
       | None ->
@@ -1363,29 +1362,22 @@ let dune_watch_supervisor t capability ~mode ~instance =
   match t.dune_watch with
   | Some supervisor -> supervisor
   | None ->
-      let stdenv = t.shared.stdenv in
+      (* Resolvability is probed on the sealed child PATH so [No_dune] can be
+         reported without spawning; the launch itself resolves the bare name
+         again, as every launch does — the watch is the same dune the
+         confined shell's [dune build] finds and forwards to. *)
       let program =
         Option.map
-          (fun dune -> [ dune ])
+          (fun _ -> [ "dune" ])
           (Mentat_workspace_io.child_program capability "dune")
       in
       let supervisor =
-        Dune_watch.make ~net:(Eio.Stdenv.net stdenv)
-          ~clock:(Eio.Stdenv.clock stdenv)
-          ~mono:(Eio.Stdenv.mono_clock stdenv)
-          ~capability ~root:t.root
+        Dune_watch.make ~rpc:instance ~capability
+          ~mono:(Eio.Stdenv.mono_clock t.shared.stdenv)
+          ~sw:t.switch ~root:t.root
           ~run_id:(Printf.sprintf "watch-%d" (Unix.getpid ()))
-          ~mode:
-            (match mode with
-            | `Auto -> Dune_watch.Mode.Auto
-            | `Observe -> Dune_watch.Mode.Observe)
-          ~program
+          ~mode ~program
           ~targets:(Cfg.Resolved.get Cfg.Field.dune_targets t.config)
-          ~env:(getenv t)
-          ~observed:(fun () ->
-            Mentat_ocaml_dune_rpc.Instance.Snapshot.health
-              (Mentat_ocaml_dune_rpc.Instance.snapshot instance))
-          ()
       in
       t.dune_watch <- Some supervisor;
       supervisor
@@ -1670,8 +1662,8 @@ let workspace_cone t capability ~base_spec : Client.Driver.Workspace.t =
      absent row. *)
   let tooling_health () =
     match dune_watch_mode t capability with
-    | `Off -> Mentat_workspace.Health.Off Mentat_workspace.Health.Off.Disabled
-    | `Observe | `Auto -> (
+    | None -> Mentat_workspace.Health.Off Mentat_workspace.Health.Off.Disabled
+    | Some _ -> (
         match t.dune_watch with
         | Some supervisor -> Dune_watch.health supervisor
         | None -> (
@@ -2139,13 +2131,23 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
   let project_ocaml_edit_tools =
     [ Tools.Ocaml.Rename.make build_capability ~clock ~program:merlin_program ]
   in
-  (* The two lock-taking one-shots consult the supervisor: while a supervised
-     watch holds dune's build lock they refuse honestly instead of failing
-     with dune's own delete-the-lock advice. The closure reads the instance
-     field so tool construction never engages the supervisor. *)
+  (* The two lock-taking one-shots ask whether dune's build lock is held — by
+     any watch, not only a supervised one: dune's delete-the-lock advice is
+     byte-identical when the lock holder is the user's own terminal watch,
+     the common case for a developer running [dune build -w]. The health
+     projection spans both owners — [Live] is an attached watch, ours or
+     foreign, and [Starting] is our own spawn taking the lock. The closure
+     reads the instance field so tool construction never engages the
+     supervisor. *)
   let dune_lock_held () =
     match t.dune_watch with
-    | Some supervisor -> Dune_watch.owns_lock supervisor
+    | Some supervisor -> (
+        match Dune_watch.health supervisor with
+        | Mentat_workspace.Health.Live _ | Mentat_workspace.Health.Starting ->
+            true
+        | Mentat_workspace.Health.Off _ | Mentat_workspace.Health.Probing
+        | Mentat_workspace.Health.Restarting _ ->
+            false)
     | None -> false
   in
   let project_ocaml_nonediting_tools =
@@ -2208,9 +2210,11 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
      capability — build breakage is a build-mode concern. *)
   let build_health_notices =
     match dune_watch_mode t read_capability with
-    | `Off -> None
-    | (`Observe | `Auto) as mode ->
-        let notices_enabled = dune_notices_enabled t in
+    | None -> None
+    | Some mode ->
+        let notices_enabled =
+          Cfg.Resolved.get Cfg.Field.notices_dune_diagnostics t.config
+        in
         (* Both lazily, so a projection layer that never drains — the offline
            tool and capability listings — neither creates the observer nor
            engages the supervisor. The first engine drain does both. *)
@@ -2222,7 +2226,7 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
                 let supervisor =
                   dune_watch_supervisor t build_capability ~mode ~instance
                 in
-                Dune_watch.engage supervisor ~sw:t.switch)
+                Dune_watch.engage supervisor)
         in
         let producer =
           lazy
