@@ -2610,6 +2610,44 @@ let read_only_refuses_a_write_grant () =
         (exit_status outcome = `Exited 0)
   | Error _ -> ()
 
+(* The session-run write grant beneath the [.mentat] carveout: derived — and
+   materialized — exactly when [.mentat] exists as a real directory this
+   account owns, and failed closed when a repository plants a symlink where
+   the run directory would go. The path entering the policy is lexical;
+   consulting [realpath] would let a tracked [.mentat/run -> ~/.ssh] turn a
+   trusted clone into an arbitrary host write grant for every confined
+   command. *)
+let session_run_grant_is_guarded () =
+  in_dirs "session-run" @@ fun ~stdenv ~base:_ ~ws_dir ~out_dir:_ ~tmp_base ->
+  let primary = Workspace.Root.of_dir (abs ws_dir) in
+  let logical = Workspace.make ~primary ~read_only:[] () |> Result.get_ok in
+  let meta = Filename.concat ws_dir ".mentat" in
+  let run = Filename.concat meta "run" in
+  let grants io =
+    match Wio.policy io with
+    | Some policy ->
+        List.exists (Abs.equal (abs run))
+          (Sandbox.Policy.writable_roots policy)
+    | None -> fail "expected a confined seal carrying a policy"
+  in
+  Eio.Switch.run (fun sw ->
+      let io = capability_exn ~stdenv ~sw ~tmp_base logical in
+      is_false ~msg:"without .mentat there is no session-run grant"
+        (grants io));
+  Unix.mkdir meta 0o755;
+  Eio.Switch.run (fun sw ->
+      let io = capability_exn ~stdenv ~sw ~tmp_base logical in
+      is_true ~msg:"a real .mentat materializes and grants .mentat/run"
+        (grants io);
+      is_true ~msg:"the run directory exists once granted"
+        (Sys.is_directory run));
+  Unix.rmdir run;
+  Unix.symlink tmp_base run;
+  Eio.Switch.run (fun sw ->
+      match resolve_capability ~stdenv ~sw ~tmp_base logical with
+      | Error _ -> ()
+      | Ok _ -> fail "a planted .mentat/run symlink must refuse resolution")
+
 (* A grant lowers to a writable root, and a writable root is obliged to be a
    directory — so a grant naming a file must be refused where the caller can act
    on it, not through the discharge, which would report that something changed
@@ -2860,6 +2898,8 @@ let () =
       test "a grant of a denied path is refused"
         a_grant_of_a_denied_path_is_refused;
       test "read-only refuses a write grant" read_only_refuses_a_write_grant;
+      test "the session-run grant is guarded against planted symlinks"
+        session_run_grant_is_guarded;
       test "a grant must name a directory" a_grant_must_name_a_directory;
       test "read-only escalation is denied" read_only_escalation_is_denied;
       test "a direct capability runs unconfined" direct_mode_runs_unconfined;
