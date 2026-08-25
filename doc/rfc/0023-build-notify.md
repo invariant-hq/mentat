@@ -194,7 +194,9 @@ Probing ─no server─▶ Starting ─initialize─▶ Live {Ours; Building}
 Live {Ours; _} ─exit─▶ re-probe: a server answers ⇒ Live {Theirs _} else Restarting (Exited _)
 Live {Ours; _} ─hang (§3)─▶ Restarting Hung
 Restarting _ ─1 s─▶ Starting        (two consecutive lives dying before Live ⇒ Off Gave_up)
-Live {Theirs _; _} ─connection EOF─▶ Probing
+Live {Theirs _; _} ─connection EOF─▶ Probing   (held through the immediate
+                                                re-poll, so a transient EOF
+                                                never flaps the row off)
 ```
 
 Under `dune.watch = observe` the no-server arc is
@@ -240,7 +242,10 @@ message.
 
 `B` derives: `2B` is a third of the shell tool's default timeout, so a
 blocked forwarded build is released by the restart well inside it, and `B` is
-100× dune's 0.1 s debounce. A test-only `MENTAT_DUNE_WATCH_PROBE_S` scales it.
+100× dune's 0.1 s debounce. Test-only env scaling, never §9 knobs:
+`MENTAT_DUNE_WATCH_PROBE_S` for `B`, and `MENTAT_DUNE_RPC_QUIET_S`,
+`MENTAT_DUNE_RPC_QUIET_FALLBACK_S`, `MENTAT_DUNE_RPC_RECONNECT_S` for the
+reading windows a hermetic fake cannot wait out.
 The **first** flush after `Live {Ours}` doubles as the confinement self-test:
 if it never completes on a fresh watch, the state is
 `Off (Blocked "file watcher blocked by the sandbox")` at once — no restart
@@ -268,19 +273,24 @@ The `progress` stream is a 0.2 s *sample* with equal-state coalescing
 progress alone can neither confirm nor order a settle. There is no one-shot
 `diagnostics` request.
 
-**A reading** is the store when the diagnostic stream has been quiet for
-0.25 s and the last progress sample is not `In_progress`. **A recovery
+**A reading** is the store when it has synchronised at least once since the
+connection opened — dune answers a stream's first poll immediately, an empty
+set included, so pre-sync emptiness is ignorance, never cleanliness — the
+diagnostic stream has been quiet for 0.25 s, and the last progress sample is
+a settle (`Waiting` and `Interrupted` block a reading exactly as
+`In_progress` does: nothing has settled). **A recovery
 candidate** (a lane's store empty after a non-empty baseline) is stated only
 when a progress settle event (`Success`/`Failed`) arrived after that lane's
 last `Remove` — proof the build that removed them finished — with one
-fallback: 2 s of total quiet states it anyway, because coalescing can swallow
-the settle event of a sub-sample `Failed → Failed` rebuild. Failing
+fallback: 2 s of diagnostic quiet at a settle states it anyway, because
+coalescing can swallow the settle event of a sub-sample `Failed → Failed`
+rebuild. Failing
 transitions state on the 0.25 s quiet alone; a false failing is impossible
 (the events are dune's own), and the asymmetry follows the cost of being
 wrong — a false recovery tells the model to stop working on a broken build.
 
 ```ocaml
-(* lib/workspace — pure, wire-free *)
+(* Mentat_ocaml — the pure OCaml-tooling vocabulary, beside Diagnostic *)
 type Finding.t = { lane : Build | Lint; severity : Error | Warning;
                    path : string option; range : … option;   (* attribute, not identity *)
                    head : string; detail : string list }
@@ -439,13 +449,15 @@ not restart), `Off × verdict` is not. `Unresponsive` is reachable only under
 renders it. Every restart blanks the user's verdict while `stated` keeps the
 model's — intended: the row shows what is known now.
 
-**Two queries.** `workspace.glance` keeps its four event-driven moments and
-its worktree stats, and loses the health half (its handler also stops
-building a second producer and draining it on read,
-`composition.ml:1441-1475`). A new status-only `workspace.dune : unit ->
-Health.t` is a memory read — no git — and the TUI polls it every 2 s while
-`Probing|Starting|Building|Restarting|Unresponsive` and on the glance's
-moments otherwise. A turn-less `Progress` pulse is not built:
+**Two queries.** `workspace.glance` keeps its pair — stripping it would
+force two calls at every glance moment — but its dune half becomes a free
+projection of the shared snapshot, and its handler stops building a second
+producer and draining it on read. The status-only `workspace.dune : unit ->
+Health.t` is the same observation without the git read; the TUI issues both
+at the event moments and polls `workspace.dune` alone every 2 s while a
+watch is live or coming up — a settled row must still follow an editor save
+between turns, where no engine boundary fires. Each fact has one writer: the
+glance never feeds the row. A turn-less `Progress` pulse is not built:
 `Progress.turn` is total (`progress.mli:124-129`), the transcript refuses
 notices without an active turn (`turn.ml:798-801`), and a build that settles
 between turns is stated at the next turn's preparation — the replay-faithful
@@ -584,7 +596,7 @@ cram against `fswatch.t`'s 30 lines/scenario), not hoped.
 
 | slice | content | ≈ lines | seam / gate |
 |---|---|---|---|
-| A · attach + settle + law + status | persistent connection, two long-polls, store fold, overtake/quiet rules (`rpc.ml` +300); `Finding`/`Reading`/`Change` with `.mli`s (+250); producer render in `bin/` (+120, −252 `workspace_notices.*`); `Health` reshape + `workspace.dune` query + row + tick (+250); concurrent fake with scripted timeline (+250); cram + unit + goldens (+390) | ≈ +1,560 / −250 | **no spawn**: runs against any registered watch — the maintainer's own `dune build -w` — and already retires the 15 s guess, the head-string law, and the per-drain probe. Deleted outright: `bin/workspace_notices.*`, `Instance.build_health`, `Instance.Health`, the glance's producer+mapping (`composition.ml:1441-1475`). |
+| A · attach + settle + law + status | persistent connection, two long-polls, store fold, overtake/quiet rules (`rpc.ml` +300); `Finding`/`Reading`/`Change` with `.mli`s (+250); producer render in `bin/` (`workspace_notices.*` rewritten in place); `Health` reshape + `workspace.dune` query + row + tick (+250); concurrent fake with scripted timeline (+250); cram + unit + goldens (+390) | ≈ +1,560 / −250 | **no spawn**: runs against any registered watch — the maintainer's own `dune build -w` — and already retires the 15 s guess, the head-string law, and the per-drain probe. Deleted outright: `Instance.build_health`, `Instance.Health`, the diagnostic store surface, and the glance's producer+mapping; `bin/workspace_notices.*` is rewritten to the drain producer alone. |
 | B · own it | `bin/dune_watch.{ml,mli}` supervisor (~650 with docs), lazy spawn via `start_session`, probe-before-spawn, private `XDG_RUNTIME_DIR` + host mirror, stop-before-release; describe deleted (−1,780 incl. suite and ripple); docs/eval refusals (+80); skill/prompt text; `dune.watch`/`dune.targets` | ≈ +900 / −1,800 | first deliverable is the confinement spike: FSEvents under seatbelt (statically, no `mach-lookup` for `com.apple.FSEvents` is allowed — the allowance line is the deliverable), registry write under the private dir, socket from a confined child; the §3 self-test backs it at runtime |
 | C · hang | flush probe, counters, budget, `dune.watch` notice, `MENTAT_DUNE_WATCH_PROBE_S`, fake `--hang-flush` | ≈ +300 | after B; insurance (the hang was old-dune) |
 | D · lint | alias parse + backstop, marker split, litany's one-line marker (upstream), dogfood stanza + dev dep | ≈ +280 | after A; independent of B |
@@ -656,7 +668,10 @@ on any version.
 argued in §2; confirm against daily use on this repository.
 **During implementation.** Eval/docs lease shape (pause-respawn vs
 per-call); whether the mirror should also serve `dune rpc status --all` or
-only ocaml-lsp; litany's result cache under the confined watch —
+only ocaml-lsp; whether the change law's stated baseline should be rebuilt
+from the journaled dune notices at session resume — today it restarts empty,
+so a resumed session re-states a still-failing set as new, the safer of the
+two dishonesties; litany's result cache under the confined watch —
 `~/.cache/litany` is not an admitted root, so the in-build lane recomputes
 per run unless it is admitted (one carveout, same class as `~/.cache/dune`)
 or the stanza passes `--cache-dir` — M7 measures which.
