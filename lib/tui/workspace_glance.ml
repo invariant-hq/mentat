@@ -148,8 +148,6 @@ let tooling ~palette ~tooling =
       match phase with
       | Mentat_workspace.Health.Phase.Building ->
           dune_row ~palette (prefix @ muted_segs ~palette [ "building" ])
-      | Mentat_workspace.Health.Phase.Unresponsive ->
-          dune_row ~palette (prefix @ warning_segs ~palette [ "unresponsive" ])
       | Mentat_workspace.Health.Phase.Settled { build; lint } ->
           dune_row ~palette
             (prefix

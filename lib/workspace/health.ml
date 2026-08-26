@@ -39,14 +39,13 @@ module Phase = struct
   type t =
     | Building
     | Settled of { build : Verdict.t; lint : int option }
-    | Unresponsive
 
   let equal (a : t) (b : t) =
     match (a, b) with
-    | Building, Building | Unresponsive, Unresponsive -> true
+    | Building, Building -> true
     | Settled a, Settled b ->
         Verdict.equal a.build b.build && Option.equal Int.equal a.lint b.lint
-    | (Building | Settled _ | Unresponsive), _ -> false
+    | (Building | Settled _), _ -> false
 
   let pp ppf (t : t) =
     match t with
@@ -57,7 +56,6 @@ module Phase = struct
             | None -> ()
             | Some lint -> Format.fprintf ppf ", %d lint" lint)
           lint
-    | Unresponsive -> Format.pp_print_string ppf "unresponsive"
 end
 
 module Off = struct
@@ -190,10 +188,7 @@ let restarting_case =
 
 let phase_tag_jsont =
   Jsont.enum ~kind:"workspace watch phase"
-    [
-      ("building", `Building); ("settled", `Settled);
-      ("unresponsive", `Unresponsive);
-    ]
+    [ ("building", `Building); ("settled", `Settled) ]
 
 let live_owner = function
   | Live { owner; _ } -> owner
@@ -213,7 +208,6 @@ let live_case =
       let phase =
         match phase with
         | `Building -> Phase.Building
-        | `Unresponsive -> Phase.Unresponsive
         | `Settled ->
             let errors = Option.value errors ~default:0 in
             let warnings = Option.value warnings ~default:0 in
@@ -233,26 +227,23 @@ let live_case =
   |> Jsont.Object.mem "phase" phase_tag_jsont ~enc:(fun t ->
          match live_phase t with
          | Phase.Building -> `Building
-         | Phase.Settled _ -> `Settled
-         | Phase.Unresponsive -> `Unresponsive)
+         | Phase.Settled _ -> `Settled)
   |> Jsont.Object.opt_mem "errors" Jsont.int ~enc:(fun t ->
          match live_phase t with
          | Phase.Settled { build = Verdict.Failing { errors; _ }; _ } ->
              Some errors
-         | Phase.Settled { build = Verdict.Clean; _ }
-         | Phase.Building | Phase.Unresponsive ->
+         | Phase.Settled { build = Verdict.Clean; _ } | Phase.Building ->
              None)
   |> Jsont.Object.opt_mem "warnings" Jsont.int ~enc:(fun t ->
          match live_phase t with
          | Phase.Settled { build = Verdict.Failing { warnings; _ }; _ } ->
              Some warnings
-         | Phase.Settled { build = Verdict.Clean; _ }
-         | Phase.Building | Phase.Unresponsive ->
+         | Phase.Settled { build = Verdict.Clean; _ } | Phase.Building ->
              None)
   |> Jsont.Object.opt_mem "lint" Jsont.int ~enc:(fun t ->
          match live_phase t with
          | Phase.Settled { lint; _ } -> lint
-         | Phase.Building | Phase.Unresponsive -> None)
+         | Phase.Building -> None)
   |> Jsont.Object.error_unknown |> Jsont.Object.finish
   |> Jsont.Object.Case.map "live" ~dec:Fun.id
 

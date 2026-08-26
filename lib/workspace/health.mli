@@ -61,10 +61,9 @@ module Phase : sig
         (** The last build settled: the build verdict, and the lint lane's
             finding count — [None] when the lane is off or the watch's lint
             targets are unknown, which is absence, never cleanliness. *)
-    | Unresponsive
-        (** The watch stopped answering liveness probes. Reachable only for a
-            foreign watch: an owned one is restarted instead. *)
-  (** The type for phases. *)
+  (** The type for phases. Every phase has a producer: a foreign watch that
+      stops answering has none yet, so no phase names it — detection would
+      mint the state alongside itself. *)
 
   val equal : t -> t -> bool
   (** [equal a b] is [true] iff [a] and [b] are the same phase with the same

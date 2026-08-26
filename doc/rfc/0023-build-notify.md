@@ -500,17 +500,18 @@ these constructors):
 type verdict = Clean | Failing of { errors : int; warnings : int }
 type reading = { build : verdict; lint : int option }   (* lint = None: lane off *)
 type owner   = Ours | Theirs of int
-type phase   = Building | Settled of reading | Unresponsive
+type phase   = Building | Settled of reading
 type off     = Disabled | No_dune | No_server | Blocked of string | Gave_up
 type t = Off of off | Probing | Starting | Live of { owner : owner; phase : phase }
        | Restarting of (Exited of string | Hung)
 ```
 
 A verdict exists only inside `Settled`, so the fail-honest law is the type:
-`Live {Theirs _; Unresponsive}` is representable (a foreign watch Mentat may
-not restart), `Off × verdict` is not. `Unresponsive` is reachable only under
-`Theirs` — an owned watch is restarted instead (`Restarting Hung`) and never
-renders it. Every restart blanks the user's verdict while `stated` keeps the
+`Off × verdict` is not representable. Every phase has a producer: an owned
+watch that hangs is restarted (`Restarting Hung`), and a foreign hang is not
+detected — so no `Unresponsive` state exists to render; if foreign-hang
+detection ever pays its way, it mints that phase alongside itself (§11).
+Every restart blanks the user's verdict while `stated` keeps the
 model's — intended: the row shows what is known now.
 
 **Two queries.** `workspace.glance` keeps its pair — stripping it would
@@ -537,7 +538,7 @@ moment.
 | `Live {Ours, Settled {Failing {errors=3}}}` | `dune · 3 errors` (error colour) |
 | `Live {Ours, Settled {Failing {errors=0; warnings=2}}}` | `dune · 2 warnings` (warning colour) |
 | `Live {Ours, Settled {Clean; Some 2}}` | `dune · clean · 2 lint` (lint in warning colour) |
-| `Live {Theirs 4242, phase}` | as above with `theirs ·` prefix; `dune · theirs · unresponsive` |
+| `Live {Theirs 4242, phase}` | as above with `theirs ·` prefix |
 | `Restarting (Exited "1")` / `(Hung)` | `dune · restarting (exit 1)` / `dune · hung · restarting` |
 | `Off No_dune` | `dune · off · not on PATH` |
 | `Off No_server` (observe) | `dune · off · no watch` |
@@ -636,7 +637,11 @@ the agent-writable build directory: an agent that replaces
 evidence about the agent's workspace, not a check on the agent (a peer-pid
 check is §15). Deleting describe removes capability the model had; any
 future policy narrowing must keep `.mentat/run` writable or the watch dies at
-startup.
+startup. A hung foreign watch is indistinguishable from a busy one: the
+observer never probes a watch it may not restart, so the health vocabulary
+has no state for it — the row reads `building` until the foreign watch
+answers or its connection drops to `Probing`. Detection (a bounded foreign
+flush on tool-timeout evidence) would mint the state it announces.
 
 ## 12. Rationale and alternatives
 
