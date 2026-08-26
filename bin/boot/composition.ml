@@ -101,6 +101,11 @@ type t = {
   (* Miss-path listing refreshes are rate-limited per provider: a selector
      that keeps missing must not probe the network on every resolution. *)
   listing_refresh_at : (string, float) Hashtbl.t;
+  (* Where this instance's delegated children materialize, resolved lazily at
+     engine assembly so a backend whose ops close over the instance can be
+     supplied before the instance exists. [None] is the in-process default —
+     the CLI's single-runtime shape; the daemon supplies a brokered backend. *)
+  child_backend : (t -> Engine.Ports.child_backend) option;
   mutable engine : Engine.t option;
   mutable assembled :
     (Client.Driver.t * Mentat_workspace_io.t * Mentat_tool.t) option;
@@ -479,7 +484,7 @@ let stage_store_reported ~stdenv ~sw ~dirs ~getenv ?data_home () =
         | None -> message)
 
 let make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
-    ~review_base : t =
+    ~review_base ?child_backend () : t =
   {
     shared;
     root;
@@ -494,6 +499,7 @@ let make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
     overrides;
     staged_default = None;
     listing_refresh_at = Hashtbl.create 4;
+    child_backend;
     engine = None;
     assembled = None;
     dune_rpc = None;
@@ -524,7 +530,7 @@ let build_base ~stdenv ~sw ~cwd ~overrides ?data_home ?review_base () :
   let shared = { dirs; runtime; store; environment; stdenv; sw } in
   Ok
     (make_instance ~shared ~sw ~root ~trusted ~config
-       ~environment:shared.environment ~overrides ~review_base)
+       ~environment:shared.environment ~overrides ~review_base ())
 
 (* The daemon path: the per-user shared stage opened once under the owning
    switch. It stages the same dirs/runtime/store the CLI path does, in that
@@ -546,8 +552,8 @@ let stage_shared ~stdenv ~sw ?data_home () : (shared, Exit_status.t) result =
    own switch [sw] (the engine and watch lane live under it, so eviction closes
    one switch). No store is opened here — the shared handle is reused, which is
    what keeps the fence's same-process half honest. *)
-let instance shared ~sw ~cwd ~overrides ?environment ?review_base () :
-    (t, Exit_status.t) result =
+let instance shared ~sw ~cwd ~overrides ?environment ?review_base
+    ?child_backend () : (t, Exit_status.t) result =
   let ( let* ) = Result.bind in
   let environment = Option.value environment ~default:shared.environment in
   let getenv = environment_get environment in
@@ -559,7 +565,7 @@ let instance shared ~sw ~cwd ~overrides ?environment ?review_base () :
   in
   Ok
     (make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
-       ~review_base)
+       ~review_base ?child_backend ())
 
 (* The engine's drivers are long-lived fibers under the instance switch; shut
    them down so the switch can close instead of blocking on idle drivers. The
@@ -3238,12 +3244,16 @@ let build_driver t :
   let max_children =
     Cfg.Resolved.get Cfg.Field.run_subagent_max_concurrent t.config
   in
+  let child_backend =
+    match t.child_backend with
+    | None -> Engine.Ports.In_process
+    | Some backend -> backend t
+  in
   let engine =
     Engine.create ~sw:t.switch ~store:store_port ~provider:provider_call
       ~config:(config_callback t ~product_rules:build_product_rules)
       ~now:(fun () -> now_time t)
-      ~max_children ~child_backend:Engine.Ports.In_process ~execution_for_mode
-      ~delegated_execution ()
+      ~max_children ~child_backend ~execution_for_mode ~delegated_execution ()
   in
   t.engine <- Some engine;
   let driver_record : Client.Driver.t =
@@ -3270,6 +3280,34 @@ let assemble t =
       | Error status -> Error status)
 
 let driver t = Result.map (fun (driver, _, _) -> driver) (assemble t)
+
+(* The child broker's reach into an instance's engine, as thin wrappers so the
+   daemon's broker never holds the engine value itself. The engine exists
+   whenever the broker can have been handed work — the ops record is consumed
+   only by an assembled engine — so the absent-engine arms are shutdown races,
+   answered honestly rather than raised. *)
+
+let adopt_session t session =
+  match assemble t with
+  | Error _ ->
+      Error
+        (Mentat_protocol.Error.unavailable
+           "the workspace instance failed to assemble its driver")
+  | Ok _ -> (
+      match t.engine with
+      | Some engine -> Engine.adopt engine session
+      | None ->
+          Error (Mentat_protocol.Error.unavailable "the engine is not built"))
+
+let integrate_child t ~child =
+  match t.engine with
+  | Some engine -> Engine.integrate_brokered_child engine ~child
+  | None -> `Unbound
+
+let fail_child t ~child ~message =
+  match t.engine with
+  | Some engine -> Engine.fail_brokered_child engine ~child ~message
+  | None -> ()
 
 (* The executable's half of the image-attach flow: it holds the file read, the
    platform downscale spawn, and the fence-free attachment store the pure App and

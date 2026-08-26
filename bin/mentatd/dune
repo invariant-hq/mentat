@@ -3,13 +3,14 @@
  (public_name mentatd)
  (package mentat)
  (flags (:standard -open Mentat_boot))
- (modules child_spawn daemon_server main)
+ (modules child_broker child_spawn daemon_server main)
  (libraries
   cmdliner
   eio
   eio_main
   unix
   lpath
+  mentat_agent
   mentat_boot
   mentat_client
   mentat_protocol

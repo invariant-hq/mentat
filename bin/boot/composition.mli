@@ -102,6 +102,7 @@ val instance :
   overrides:Mentat_config.t list ->
   ?environment:(string * string) list ->
   ?review_base:string ->
+  ?child_backend:(t -> Mentat_agent.Ports.child_backend) ->
   unit ->
   (t, Exit_status.t) result
 (** [instance shared ~sw ~cwd ~overrides ?environment ?review_base ()] stages
@@ -117,8 +118,13 @@ val instance :
     defaults to [shared]'s process snapshot, and a daemon passes the invoking
     client's snapshot instead so the child is configured from the shell that
     asked for the run, not the shell that spawned the daemon. [review_base] is
-    the review cone's base spec, as in {!with_base}. A staging failure (an
-    unresolvable root, malformed config) is an {!Exit_status.Runtime_error}. *)
+    the review cone's base spec, as in {!with_base}. [child_backend] names
+    where this instance's delegated children materialize
+    ({!Mentat_agent.Ports.child_backend}); it is applied to the instance at
+    engine assembly, so a brokered backend's ops can close over the very
+    instance being staged. Absent, children run in-process — every
+    single-runtime path. A staging failure (an unresolvable root, malformed
+    config) is an {!Exit_status.Runtime_error}. *)
 
 val shutdown : t -> unit
 (** [shutdown t] shuts down [t]'s engine drivers when the client was built,
@@ -223,6 +229,39 @@ val driver : t -> (Mentat_client.Driver.t, Exit_status.t) result
     [mentat.server] ever hold it: [bin] wraps it with {!Mentat_client.make} and
     the daemon serves it over the wire, so a frontend only ever receives a
     {!Mentat_client.t}. [Error] exactly as {!client}'s prefix. *)
+
+(** {2:broker The child broker's engine reach}
+
+    Thin wrappers over the engine's brokered observation seam
+    ({!Mentat_agent.adopt}, {!Mentat_agent.integrate_brokered_child},
+    {!Mentat_agent.fail_brokered_child}), so the daemon's child broker acts on
+    an instance without ever holding the engine value. *)
+
+val adopt_session :
+  t -> Mentat_session.Id.t -> (unit, Mentat_protocol.Error.t) result
+(** [adopt_session t session] attaches [session]'s driver in [t]'s engine with
+    no accompanying command — fence, load, recovery to quiescence — building
+    the engine first if this instance has not assembled it yet. The restarted
+    node's verb for re-adopting the parent of an orphaned child: recovery
+    reconstructs the parked wait and re-drives unfinished edges through the
+    instance's child backend. [Busy] when another process drives the session.
+*)
+
+val integrate_child :
+  t ->
+  child:Mentat_session.Id.t ->
+  [ `Integrated | `Not_settled | `Unbound ]
+(** [integrate_child t ~child] is {!Mentat_agent.integrate_brokered_child} on
+    [t]'s engine: fold [child]'s journal-settled result into its parent's
+    scheduler and wake the parked wait. [`Unbound] when no engine is built or
+    the engine holds no parent binding — the journals still integrate at the
+    parent's next attach. *)
+
+val fail_child : t -> child:Mentat_session.Id.t -> message:string -> unit
+(** [fail_child t ~child ~message] is {!Mentat_agent.fail_brokered_child} on
+    [t]'s engine: settle the parent's wait for [child] with the spawn-failure
+    text carrying [message] — the loud floor for a child the broker has
+    abandoned. A no-op when no engine is built. *)
 
 val tool_declarations :
   t ->

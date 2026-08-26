@@ -406,6 +406,37 @@
  (modules test_notify notify output)
  (libraries windtrap eio eio.unix eio_main unix jsont jsont.bytesrw))
 
+; The child broker lives in bin/mentatd (executable-side); its reconciliation
+; tables are pure decision units over thunk probes, so its source is copied in
+; and driven with no process, socket, or store behind it. The stanza links the
+; boot library the module composes against; the tables themselves touch none
+; of it.
+
+(copy_files
+ (files ../../bin/mentatd/child_broker.{ml,mli}))
+
+(copy_files
+ (files ../../bin/mentatd/child_spawn.{ml,mli}))
+
+(test
+ (name test_child_broker)
+ (modules test_child_broker child_broker child_spawn)
+ (flags
+  (:standard -open Mentat_boot))
+ (libraries
+  windtrap
+  lpath
+  mentat_agent
+  mentat_boot
+  mentat_client
+  mentat_protocol
+  mentat_server
+  mentat_session
+  mentat_store
+  eio
+  eio.unix
+  unix))
+
 (test
  (name test_github_api)
  (modules test_github_api)

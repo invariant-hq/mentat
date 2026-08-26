@@ -106,9 +106,14 @@ start_fake_openai () {
 # openai provider at it: each arriving request consumes the first pending
 # script item whose expectation it satisfies. The delegation path needs this —
 # a parent session and its eagerly-driven children reach the provider in
-# nondeterministic order.
+# nondeterministic order. Extra arguments pass through to the server (e.g.
+# --port, for a successor fixture that must answer on a predecessor's base
+# URL: a daemon-hosted instance keeps the provider environment it booted
+# with).
 start_fake_openai_unordered () {
-  start_fake_openai "$1" "${2:-capture}" "${3:-openai-port}" --unordered
+  local script="$1" capture="${2:-capture}" port_file="${3:-openai-port}"
+  shift "$(( $# < 3 ? $# : 3 ))"
+  start_fake_openai "$script" "$capture" "$port_file" --unordered "$@"
 }
 
 # Start the fake server as an OAuth issuer + readiness probe: /v1/models
@@ -212,8 +217,11 @@ wait_exit () { wait "$1"; echo $?; }
 # find_or_spawn resolves mentatd as a sibling of the running mentat binary.
 # Under the cram harness that resolution is platform-dependent (Linux resolves
 # the install-tree symlink into the build tree, where mentatd is not a
-# sibling), so the daemon binary is named explicitly from PATH.
+# sibling), so the daemon binary is named explicitly from PATH. The daemon's
+# child broker resolves mentat the same sibling way for its serve-session
+# spawns, so the mirror export covers the reverse direction.
 export MENTATD_BIN="$(command -v mentatd)"
+export MENTAT_BIN="$(command -v mentat)"
 
 # Start the per-user daemon foreground-backgrounded on its default per-store
 # socket under /tmp (short, and keyed by the hermetic data home so it never

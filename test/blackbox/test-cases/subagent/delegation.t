@@ -1,24 +1,30 @@
 The delegation journey, blackbox through the binary: spawn -> wait ->
-send_message -> follow_up, against the engine's in-process child backend. Its
-two content-derived identities — the parent-minted child session id and the
-child's deterministic first-turn id — are extracted verbatim and proven stable
-across a lost-journal re-drive: deleting the child's journal and re-attaching
-the parent re-materializes the same child under the same ids, and the child's
-normalized transcript is byte-identical across the two materializations. This
-is the gate any other child backend must pass unchanged.
+send_message -> follow_up, against the daemon's brokered child backend — the
+child runs as a detached per-session server the daemon's broker spawns, and
+its settlement integrates into the parent through the broker's observation.
+The two content-derived identities — the parent-minted child session id and
+the child's deterministic first-turn id — are extracted verbatim and proven
+stable across a lost-journal re-drive: deleting the child's journal and
+re-attaching the parent re-materializes the same child under the same ids,
+and the child's normalized transcript is byte-identical across the two
+materializations. These goldens predate the brokered backend, so any drift
+between backends breaks this file.
 
 Provider fixtures are served content-matched (--unordered): a parent and its
 eagerly-driven child reach the provider in nondeterministic order. The engine
 runs inside the daemon so a delegated child keeps driving after each run
 client exits; every stage waits for the child's durable settlement before
-stopping the daemon, and exports run only against a stopped daemon because
-export acquires the session fence the daemon's driver holds. The sessions
-work in a workspace subdirectory so the fixture and capture files this test
-writes are not workspace file changes the turns would drain as notices.
+stopping the daemon, and exports also wait for the detached child server to
+exit (its endpoint directory is the visible sign), because export and the
+lingering child contend for the session fence. The linger is shortened so
+those exits do not pace the test. The sessions work in a workspace
+subdirectory so the fixture and capture files this test writes are not
+workspace file changes the turns would drain as notices.
 
   $ mkdir -p work/.git
   $ (cd work && mentat trust . >/dev/null)
   $ trap stop_daemon EXIT
+  $ export MENTAT_CHILD_LINGER=0.2
 
 Poll a session's fence-free view until it is idle with the expected number of
 settled turns.
@@ -36,9 +42,23 @@ settled turns.
   >   done
   > }
 
+Block until a child's detached server has exited — its endpoint directory
+under the daemon's socket tree is gone — so a following export finds the
+session fence free. $SOCK_BASE is captured from discovery once the first
+daemon is up.
+
+  $ wait_child_exit () {
+  >   local dir="$SOCK_BASE/$1" tries=0
+  >   while [ -e "$dir" ]; do
+  >     tries=$((tries + 1))
+  >     if [ "$tries" -gt 300 ]; then echo "child server still up: $dir"; break; fi
+  >     sleep 0.1
+  >   done
+  > }
+
 Stage 1 — spawn. The parent's turn records the delegation edge; the receipt
-names both derived identities; the child completes its task turn inside the
-daemon after the run client has exited.
+names both derived identities; the child completes its task turn in its own
+detached server after the run client has exited.
 
   $ cat > stage1.jsonl <<'JSONL'
   > {"expect":{"body_contains":["PLEASE_SPAWN"],"body_not_contains":["sp-call"]},"response":{"id":"r1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"sp-item","call_id":"sp-call","name":"spawn","arguments":"{\"task\":\"child works\"}"}]}}
@@ -47,6 +67,7 @@ daemon after the run client has exited.
   > JSONL
   $ start_fake_openai_unordered stage1.jsonl capture1 port1
   $ start_daemon
+  $ SOCK_BASE="$(dirname "$(mentat_cram json .socket "$XDG_DATA_HOME/mentat/daemon/daemon.json")")/s"
   $ mentat run start --attach --json --id parent "PLEASE_SPAWN" --cwd "$PWD/work" >stage1.out 2>stage1.err
   $ wait_fake_server
 
@@ -78,6 +99,7 @@ session, and the child's first-turn id is the deterministic mint off the
 delegation id — 20 hex characters, no clock and no sequence.
 
   $ wait_child "$CHILD" 1
+  $ wait_child_exit "$CHILD"
   $ stop_daemon
   $ mentat session export parent --format json --cwd "$PWD/work" >parent1.ndjson
   $ grep -c "\"child\":\"$CHILD\"" parent1.ndjson
@@ -135,6 +157,7 @@ identically; the normalized transcript is byte-identical to the first
 materialization.
 
   $ wait_child "$CHILD" 1
+  $ wait_child_exit "$CHILD"
   $ stop_daemon
   $ ls "$XDG_DATA_HOME/mentat/sessions/" | grep -cE '^sub-[0-9a-f]+$'
   1

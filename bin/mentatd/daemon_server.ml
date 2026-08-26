@@ -62,6 +62,9 @@ type registry = {
   shared : Composition.shared;
   store : Store.t;
   parent_sw : Eio.Switch.t;
+  (* Every daemon-hosted instance delegates through the node's one child
+     broker; the ops close over the instance at boot. *)
+  broker : Child_broker.t;
   mutex : Eio.Mutex.t;
   entries : (string, entry) Hashtbl.t;
   (* Live bound connections across all instances — the idle watchdog's zero
@@ -70,11 +73,12 @@ type registry = {
   active : int Atomic.t;
 }
 
-let make_registry ~shared ~parent_sw =
+let make_registry ~shared ~parent_sw ~broker =
   {
     shared;
     store = shared.Composition.store;
     parent_sw;
+    broker;
     mutex = Eio.Mutex.create ();
     entries = Hashtbl.create 16;
     active = Atomic.make 0;
@@ -93,7 +97,11 @@ let boot registry ~root ~environment =
       Eio.Switch.run @@ fun instance_sw ->
       match
         Composition.instance registry.shared ~sw:instance_sw ~cwd:(Some root)
-          ~overrides:[] ?environment ()
+          ~overrides:[] ?environment
+          ~child_backend:(fun instance ->
+            Mentat_agent.Ports.Brokered
+              (Child_broker.ops registry.broker instance))
+          ()
       with
       | Error status -> Eio.Promise.resolve set_ready (Error status)
       | Ok instance -> (
@@ -568,7 +576,8 @@ let serve ~socket_override ~spawned ~web ~web_port =
               let listener =
                 Server.listen ~sw ~net (Server.Bind.unix ~dir:socket_dir_abs)
               in
-              let registry = make_registry ~shared ~parent_sw:sw in
+              let broker = Child_broker.create ~sw shared in
+              let registry = make_registry ~shared ~parent_sw:sw ~broker in
               (* The per-daemon bootstrap token: the wire has none for a unix bind
                  (filesystem auth), but the browser edge needs one, regenerated on
                  every start. The web branch is computed before the discovery
@@ -644,6 +653,25 @@ let serve ~socket_override ~spawned ~web ~web_port =
                   Sys.set_signal Sys.sigterm previous_term;
                   Sys.set_signal Sys.sigint previous_int)
                 (fun () ->
+                  (* Re-adopt what a previous node life left running or
+                     unfinished, before the first connection is served: the
+                     broker enumerates orphaned children and adopts their
+                     parents through the ordinary get-or-boot, whose recovery
+                     re-drives each edge into the broker's own materialize. *)
+                  Child_broker.rediscover broker
+                    ~instance_for:(fun ~root ->
+                      match get_or_boot registry ~root () with
+                      | Error status -> Error (exit_message status)
+                      | Ok entry -> Ok entry.instance)
+                    ~release:(fun instance ->
+                      let root =
+                        Lpath.Abs.to_string (Composition.root instance)
+                      in
+                      Eio.Mutex.use_rw ~protect:true registry.mutex (fun () ->
+                          match Hashtbl.find_opt registry.entries root with
+                          | Some entry -> entry.lease <- entry.lease - 1
+                          | None -> ());
+                      sweep registry);
                   let branches =
                     [
                       (fun () ->
@@ -676,6 +704,10 @@ let serve ~socket_override ~spawned ~web ~web_port =
                      fiber parked on its release promise forever, wedging the
                      switch (the first-SIGINT hang a live web pin exposed). *)
                   Discovery.clear ~dir:ddir ~pid:(Unix.getpid ());
+                  (* Stop the broker's fibers before the instances settle: the
+                     children themselves keep running detached, and a
+                     successor's rediscovery re-adopts them. *)
+                  Child_broker.stop broker;
                   let settling =
                     Eio.Mutex.use_rw ~protect:true registry.mutex (fun () ->
                         Hashtbl.fold

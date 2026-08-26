@@ -278,7 +278,14 @@ let serve_run ~session ~socket_dir_override ~spawned ~cwd ~bound_socket_dir =
                           Eio.Fiber.any
                             [
                               (fun () ->
-                                Server.serve ~sw ~clock
+                                (* A short keep-alive: an idle stream notices
+                                   its peer's disconnect only at the next
+                                   heartbeat write, and a settled child may
+                                   not exit until its last observer's
+                                   connection is seen closed — the default
+                                   15s pace would hold an idle child open
+                                   that long past the broker's close. *)
+                                Server.serve ~sw ~clock ~heartbeat_s:1.0
                                   ~driver_for:
                                     (driver_for
                                        ~root:

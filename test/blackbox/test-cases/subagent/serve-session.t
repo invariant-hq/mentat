@@ -2,11 +2,13 @@ The child-serve boot, blackbox through the binary: `mentat serve-session` is a
 process serving exactly one delegated session — its own. Booted by hand on a
 child document with no turns (the state the parent-side create leaves behind),
 it re-reads the task from the durable delegation edge, mints the same
-deterministic first turn the in-process backend mints, drives it to
-settlement, and exits 0 once the session lingers idle — its per-session socket
-directory removed. The child journal it produces is normalized-identical to
-the in-process materialization, and its first-turn id is byte-identical: the
-cross-backend golden any child backend must pass unchanged. A second
+deterministic first turn every child backend mints, drives it to settlement,
+and exits 0 once the session lingers idle — its per-session socket directory
+removed. The child journal it produces is normalized-identical to the
+daemon-brokered materialization of the same task, and its first-turn id is
+byte-identical: the cross-backend golden any child backend must pass
+unchanged (the golden bytes predate the brokered backend and pin the
+in-process materialization too). A second
 serve-session on the settled child is an idempotent no-op — it re-attaches,
 mints nothing, and exits 0 with the journal untouched.
 
@@ -37,9 +39,23 @@ settled turns.
   >   done
   > }
 
-Stage 1 — the in-process golden. The parent spawns a child inside the daemon;
-the child settles its task turn; its journal is the reference the child-serve
-boot must reproduce.
+Block until the child's detached server has exited — its endpoint directory
+under the daemon's socket tree is gone — so the export below finds the
+session fence free.
+
+  $ wait_child_exit () {
+  >   local dir="$SOCK_BASE/$1" tries=0
+  >   while [ -e "$dir" ]; do
+  >     tries=$((tries + 1))
+  >     if [ "$tries" -gt 300 ]; then echo "child server still up: $dir"; break; fi
+  >     sleep 0.1
+  >   done
+  > }
+
+Stage 1 — the reference journal. The parent spawns a child through the
+daemon, whose broker materializes it as a detached per-session server; the
+child settles its task turn; its journal is the reference the by-hand
+child-serve boot must reproduce byte-identically.
 
   $ cat > stage1.jsonl <<'JSONL'
   > {"expect":{"body_contains":["PLEASE_SPAWN"],"body_not_contains":["sp-call"]},"response":{"id":"r1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"sp-item","call_id":"sp-call","name":"spawn","arguments":"{\"task\":\"child works\"}"}]}}
@@ -48,6 +64,7 @@ boot must reproduce.
   > JSONL
   $ start_fake_openai_unordered stage1.jsonl capture1 port1
   $ start_daemon
+  $ SOCK_BASE="$(dirname "$(mentat_cram json .socket "$XDG_DATA_HOME/mentat/daemon/daemon.json")")/s"
   $ mentat run start --attach --json --id parent "PLEASE_SPAWN" --cwd "$PWD/work" >stage1.out 2>stage1.err
   $ wait_fake_server
   $ grep -c '"outcome":"completed"' stage1.out
@@ -56,6 +73,7 @@ boot must reproduce.
   $ echo "$CHILD" | grep -cE '^sub-[0-9a-f]{16}$'
   1
   $ wait_child "$CHILD" 1
+  $ wait_child_exit "$CHILD"
   $ stop_daemon
   $ mentat session export "$CHILD" --format json --cwd "$PWD/work" >child1.ndjson
   $ T1=$(sed -n '2p' child1.ndjson | mentat_cram json '.document.events[0].turn.id')
@@ -114,7 +132,8 @@ exit.
 
 The cross-backend golden: the store holds exactly one child session, under
 the original id; the first-turn id is the same deterministic mint; the
-normalized transcript is byte-identical to the in-process materialization.
+normalized transcript is byte-identical to the daemon-brokered
+materialization.
 
   $ ls "$XDG_DATA_HOME/mentat/sessions/" | grep -cE '^sub-[0-9a-f]+$'
   1

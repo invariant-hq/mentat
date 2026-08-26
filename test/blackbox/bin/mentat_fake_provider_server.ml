@@ -11,6 +11,10 @@ type options = {
   port_file : string;
   accept_timeout_s : float;
   unordered : bool;
+  port : int;
+      (* 0 binds an ephemeral port. A fixed port lets a later server pick up
+         where an exhausted one left off on the same base URL — the shape a
+         daemon-frozen provider environment forces on multi-stage fixtures. *)
 }
 
 type request = {
@@ -752,7 +756,7 @@ let serve options items =
     ~finally:(fun () -> Unix.close socket)
     (fun () ->
       Unix.setsockopt socket Unix.SO_REUSEADDR true;
-      Unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+      Unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_loopback, options.port));
       Unix.listen socket 8;
       write_file options.port_file (string_of_int (port_of_socket socket));
       if options.unordered then serve_unordered options socket items
@@ -774,6 +778,7 @@ let parse_args () =
   let get_body = ref false in
   let accept_timeout_s = ref 10. in
   let unordered = ref false in
+  let port = ref 0 in
   let set option value slot =
     match !slot with
     | None -> slot := Some value
@@ -803,6 +808,12 @@ let parse_args () =
     | "--unordered" :: rest ->
         unordered := true;
         loop rest
+    | "--port" :: value :: rest -> (
+        match int_of_string_opt value with
+        | Some value when value > 0 ->
+            port := value;
+            loop rest
+        | _ -> fail "--port must be a positive port number")
     | "--accept-timeout" :: value :: rest -> (
         match float_of_string_opt value with
         | Some value when value > 0. ->
@@ -829,6 +840,7 @@ let parse_args () =
           port_file;
           accept_timeout_s = !accept_timeout_s;
           unordered = !unordered;
+          port = !port;
         }
   | None, _, _, _ -> fail usage
 

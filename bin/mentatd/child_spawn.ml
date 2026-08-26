@@ -5,12 +5,20 @@
 
 (* [mentat] lives beside [mentatd] in every release artifact, so the spawn
    resolves the sibling of the running executable. [Unix.create_process] cannot
-   report a missing program (the exec fails in the child), so an absent sibling
-   is refused here, loudly. [MENTAT_BIN] overrides the sibling resolution for
-   layouts where the two binaries do not share a directory (a build tree, a
-   test harness). *)
+   report a missing program (the exec fails in the child), so an absent
+   sibling, a directory at the path, or a present-but-non-executable file is
+   refused here, loudly, rather than surfacing as a spawn that never
+   converges. [MENTAT_BIN] overrides the sibling resolution for layouts where
+   the two binaries do not share a directory (a build tree, a test harness). *)
 let resolve_mentat () =
-  let is_program path = Sys.file_exists path && not (Sys.is_directory path) in
+  let is_program path =
+    Sys.file_exists path
+    && (not (Sys.is_directory path))
+    &&
+    match Unix.access path [ Unix.X_OK ] with
+    | () -> true
+    | exception Unix.Unix_error _ -> false
+  in
   match Sys.getenv_opt "MENTAT_BIN" with
   | Some bin when not (String.equal bin "") ->
       if is_program bin then Ok bin
