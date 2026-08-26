@@ -4,9 +4,10 @@
  ---------------------------------------------------------------------------*)
 
 (* Unit suite for [Charter_fire]'s pure pieces: the sweep's delivery
-   synthesis, the findings extraction from a run log, and the publication
-   outcome folds. The pipeline's effectful spine — claim, receipts, spawn,
-   reap, publish — is exercised end to end by the charter cram family. *)
+   synthesis and the findings extraction from a run log. The pipeline's
+   effectful spine — claim, receipts, spawn, reap, publish — is exercised
+   end to end by the charter cram family, and the publish-outcome folds live
+   with their emitter in [Publication.Outcome]. *)
 
 open Windtrap
 
@@ -87,37 +88,6 @@ let findings_extraction () =
             {|{"type":"turn.finished","output":{"summary":"late","findings":[]}}|};
           ]))
 
-let envelope_summary_method () =
-  let named bytes =
-    match Charter_fire.summary_method_of_envelope bytes with
-    | Some `Post -> Some "POST"
-    | Some `Patch -> Some "PATCH"
-    | None -> None
-  in
-  equal (option string) ~msg:"a POST summary" (Some "POST")
-    (named {|{"summary":{"method":"POST","path":"/x","body":{}},"review":[]}|});
-  equal (option string) ~msg:"a PATCH summary" (Some "PATCH")
-    (named {|{"summary":{"method":"PATCH","path":"/x","body":{}}}|});
-  equal (option string) ~msg:"not an envelope" None (named "[]")
-
-let publish_outcome_folds () =
-  let outcome =
-    String.concat "\n"
-      [
-        {|{"schema_version":1,"type":"github.publish","label":"aa11","status":201}|};
-        {|{"schema_version":1,"type":"github.publish","label":"bb22","status":422,"error":"refused"}|};
-        {|{"schema_version":1,"type":"github.publish","label":null,"status":200}|};
-      ]
-  in
-  equal int ~msg:"one thread answered 2xx" 1
-    (Charter_fire.publish_threads_posted outcome);
-  is_true ~msg:"the summary landed" (Charter_fire.publish_summary_ok outcome);
-  is_false ~msg:"a refused summary is not ok"
-    (Charter_fire.publish_summary_ok
-       {|{"type":"github.publish","label":null,"status":502}|});
-  equal int ~msg:"an empty log posted nothing" 0
-    (Charter_fire.publish_threads_posted "")
-
 let () =
   run "mentat.charter_fire"
     [
@@ -125,7 +95,4 @@ let () =
         sweep_synthesis;
       test "the findings document is the last finished line's output"
         findings_extraction;
-      test "the envelope names its summary method" envelope_summary_method;
-      test "the poster's outcome log folds to the egress facts"
-        publish_outcome_folds;
     ]

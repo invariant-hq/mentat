@@ -376,10 +376,10 @@
  (modules test_user_dirs user_dirs)
  (libraries windtrap mentat_digest unix))
 
-; The executable-side filesystem primitives live in bin/boot; the ledger
-; append and the permission gate are plain Unix code, so the source is copied
-; in and the suite runs without linking the boot library. (The Eio-fiber
-; [with_lock] is compiled but not exercised here.)
+; The executable-side filesystem primitives live in bin/boot; the source is
+; copied in and the suite runs without linking the boot library. The append
+; tests run under Eio_main — append serializes in-process callers on a
+; per-path Eio.Mutex, so it must run inside a fiber.
 
 (copy_files
  (files ../../bin/boot/fs.{ml,mli}))
@@ -387,7 +387,7 @@
 (test
  (name test_fs)
  (modules test_fs fs)
- (libraries windtrap eio eio.unix unix))
+ (libraries windtrap eio eio.unix eio_main unix))
 
 ; The shared notification hook lives in bin/boot; it strips event strings
 ; through [Output], so both sources are copied in. The charter-store suite
@@ -620,3 +620,19 @@
  (name test_theme)
  (modules test_theme)
  (libraries windtrap mentat_tui mosaic jsont))
+
+; mentatd's resident-service surface lives in bin/mentatd as the module
+; service; its source is copied in like reconcile's, and only the pure half
+; (rendering, paths, standing) is driven — the effectful verbs need a service
+; manager. The copy compiles whole, so the stanza links mentat_boot under the
+; executable's own -open, as test_charter_fire does.
+
+(copy_files
+ (files ../../bin/mentatd/service.{ml,mli}))
+
+(test
+ (name test_service)
+ (modules test_service service)
+ (flags
+  (:standard -open Mentat_boot))
+ (libraries windtrap mentat_boot unix))

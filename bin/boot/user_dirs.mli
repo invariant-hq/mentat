@@ -17,9 +17,9 @@ type t
 (** Resolved absolute directory roots. *)
 
 val resolve : getenv:(string -> string option) -> (t, string) result
-(** [resolve ~getenv] resolves the three roots from the process environment.
-    [Error message] when a set override is relative or a fallback [$HOME] is
-    unavailable. *)
+(** [resolve ~getenv] resolves the four roots — config, data, state, and
+    cache — from the process environment. [Error message] when a set
+    override is relative or a fallback [$HOME] is unavailable. *)
 
 val config_home : t -> string
 (** [config_home t] is the absolute config directory. *)
@@ -29,15 +29,6 @@ val data_home : t -> string
 
 val state_home : t -> string
 (** [state_home t] is the absolute state directory. *)
-
-val cache_home : t -> string
-(** [cache_home t] is the absolute cache directory — disposable,
-    re-materializable data: an absolute [MENTAT_CACHE_HOME] wins, else
-    [XDG_CACHE_HOME/mentat], else [$HOME/.cache/mentat]. Unlike the other
-    three homes it is {e not} one of the directories the sandbox denies to
-    every confined run, because it exists to hold the charter run roots
-    those runs are granted as their workspace; nothing that authenticates
-    may ever live under it. *)
 
 val config_file : t -> string
 (** [config_file t] is [config_home / "config.json"]. *)
@@ -77,11 +68,16 @@ val charter_runs_dir : t -> string -> string
 (** [charter_runs_dir t name] is [cache_home / "charters" / name / "runs"] —
     the directory whose per-session subdirectories are [name]'s run roots:
     each holds one ephemeral checkout, the reviewed diff, the run prompt,
-    and the run log, and is the run child's workspace root. Homed under the
-    cache home because the other homes are denied to sandboxed runs as
-    Mentat's own directories — a workspace root inside one would be refused
-    at sandbox resolve — and because a run root is disposable: the durable
-    outcome lives in the session journal and the receipt log, never here. *)
+    and the run log, and is the run child's workspace root. The cache home
+    resolves like the other roots (an absolute [MENTAT_CACHE_HOME] wins,
+    else [XDG_CACHE_HOME/mentat], else [$HOME/.cache/mentat]) but, alone
+    among them, is {e not} one of the directories the sandbox denies to
+    every confined run: the other homes are Mentat's own — a workspace root
+    inside one would be refused at sandbox resolve — while the cache home
+    exists to hold exactly these disposable, remote-rematerializable
+    checkouts, and nothing that authenticates may ever live under it. The
+    durable outcome lives in the session journal and the receipt log,
+    never here. *)
 
 val daemon_socket_dir : t -> string
 (** [daemon_socket_dir t] is [/tmp/mentat-<uid>-<key>], the directory the

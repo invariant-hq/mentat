@@ -5,7 +5,9 @@
 
 (* Unit suite for [Fs]'s ledger append and permission gate. The module lives
    in [bin/boot] and is not library-linkable, so its source is copied into
-   this test executable by the [copy_files] rule in [dune]. *)
+   this test executable by the [copy_files] rule in [dune]. The append tests
+   run under [Eio_main]: append serializes in-process callers on a per-path
+   [Eio.Mutex], so it must run inside a fiber. *)
 
 open Windtrap
 
@@ -22,6 +24,7 @@ let ok ~msg = function
   | Error message -> failf "%s: %s" msg message
 
 let append_ledger () =
+  Eio_main.run @@ fun _env ->
   let root = temp_root () in
   let ledger = Filename.concat (Filename.concat root "state") "log.jsonl" in
   (* A fresh append creates the ledger — parent chain included — private. *)
@@ -50,6 +53,31 @@ let append_ledger () =
         (String.length message > 0));
   equal string ~msg:"the refused record left no bytes" "{\"d\":4}\n"
     (read ledger)
+
+(* Two fibers interleaving appends: the per-path mutex serializes them, so
+   every record lands whole and framed. *)
+let append_concurrent_fibers () =
+  Eio_main.run @@ fun _env ->
+  let root = temp_root () in
+  let ledger = Filename.concat root "log.jsonl" in
+  let write tag =
+    for i = 1 to 20 do
+      ok ~msg:"fiber append" (Fs.append ledger (Printf.sprintf "%s-%d" tag i))
+    done
+  in
+  Eio.Fiber.both (fun () -> write "a") (fun () -> write "b");
+  let lines =
+    String.split_on_char '\n' (read ledger)
+    |> List.filter (fun l -> not (String.equal l ""))
+  in
+  equal int ~msg:"all records landed" 40 (List.length lines);
+  List.iter
+    (fun line ->
+      is_true ~msg:"each record is whole"
+        (String.length line > 2
+        && (String.starts_with ~prefix:"a-" line
+           || String.starts_with ~prefix:"b-" line)))
+    lines
 
 let require_private () =
   let root = temp_root () in
@@ -81,5 +109,6 @@ let () =
   run "mentat.fs"
     [
       test "ledger append" append_ledger;
+      test "concurrent fibers serialize on the ledger" append_concurrent_fibers;
       test "require_private" require_private;
     ]

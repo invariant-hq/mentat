@@ -8,7 +8,7 @@ open Mentat_charter
 module Error = struct
   type t = { operation : string; path : string; reason : string }
 
-  let message e = Printf.sprintf "%s: %s" e.path e.reason
+  let message e = Printf.sprintf "%s: %s: %s" e.operation e.path e.reason
   let pp ppf e = Format.pp_print_string ppf (message e)
 end
 
@@ -49,12 +49,6 @@ let decode_charter ~operation ~path bytes =
   | Ok charter -> Ok charter
   | Error e -> error ~operation ~path (Charter.Error.message e)
 
-let has_webhook charter =
-  List.exists
-    (function
-      | Charter.Trigger.Github_webhook _ -> true | Charter.Trigger.Cli -> false)
-    charter.Charter.triggers
-
 module Loaded = struct
   type t = {
     name : string;
@@ -77,6 +71,12 @@ let read_token ~operation path =
       match String.trim bytes with
       | "" -> error ~operation ~path "file is empty"
       | token -> Ok (Some token))
+
+let read_secret (loaded : Loaded.t) ~file =
+  read_token ~operation:"secret read"
+    (Filename.concat
+       (Filename.concat loaded.Loaded.dir secrets_dir_name)
+       file)
 
 (* Every entry of [secrets/] must be owner-only, not just the ones this build
    reads: a loose unknown file under [secrets/] is a loose secret. *)
@@ -124,7 +124,7 @@ let load dirs ~name =
     read_token ~operation (Filename.concat dir ingress_id_name)
   in
   let* () =
-    if not (has_webhook charter) then Ok ()
+    if not (Option.is_some (Charter.webhook_arm charter)) then Ok ()
     else
       let secret_path =
         Filename.concat (Filename.concat dir secrets_dir_name)
@@ -171,7 +171,7 @@ let ingress_index dirs =
         match result with
         | Error e -> (bindings, (name, e) :: failures)
         | Ok loaded ->
-            if not (has_webhook loaded.Loaded.charter) then
+            if not (Option.is_some (Charter.webhook_arm loaded.Loaded.charter)) then
               (bindings, failures)
             else
               let secret_path =
@@ -206,22 +206,27 @@ let ingress_index dirs =
 let receipts_path dirs name =
   Filename.concat (User_dirs.charter_state_dir dirs name) "receipts.jsonl"
 
-let claim_identity dirs ~name ~digest identity =
-  let identity_string = Event.Identity.to_string identity in
+let claim_path dirs ~name ~digest identity =
   let key =
     Mentat_digest.key ~length:32 ~domain:"mentat.charter.event.v1"
-      [ digest; identity_string ]
+      [ digest; Event.Identity.to_string identity ]
   in
-  let path =
-    Filename.concat
-      (Filename.concat (User_dirs.charter_state_dir dirs name) "events")
-      key
-  in
-  match Fs.write_new ~perms:0o600 path (identity_string ^ "\n") with
+  Filename.concat
+    (Filename.concat (User_dirs.charter_state_dir dirs name) "events")
+    key
+
+let claim_identity dirs ~name ~digest identity =
+  let path = claim_path dirs ~name ~digest identity in
+  match
+    Fs.write_new ~perms:0o600 path (Event.Identity.to_string identity ^ "\n")
+  with
   | Ok `Written -> Ok `Claimed
   | Ok `Exists -> Ok `Dup
   | Error reason ->
       error ~operation:"identity claim" ~path (strip_path ~path reason)
+
+let claim_held dirs ~name ~digest identity =
+  Sys.file_exists (claim_path dirs ~name ~digest identity)
 
 let append_receipt dirs ~name receipt =
   let path = receipts_path dirs name in
@@ -374,7 +379,7 @@ let install dirs ~src =
         output_schema
   in
   let* webhook =
-    if not (has_webhook charter) then Ok None
+    if not (Option.is_some (Charter.webhook_arm charter)) then Ok None
     else
       let* id, id_minted =
         mint_token ~operation

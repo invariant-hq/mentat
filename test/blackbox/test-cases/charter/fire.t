@@ -1,11 +1,13 @@
 The fire pipeline end to end, with no live network: a saved pull_request
-delivery is gated, claimed, receipted, provisioned as a hardened checkout
-from a local fixture remote, reviewed by a sealed run against the fake
-provider, priced into the disposition receipt, rendered, and published
-against a scripted GitHub API fake. Then the record does its job: the same
-delivery reads dup, a torn claim is adopted and collides loudly at the
-derived session id, the sweep passes over receipted heads, and a policy
-edit re-admits the head under its new digest.
+delivery is gated, receipted, run-claimed at spawn commitment, provisioned
+as a hardened checkout from a local fixture remote, reviewed by a sealed run
+against the fake provider, priced into the disposition receipt, rendered,
+and published against a scripted GitHub API fake. Then the record does its
+job: the same delivery reads dup off the run-claim alone, the sweep passes
+over claimed heads, a policy edit re-admits the head under its new digest, a
+claim torn between commitment and spawn is adopted by the next fire, and a
+settled run whose publication failed is finished by the sweep's publisher
+re-entry without a fresh run.
 
 The repository fixture: a base branch, a feature head, and a bare remote
 carrying refs/pull/7/head — what the derived https remote would serve, as a
@@ -110,46 +112,31 @@ in the shared store.
   $TS reaped github:acme/widgets#7@$DIGEST1:head: session c-$DIGEST2, exit 0, head settled, cause exited, $0.0110
 
 The run child carried the sealed contract and the trigger provenance: the
-prompt rode stdin (never argv) and the provider request carried the
-findings schema; the reviewed tree is the fixture head, checked out as
-data in the run root, whose session journal records a triggered origin.
+provider request carried the findings schema through the structured_output
+tool, the reviewed tree in the run root is the fixture head itself, and the
+run log records a triggered origin.
 
   $ grep -c '"name":"structured_output"' capture-run/request-1.json
   1
+  $ RUN_ROOT=$(ls -d "$HOME"/.cache/mentat/charters/pr-review/runs/*)
+  $ test "$(git -C "$RUN_ROOT" rev-parse HEAD)" = "$HEAD_SHA" && echo head-pinned
+  head-pinned
+  $ grep -q '"origin":"triggered"' "$RUN_ROOT"/.mentat-run-*.jsonl && echo triggered-origin
+  triggered-origin
 
 Firing the identical delivery again is one receipt line reading dup: the
-claim marker collapses redelivery to the first fire's receipt.
+run-claim marker alone carries dup authority, so a redelivery is refused
+without any network read — no head check is scripted, and none happens.
 
-  $ cat > github2.jsonl <<EOF
-  > {"expect": {"request_line": "GET /repos/acme/widgets/pulls/7 HTTP/1.1"}, "http": {"status": 200, "json": {"head": {"sha": "$HEAD_SHA"}}}}
-  > EOF
-  $ start_fake_server github2.jsonl capture-gh2 gh-port
-  $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
   $ mentat charter fire pr-review --event event.json | censor
   dup github:acme/widgets#7@$DIGEST:head
-  $ wait_fake_server
   $ grep -c '"disposition":"dup"' "$RECEIPTS"
   1
 
-Torn-claim recovery: a marker without its delivery line belongs to a
-claimer that died between the two, so the next fire adopts it and drives
-on — proven here by erasing the log (the marker survives) and watching the
-adopted pass reach the derived session id's loud collision instead of
-reading dup.
-
-  $ rm "$RECEIPTS"
-  $ start_fake_server github2.jsonl capture-gh3 gh-port
-  $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
-  $ mentat charter fire pr-review --event event.json | censor
-  already exists github:acme/widgets#7@$DIGEST1:head: session c-$DIGEST2
-  $ wait_fake_server
-  $ grep -c '"disposition":"already_exists"' "$RECEIPTS"
-  1
-
-The sweep passes over receipted heads silently: the open-PR listing names
-the same head, its identity holds receipts under the current digest, and
-nothing is synthesized — the canonical crontab line dedupes exactly as the
-webhook path would.
+The sweep passes over claimed heads silently: the open-PR listing names the
+same head, its run-claim is held under the current policy digest and its
+egress is decided, and nothing is synthesized — the canonical crontab line
+dedupes exactly as the webhook path would.
 
   $ cat > listing.jsonl <<EOF
   > {"expect": {"request_line": "GET /repos/acme/widgets/pulls?state=open&per_page=100 HTTP/1.1"}, "http": {"status": 200, "json": [{"number": 7, "draft": false, "author_association": "OWNER", "head": {"sha": "$HEAD_SHA"}, "base": {"ref": "main"}}]}}
@@ -182,3 +169,88 @@ owner's deliberate re-review path.
   published: summary created, 1 threads
   $ wait_fake_server
   $ wait "$RUN2_PID"
+
+A torn claim, produced honestly: a second pull request's delivery passes
+the gate and the fence and commits its run-claim — then the checkout fails
+against a broken remote, so the marker is held with no spawned line. The
+receipt log stays intact.
+
+  $ git -C work checkout -qb feature-8
+  $ printf 'hello\nnew line\nanother\n' > work/lib.txt
+  $ git -C work commit -qam change-8
+  $ HEAD8=$(git -C work rev-parse HEAD)
+  $ git -C origin.git fetch -q ../work feature-8
+  $ git -C origin.git update-ref refs/pull/8/head "$HEAD8"
+  $ cat > event8.json <<EOF
+  > { "action": "opened",
+  >   "repository": { "full_name": "acme/widgets" },
+  >   "pull_request": { "number": 8, "draft": false,
+  >     "author_association": "OWNER",
+  >     "head": { "sha": "$HEAD8" },
+  >     "base": { "ref": "main" } } }
+  > EOF
+  $ cat > github8.jsonl <<EOF
+  > {"expect": {"request_line": "GET /repos/acme/widgets/pulls/8 HTTP/1.1"}, "http": {"status": 200, "json": {"head": {"sha": "$HEAD8"}}}}
+  > EOF
+  $ start_fake_server github8.jsonl capture-gh8 gh-port
+  $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
+  $ export MENTAT_CHARTER_GIT_URL="$PWD/missing.git"
+  $ mentat charter fire pr-review --event event8.json 2>&1 | censor | sed -e 's/checkout: .*/checkout: (git error)/' -e 's/^mentat: git .*/mentat: (git error)/'
+  refused github:acme/widgets#8@$DIGEST:head: checkout: (git error)
+  mentat: (git error)
+  [1]
+  $ wait_fake_server
+  $ grep '"disposition":"spawned"' "$RECEIPTS" | grep -c '#8@' || true
+  0
+
+The next fire adopts the torn claim and drives it to a real run — spawned,
+not dup. This run's publication is cut short: the summary post is refused,
+so the run settles with findings but no egress receipt.
+
+  $ export MENTAT_CHARTER_GIT_URL="$PWD/origin.git"
+  $ start_fake_openai review.jsonl capture-run3 port-run3
+  $ RUN3_PID=$MENTAT_FAKE_PROVIDER_PID
+  $ cat > github8b.jsonl <<EOF
+  > {"expect": {"request_line": "GET /repos/acme/widgets/pulls/8 HTTP/1.1"}, "http": {"status": 200, "json": {"head": {"sha": "$HEAD8"}}}}
+  > {"expect": {"request_line": "GET /user HTTP/1.1"}, "http": {"status": 200, "json": {"login": "owner"}}}
+  > {"expect": {"request_line": "GET /repos/acme/widgets/pulls/8/comments?per_page=100 HTTP/1.1"}, "http": {"status": 200, "json": []}}
+  > {"expect": {"request_line": "GET /repos/acme/widgets/issues/8/comments?per_page=100 HTTP/1.1"}, "http": {"status": 200, "json": []}}
+  > {"expect": {"request_line": "POST /repos/acme/widgets/pulls/8/comments HTTP/1.1"}, "http": {"status": 201, "json": {"id": 9005}}}
+  > {"expect": {"request_line": "POST /repos/acme/widgets/issues/8/comments HTTP/1.1"}, "http": {"status": 502, "json": {"message": "bad gateway"}}}
+  > EOF
+  $ start_fake_server github8b.jsonl capture-gh8b gh-port
+  $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
+  $ mentat charter fire pr-review --event event8.json 2>&1 | censor
+  spawned github:acme/widgets#8@$DIGEST1:head: session c-$DIGEST2
+  reaped c-$DIGEST2: exit 0, head settled, $0.0110
+  mentat: github publish exited 1 without upserting the summary
+  [1]
+  $ wait_fake_server
+  $ wait "$RUN3_PID"
+  $ grep '"disposition":"spawned"' "$RECEIPTS" | grep -c '#8@'
+  1
+  $ grep '"kind":"egress"' "$RECEIPTS" | grep -c '#8@' || true
+  0
+
+The sweep finishes what the failed publication left: the head ran to
+settlement with findings and holds no egress receipt, so the sweep
+re-enters the publisher only — no fresh run and no fresh spend (no provider
+fake is even running), and the claimed head #7 stays silent beside it.
+
+  $ cat > listing8.jsonl <<EOF
+  > {"expect": {"request_line": "GET /repos/acme/widgets/pulls?state=open&per_page=100 HTTP/1.1"}, "http": {"status": 200, "json": [{"number": 7, "draft": false, "author_association": "OWNER", "head": {"sha": "$HEAD_SHA"}, "base": {"ref": "main"}}, {"number": 8, "draft": false, "author_association": "OWNER", "head": {"sha": "$HEAD8"}, "base": {"ref": "main"}}]}}
+  > {"expect": {"request_line": "GET /user HTTP/1.1"}, "http": {"status": 200, "json": {"login": "owner"}}}
+  > {"expect": {"request_line": "GET /repos/acme/widgets/pulls/8/comments?per_page=100 HTTP/1.1"}, "http": {"status": 200, "json": []}}
+  > {"expect": {"request_line": "GET /repos/acme/widgets/issues/8/comments?per_page=100 HTTP/1.1"}, "http": {"status": 200, "json": []}}
+  > {"expect": {"request_line": "POST /repos/acme/widgets/pulls/8/comments HTTP/1.1"}, "http": {"status": 201, "json": {"id": 9006}}}
+  > {"expect": {"request_line": "POST /repos/acme/widgets/issues/8/comments HTTP/1.1"}, "http": {"status": 201, "json": {"id": 9007}}}
+  > EOF
+  $ start_fake_server listing8.jsonl capture-gh8c gh-port
+  $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
+  $ mentat charter fire pr-review --sweep | censor
+  published: summary created, 1 threads
+  $ wait_fake_server
+  $ grep '"kind":"egress"' "$RECEIPTS" | grep -c '#8@'
+  1
+  $ grep '"disposition":"spawned"' "$RECEIPTS" | grep -c '#8@'
+  1

@@ -30,7 +30,8 @@ module Error : sig
       file or directory involved, [reason] the rendered cause. *)
 
   val message : t -> string
-  (** [message e] is [e]'s user-facing [<path>: <reason>] line. *)
+  (** [message e] is [e]'s user-facing [<operation>: <path>: <reason>]
+      line. *)
 
   val pp : Format.formatter -> t -> unit
   (** [pp ppf e] formats {!message}. *)
@@ -52,9 +53,18 @@ module Loaded : sig
   }
   (** The type for loaded charters: the full policy closure, so a consumer
       spawning a run or computing the digest needs no second read. Secrets
-      are deliberately not carried — {!Binding.t} is the one surface that
-      reads one. *)
+      are deliberately not carried — {!read_secret} and {!Binding.t} are
+      the two surfaces that read one, both on demand, so a held closure
+      never holds a stale credential. *)
 end
+
+val read_secret : Loaded.t -> file:string -> (string option, Error.t) result
+(** [read_secret loaded ~file] is the trimmed content of [file] under the
+    charter's [secrets/] directory — [read-token], [write-token], or
+    [secrets/webhook]'s [webhook] — or [Ok None] when the file does not
+    exist. One policy for every credential read: surrounding whitespace is
+    trimmed (an editor's trailing newline is not part of a secret), and a
+    present-but-blank file is an [Error], never an empty token. *)
 
 val load : User_dirs.t -> name:string -> (Loaded.t, Error.t) result
 (** [load dirs ~name] reads and validates the installed charter [name]. An
@@ -103,13 +113,19 @@ val ingress_index :
 
 (** {1:record The durable record}
 
-    The per-event-identity claim marker and the receipt log split one job:
-    the marker — created [O_CREAT|O_EXCL] — is the {e serialization} point,
-    collapsing concurrent claimers of one event across processes to a single
-    winner; the fsynced JSONL append is the {e durability} point, the
-    authoritative record folds read. A claimer that reads [`Dup] and needs
-    to know whether the winner's receipt landed consults the log, not the
-    marker. *)
+    The per-event-identity run-claim marker and the receipt log split one
+    job. The marker — created [O_CREAT|O_EXCL] at the moment a pass commits
+    to spawning a run, after every gate and fence has admitted the event —
+    is the {e serialization} point: it collapses concurrent committers of
+    one event across processes to a single winner, and its presence means
+    this identity committed a run, so every later delivery and every sweep
+    pass reads it as a duplicate. A refusal that is not a commitment — a
+    gate skip, a fence — never claims, so the event re-enters when its
+    circumstances change. The fsynced JSONL append is the {e durability}
+    point, the authoritative record folds read. A pass that finds the
+    marker held consults the log's spawned line
+    ({!Mentat_charter.Receipt.spawn_recorded}) to tell a completed
+    commitment from one abandoned between claim and spawn. *)
 
 val claim_identity :
   User_dirs.t ->
@@ -117,12 +133,23 @@ val claim_identity :
   digest:string ->
   Mentat_charter.Event.Identity.t ->
   ([ `Claimed | `Dup ], Error.t) result
-(** [claim_identity dirs ~name ~digest identity] claims [identity] for one
-    pipeline pass under the policy [digest]: [`Claimed] created the marker,
-    [`Dup] found it already held. The marker is keyed on
-    [(digest, identity)] — a policy edit re-admits every event, exactly as
-    the run-id mint re-runs it. The marker file carries [identity]'s string
-    form for a human reader; nothing parses it. *)
+(** [claim_identity dirs ~name ~digest identity] commits [identity] to one
+    run under the policy [digest]: [`Claimed] created the marker, [`Dup]
+    found it already held. The marker is keyed on [(digest, identity)] — a
+    policy edit re-admits every event, exactly as the run-id mint re-runs
+    it. The marker file carries [identity]'s string form for a human
+    reader; nothing parses it. *)
+
+val claim_held :
+  User_dirs.t ->
+  name:string ->
+  digest:string ->
+  Mentat_charter.Event.Identity.t ->
+  bool
+(** [claim_held dirs ~name ~digest identity] is [true] iff the run-claim
+    marker for [identity] under [digest] exists — the read-only probe. A
+    [false] answer is advisory (another pass may commit in the next
+    instant); only {!claim_identity}'s exclusive create decides. *)
 
 val append_receipt :
   User_dirs.t ->

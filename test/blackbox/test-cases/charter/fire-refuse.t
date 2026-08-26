@@ -166,11 +166,105 @@ without a webhook arm has no deliveries for --event or --sweep to replay.
   mentat: charter webhookless has no github_webhook trigger; --event and --sweep replay webhook deliveries
   [2]
 
---event and --sweep are one choice, and --key belongs to neither.
+--event and --sweep are one choice, and a bare fire has nothing to review.
 
   $ mentat charter fire pr-review --event event-fresh.json --sweep 2>&1
   mentat: choose one of --event or --sweep
   [2]
-  $ mentat charter fire pr-review --sweep --key nightly 2>&1
-  mentat: --key names a bare fire's identity; --event and --sweep carry their delivery's own
+  $ mentat charter fire pr-review 2>&1
+  mentat: charter pr-review reviews pull requests and a bare fire has nothing to review; use --event FILE or --sweep
   [2]
+
+The webhook default: a charter metering nothing per-charter still fences at
+6 runs per hour, because --event and --sweep process webhook-shaped
+deliveries — their rate is set by whoever opens pull requests, so an
+unfenced webhook charter cannot exist by omission. Six in-window spawns are
+seeded; the seventh admissible delivery is fenced.
+
+  $ mkdir nometer
+  $ cat > nometer/charter.json <<'EOF'
+  > { "charter": 1, "name": "nometer",
+  >   "workspace": { "repo": "acme/widgets" },
+  >   "trigger": [
+  >     { "kind": "github_webhook", "events": ["pull_request.opened"] },
+  >     { "kind": "cli" } ],
+  >   "run": { "mode": "review", "prompt": "prompt.md",
+  >            "output_schema": "findings.schema.json" },
+  >   "budget": { "per_run": { "wall_clock": "5m" } },
+  >   "publish": { "github": "review-threads" } }
+  > EOF
+  $ printf 'p\n' > nometer/prompt.md
+  $ printf '{"type":"object"}\n' > nometer/findings.schema.json
+  $ mentat charter add nometer >/dev/null
+  $ NDIR="$PWD/config/mentat/charters/nometer"
+  $ printf 'test-read-token\n' > "$NDIR/secrets/read-token"
+  $ chmod 600 "$NDIR/secrets/read-token"
+  $ NRECEIPTS="$PWD/state/mentat/charters/nometer/receipts.jsonl"
+  $ ndigest=$(mentat charter list | awk '$1 == "nometer" {print $2}')
+  $ mkdir -p "$(dirname "$NRECEIPTS")"
+  $ for i in 1 2 3 4 5 6; do
+  >   printf '{"kind":"disposition","at":%s,"identity":"cli:%s:seed-%s","digest":"%s","disposition":"spawned","session":"c-000000000000000%s"}\n' "$(date +%s)" "$ndigest" "$i" "$ndigest" "$i" >> "$NRECEIPTS"
+  > done
+  $ seventh=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  $ cat > event-seventh.json <<EOF
+  > { "action": "opened",
+  >   "repository": { "full_name": "acme/widgets" },
+  >   "pull_request": { "number": 14, "draft": false,
+  >     "author_association": "OWNER",
+  >     "head": { "sha": "$seventh" },
+  >     "base": { "ref": "main" } } }
+  > EOF
+  $ cat > github-seventh.jsonl <<EOF
+  > {"expect": {"request_line": "GET /repos/acme/widgets/pulls/14 HTTP/1.1"}, "http": {"status": 200, "json": {"head": {"sha": "$seventh"}}}}
+  > EOF
+  $ start_fake_server github-seventh.jsonl capture-seventh gh-port
+  $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
+  $ mentat charter fire nometer --event event-seventh.json | censor
+  fenced github:acme/widgets#14@$DIGEST:head: runs_per_hour
+  $ wait_fake_server
+  $ mentat charter status nometer | grep 'runs 1h'
+    runs 1h: 6 of 6
+
+Refusals never claim, so an event re-enters when its circumstances change.
+A draft head swept once is skipped — and re-decided on every pass: marked
+ready, the same head passes the gate and reaches the fence; the window
+freed, it drives on to the checkout. The receipts poison nothing.
+
+  $ printf 'test-read-token\n' > "$CDIR/secrets/read-token"
+  $ chmod 600 "$CDIR/secrets/read-token"
+  $ drafthead=ffffffffffffffffffffffffffffffffffffffff
+  $ cat > listing-draft.jsonl <<EOF
+  > {"expect": {"request_line": "GET /repos/acme/widgets/pulls?state=open&per_page=100 HTTP/1.1"}, "http": {"status": 200, "json": [{"number": 12, "draft": true, "author_association": "OWNER", "head": {"sha": "$drafthead"}, "base": {"ref": "main"}}]}}
+  > EOF
+  $ start_fake_server listing-draft.jsonl capture-draft gh-port
+  $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
+  $ mentat charter fire pr-review --sweep | censor
+  skipped github:acme/widgets#12@$DIGEST:head: draft pull requests are not admitted
+  $ wait_fake_server
+  $ cat > listing-ready.jsonl <<EOF
+  > {"expect": {"request_line": "GET /repos/acme/widgets/pulls?state=open&per_page=100 HTTP/1.1"}, "http": {"status": 200, "json": [{"number": 12, "draft": false, "author_association": "OWNER", "head": {"sha": "$drafthead"}, "base": {"ref": "main"}}]}}
+  > EOF
+  $ start_fake_server listing-ready.jsonl capture-ready gh-port
+  $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
+  $ mentat charter fire pr-review --sweep | censor
+  fenced github:acme/widgets#12@$DIGEST:head: runs_per_hour
+  $ wait_fake_server
+
+Free the window — the seeded spawn moves two hours back — and the same head
+passes the fence and commits: the claim is taken and the pipeline reaches
+the checkout, which fails loudly against a dead remote. The fenced receipts
+did not poison re-admission; only the run-claim dedups.
+
+  $ grep -v '"disposition":"spawned"' "$RECEIPTS" > receipts.rewritten
+  $ mv receipts.rewritten "$RECEIPTS"
+  $ printf '{"kind":"disposition","at":%s,"identity":"cli:%s:seed","digest":"%s","disposition":"spawned","session":"c-0000000000000000"}\n' "$(($(date +%s) - 7200))" "$digest" "$digest" >> "$RECEIPTS"
+  $ start_fake_server listing-ready.jsonl capture-freed gh-port
+  $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
+  $ export MENTAT_CHARTER_GIT_URL="$PWD/no-such-remote"
+  $ mentat charter fire pr-review --sweep 2>&1 | censor | sed -e 's/checkout: .*/checkout: (git error)/' -e 's/^mentat: git .*/mentat: (git error)/'
+  refused github:acme/widgets#12@$DIGEST:head: checkout: (git error)
+  mentat: (git error)
+  [1]
+  $ wait_fake_server
+  $ grep -c '"disposition":"refused"' "$RECEIPTS"
+  1

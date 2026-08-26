@@ -23,6 +23,7 @@
   mirage-crypto-rng.unix
   eio
   eio.unix
+  eio_main
   unix
   jsont
   jsont.bytesrw))

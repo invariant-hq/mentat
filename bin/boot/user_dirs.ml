@@ -55,7 +55,6 @@ let resolve ~getenv =
 let config_home t = t.config_home
 let data_home t = t.data_home
 let state_home t = t.state_home
-let cache_home t = t.cache_home
 let config_file t = Filename.concat t.config_home "config.json"
 let auth_file t = Filename.concat t.config_home "auth.json"
 let trust_file t = Filename.concat t.config_home "trust.json"

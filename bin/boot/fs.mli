@@ -66,12 +66,15 @@ val append : string -> string -> (unit, string) result
     a failure restores the pre-append boundary best-effort, so a caller's
     retry cannot duplicate records.
 
-    Concurrent appenders in {e separate processes} are serialized by an
-    advisory lock on the ledger itself, so one writer's boundary repair cannot
-    truncate another's in-flight record. The lock does not exclude fibers of
-    one process (POSIX record locks are per-process); in-process callers
-    serialize themselves. A [record] containing a raw ['\n'] would forge a
-    record boundary and is refused. [Error message] on any IO failure. *)
+    Concurrent appenders are serialized at both levels, the {!with_lock}
+    posture: an in-process [Eio.Mutex] keyed by [path] (POSIX record locks
+    are per-process and would not exclude a second fiber) plus an advisory
+    [Unix.lockf F_TLOCK] on the ledger itself, retried on a cancellable
+    backoff, so one writer's boundary repair cannot truncate another's
+    in-flight record and a wedged foreign holder never parks the domain
+    uninterruptibly. Must run inside an Eio fiber. A [record] containing a
+    raw ['\n'] would forge a record boundary and is refused. [Error message]
+    on any IO failure. *)
 
 val require_private : string -> (unit, string) result
 (** [require_private path] is [Ok ()] when the entry at [path] is accessible

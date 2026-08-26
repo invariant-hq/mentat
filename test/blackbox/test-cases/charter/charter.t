@@ -67,5 +67,5 @@ No state was recorded here, so nothing is named as kept.
   removed pr-review ($TESTCASE_ROOT/config/mentat/charters/pr-review)
   $ mentat charter list
   $ mentat charter runs pr-review 2>&1
-  mentat: $TESTCASE_ROOT/config/mentat/charters/pr-review: no charter named pr-review
+  mentat: load: $TESTCASE_ROOT/config/mentat/charters/pr-review: no charter named pr-review
   [1]

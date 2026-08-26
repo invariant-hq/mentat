@@ -231,6 +231,9 @@ let receipt ~at kind =
   }
 
 let receipts_roundtrip () =
+  (* The append serializes in-process callers on an [Eio.Mutex], so it runs
+     inside a fiber. *)
+  Eio_main.run @@ fun _env ->
   let root = temp_root () in
   let dirs = make_dirs root in
   let name = "hook" in
@@ -276,13 +279,46 @@ let claim () =
   let claim digest =
     ok ~msg:"claim" (Charter_store.claim_identity dirs ~name ~digest identity)
   in
+  is_false ~msg:"no marker before the first claim"
+    (Charter_store.claim_held dirs ~name ~digest:digest16 identity);
   is_true ~msg:"the first claim wins"
     (match claim digest16 with `Claimed -> true | `Dup -> false);
+  is_true ~msg:"the probe sees the held marker"
+    (Charter_store.claim_held dirs ~name ~digest:digest16 identity);
   is_true ~msg:"the second claim reads dup"
     (match claim digest16 with `Dup -> true | `Claimed -> false);
   (* A policy edit re-admits every event: the marker keys on the digest. *)
+  is_false ~msg:"another digest holds no marker"
+    (Charter_store.claim_held dirs ~name ~digest:"fedcba9876543210" identity);
   is_true ~msg:"a new digest claims afresh"
     (match claim "fedcba9876543210" with `Claimed -> true | `Dup -> false)
+
+let read_secret () =
+  let root = temp_root () in
+  let dirs = make_dirs root in
+  let src = proposal root ~name:"hook" (webhook_json ~name:"hook") in
+  let installed = ok ~msg:"install" (Charter_store.install dirs ~src) in
+  let loaded = installed.Charter_store.Installed.loaded in
+  equal (option string) ~msg:"an absent secret is None" None
+    (ok ~msg:"read absent"
+       (Charter_store.read_secret loaded ~file:"read-token"));
+  let secret path bytes =
+    write_file path bytes;
+    Unix.chmod path 0o600
+  in
+  let path =
+    Filename.concat
+      (Filename.concat loaded.Charter_store.Loaded.dir "secrets")
+      "read-token"
+  in
+  secret path "  tok-123\n";
+  equal (option string) ~msg:"the read trims surrounding whitespace"
+    (Some "tok-123")
+    (ok ~msg:"read" (Charter_store.read_secret loaded ~file:"read-token"));
+  secret path "\n";
+  err ~msg:"a present-but-blank secret is an error, never an empty token"
+    ~holds:[ "file is empty" ]
+    (Charter_store.read_secret loaded ~file:"read-token")
 
 let () =
   run "mentat.charter_store"
@@ -293,4 +329,5 @@ let () =
       test "roster and index" roster_and_index;
       test "receipts roundtrip" receipts_roundtrip;
       test "claim markers" claim;
+      test "one secret-read policy" read_secret;
     ]

@@ -8,26 +8,54 @@
 
     One code path, two invoking processes: [mentat charter fire] runs the
     pipeline in the invoking process itself, and the resident node runs the
-    identical path when a webhook delivery arrives. The steps are fixed:
-    decode or synthesize the event, gate it (including the current-head
-    check), claim its identity, record the delivery, fold the budget fences
-    over receipts, refuse a layout that would put secrets under the run's
-    read roots, mint the derived session id, provision the checkout, spawn
-    the sealed review run, reap it, stamp usage and derived cost into the
-    disposition receipt, publish through the connector, record the egress,
-    and alert once per transition. Every decision becomes a receipt line
-    before the pipeline returns — a fire that spends money always leaves a
-    disposition, on interrupt included.
+    identical path when a webhook delivery arrives. The pipeline is split at
+    its durability point into the two halves a two-fiber intake needs:
 
-    GitHub reads are injected as closures ({!Github.t}), so this module
-    takes no HTTP dependency: the caller constructs them over whatever
-    client it links, holding the read credential. The write credential never
-    enters this process at all — publication rides two short-lived children
-    of the [mentat] binary, the tokenless renderer ([github review]) and the
-    poster ([github publish]), and the write token is read from the
-    charter's [secrets/write-token] into the poster child's environment
-    only. An absent write token skips publication and says so in the egress
-    receipt; it never fails the run.
+    - {!admit_delivery} is the intake half — the node's {e serving fiber}.
+      It fences the body's size, decodes it narrowly, and appends the
+      delivery receipt: cheap, no network, so an ingress listener can
+      answer its 202 immediately after it returns. Duplicate delivery
+      lines across redeliveries are harmless log lines — the delivery
+      receipt records arrival, it decides nothing.
+    - {!dispose} is the decision half — the node's {e pump fiber}. It
+      gates the event, probes the run-claim, checks the current head,
+      folds the budget fences, commits the run-claim, refuses a layout
+      that would put secrets under the run's read roots, mints the derived
+      session id, provisions the checkout, spawns the sealed review run,
+      reaps it, stamps usage and derived cost into the disposition
+      receipt, publishes through the connector, records the egress, and
+      alerts once per transition.
+
+    {!fire_event} is their composition, and a sweep drives {!dispose}
+    directly on synthesized events — the sweep observes open heads, it
+    admits no delivery.
+
+    The run-claim marker is taken at {e spawn commitment} — after the gate,
+    the head check, and the fences have all admitted the event, immediately
+    before the session mint and the checkout — so a refusal that is not a
+    commitment never claims: a draft that goes ready re-enters, and a
+    fenced head re-enters when a later pass finds its window freed. The
+    fence fold, the claim, and the spawned receipt are serialized under a
+    per-charter lock, so concurrent fires cannot each read the pre-spawn
+    counts and jointly overshoot a cap. Budget fences admit every delivery
+    as webhook-shaped ([`Webhook] to {!Fence.admit}): a replay and a sweep
+    process the same deliveries a webhook would, and their rate is set by
+    whoever opens pull requests, never by the invoking transport.
+
+    Every decision becomes a receipt line before the pipeline returns — a
+    fire that spends money always leaves a disposition, on a stop request
+    included: a forced stop kills the child and still writes the reaped
+    disposition, with whatever cost the journal holds, before returning.
+
+    GitHub reads are injected as closures ({!Github.t}) inside a per-fire
+    {!Repo.t}, so this module takes no HTTP dependency: the caller
+    constructs them over whatever client it links, holding the read
+    credential. The write credential never enters this process at all —
+    publication rides two short-lived children of the [mentat] binary, the
+    tokenless renderer ([github review]) and the poster ([github publish]),
+    and the write token is read from the charter's [secrets/write-token]
+    into the poster child's environment only. An absent write token skips
+    publication and says so in the egress receipt; it never fails the run.
 
     Checkout provisioning invokes [git] directly, hardened on every
     invocation: no system or global configuration, no terminal prompt, an
@@ -59,7 +87,7 @@ module Github : sig
   type t = {
     current_head : number:int -> (string, string) result;
         (** [current_head ~number] is the pull request's current head commit
-            hash, or a display-safe failure reason. The gate refuses a
+            hash, or a display-safe failure reason. The pipeline refuses a
             delivery whose head this answer has moved past. *)
     open_prs : unit -> (open_pr list, string) result;
         (** [open_prs ()] lists the watched repository's open pull requests,
@@ -72,6 +100,23 @@ module Github : sig
   }
   (** The type for injected GitHub reads. All three run with the read
       credential (or none); none of them writes. *)
+end
+
+(** The per-fire connection to the charter's repository. *)
+module Repo : sig
+  type t = {
+    git_url : string;
+        (** The remote the checkout fetches from. The caller derives it
+            from the charter's validated repository (or an explicit
+            override), never from a payload. *)
+    github : Github.t;  (** The injected GitHub reads. *)
+  }
+  (** The type for per-fire connections. Deliberately not part of
+      {!type-env}: the closures hold the read credential and the URL
+      encodes the watched repository, and the store's law is that an
+      owner's edit is in force at the next event — so a resident node must
+      rebuild this value per delivery, never hold one per charter. The
+      signature is that obligation. *)
 end
 
 type env = {
@@ -88,15 +133,24 @@ type env = {
       (** The [mentat] binary the run and publication children exec — the
           invoking executable itself for the CLI, the sibling binary for the
           node. *)
-  git_url : string;
-      (** The remote the checkout fetches from. The caller derives it from
-          the charter's validated repository (or an explicit override), never
-          from a payload. *)
-  github : Github.t;  (** The injected GitHub reads. *)
+  stop : unit -> [ `None | `Stop | `Force ];
+      (** The stop seam, polled while a run child is being reaped. [`Stop]
+          asks the pipeline to stop the run: the child is sent SIGINT once
+          (after a short courtesy grace, in case the requester's own signal
+          already reached it through a shared process group) and the reap
+          continues to a normal disposition. [`Force] kills the child
+          immediately; the reaped disposition is still written before the
+          pipeline returns. The CLI wires its SIGINT count to this at the
+          verb boundary; a node wires its drain. Answers never regress:
+          once [`Stop], never [`None]; once [`Force], always [`Force]. *)
+  say : string -> unit;
+      (** The narration line sink. The CLI prints to standard output; a
+          node routes to its log. Lines carry no trailing newline. *)
 }
-(** The type for pipeline environments: everything effectful the pipeline
-    composes over, so the two invoking binaries differ only in how they
-    build this record. *)
+(** The type for pipeline environments: the process-scoped effects the
+    pipeline composes over, built once per process by either invoking
+    binary. Everything charter- or delivery-scoped rides {!Repo.t} and the
+    loaded charter instead. *)
 
 type outcome =
   | Disposed
@@ -106,28 +160,70 @@ type outcome =
           [Disposed]: its failure is receipted and alerted, and the record,
           not this exit, is the outcome surface. *)
   | Interrupted
-      (** The owner interrupted the fire; the run child was reaped and its
-          disposition receipted before returning. *)
+      (** A stop request reached the pipeline mid-run; the run child was
+          reaped and its disposition receipted before returning. *)
+
+val max_event_bytes : int
+(** The inclusive delivery-body byte cap, 1 MiB. Every intake — [--event]
+    bytes, a live webhook body — is fenced by this one constant, so the two
+    paths refuse the same oversized payload. *)
+
+val admit_delivery :
+  env ->
+  Charter_store.Loaded.t ->
+  body:string ->
+  (Mentat_charter.Event.Pull_request.t, string) result
+(** [admit_delivery env loaded ~body] admits the delivery [body] — the
+    bytes of a GitHub [pull_request] webhook payload — as far as the
+    durable delivery receipt: the size fence, the narrow decode, and the
+    appended delivery line, nothing else. Cheap and network-free, so an
+    ingress listener answers its 202 on this half alone. The decoded event
+    is returned for {!dispose}; an [Error] is an oversized body, a charter
+    with no webhook arm, a payload the narrow decode refuses, or an
+    unwritable receipt log. *)
+
+val dispose :
+  env ->
+  repo:Repo.t ->
+  Charter_store.Loaded.t ->
+  event:Mentat_charter.Event.Pull_request.t ->
+  check_head:bool ->
+  (outcome, string) result
+(** [dispose env ~repo loaded ~event ~check_head] drives the admitted
+    [event] to its disposition — the pump half; see the module preamble for
+    the fixed step order. [check_head] is [true] for a delivered event (the
+    current-head read refuses a stale delivery before it can claim) and
+    [false] for a sweep-synthesized one, whose listing was the head read.
+    [Error message] is a machinery failure: the pipeline itself could not
+    do its job (an unwritable receipt, an unreachable remote, a failed
+    spawn) — receipted as [refused] wherever an identity exists to receipt
+    against, and distinct from every run outcome, which is [Disposed]. *)
 
 val fire_event :
-  env -> Charter_store.Loaded.t -> body:string -> (outcome, string) result
-(** [fire_event env loaded ~body] drives the delivery [body] — the bytes of
-    a GitHub [pull_request] webhook payload, fenced exactly as the ingress
-    fences them (the same size cap, the same narrow decode) — through the
-    pipeline under [loaded]. [Error message] is a machinery failure: the
-    pipeline itself could not do its job (an unwritable receipt, an
-    unreachable remote, a failed spawn) — receipted as [refused] wherever an
-    identity exists to receipt against, and distinct from every run outcome,
-    which is [Disposed]. *)
+  env ->
+  repo:Repo.t ->
+  Charter_store.Loaded.t ->
+  body:string ->
+  (outcome, string) result
+(** [fire_event env ~repo loaded ~body] is {!admit_delivery} composed with
+    {!dispose} — the whole pipeline in one call, the CLI's [--event] path
+    and the shape the node's two fibers reassemble. *)
 
-val fire_sweep : env -> Charter_store.Loaded.t -> (outcome, string) result
-(** [fire_sweep env loaded] performs one open-PR listing and drives a
-    synthesized delivery for every head that holds no receipt under the
-    current policy digest, each through the same path as {!fire_event} (the
-    listing is the head read, so the current-head check is not repeated).
-    Heads already receipted are passed over silently — the sweep observes,
-    it never re-decides. Events are driven in listing order; the first
-    machinery failure stops the sweep. *)
+val fire_sweep :
+  env -> repo:Repo.t -> Charter_store.Loaded.t -> (outcome, string) result
+(** [fire_sweep env ~repo loaded] performs one open-PR listing and drives a
+    synthesized delivery through {!dispose} for every head whose run-claim
+    is not held under the current policy digest (the listing is the head
+    read, so the current-head check is not repeated; no delivery receipt is
+    admitted — the sweep observes, it never re-delivers). A head whose
+    claim is held is passed over silently, with one exception: an identity
+    that ran to settlement with findings and holds no egress receipt
+    re-enters the {e publisher} only — the upsert is idempotent, so
+    finishing an interrupted publication spends nothing and mints no run.
+    Heads a gate skipped or a fence refused hold no claim and re-enter on
+    every pass, so a draft that goes ready is reviewed and a fenced head
+    runs when its window frees. Events are driven in listing order; the
+    first machinery failure stops the sweep. *)
 
 (** {1:folds Pure pieces}
 
@@ -141,10 +237,10 @@ val sweep_events :
   Mentat_charter.Event.Pull_request.t list
 (** [sweep_events arm ~repo prs] synthesizes the deliveries a sweep drives:
     one [pull_request] event per listed head, in listing order, carrying the
-    first review-class action ([opened], [reopened], [ready_for_review], or
-    [synchronize]) the arm admits — the sweep asks whether a head wants
-    review, and the admitted action names the moment the charter subscribed
-    to. An arm admitting no review-class action synthesizes nothing. *)
+    first review-class action ({!Mentat_charter.Event.Identity.review_class})
+    the arm admits — the sweep asks whether a head wants review, and the
+    admitted action names the moment the charter subscribed to. An arm
+    admitting no review-class action synthesizes nothing. *)
 
 val findings_of_log : string -> string option
 (** [findings_of_log bytes] is the findings document carried by the run
@@ -152,18 +248,3 @@ val findings_of_log : string -> string option
     re-encoded minified — or [None] when no line carries one. Lines that do
     not parse are passed over: the log is a stream tail, and the settled
     line is the one that matters. *)
-
-val summary_method_of_envelope : string -> [ `Post | `Patch ] option
-(** [summary_method_of_envelope bytes] is the publication envelope's summary
-    request method — [`Post] creates the summary comment, [`Patch] converges
-    an existing one — or [None] when [bytes] is not an envelope. *)
-
-val publish_threads_posted : string -> int
-(** [publish_threads_posted bytes] counts the thread requests the poster's
-    outcome log [bytes] reports answered [2xx] — the labeled lines; the
-    summary line carries a null label and is not a thread. *)
-
-val publish_summary_ok : string -> bool
-(** [publish_summary_ok bytes] is [true] iff the poster's outcome log
-    [bytes] reports the summary request — the null-labeled line — answered
-    [2xx]. *)

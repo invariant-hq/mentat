@@ -4,6 +4,7 @@
  ---------------------------------------------------------------------------*)
 
 open Mentat_charter
+open Mentat_connector
 
 module Github = struct
   type open_pr = {
@@ -21,6 +22,10 @@ module Github = struct
   }
 end
 
+module Repo = struct
+  type t = { git_url : string; github : Github.t }
+end
+
 type env = {
   dirs : User_dirs.t;
   store : Mentat_store.t;
@@ -28,8 +33,8 @@ type env = {
   stdenv : Eio_unix.Stdenv.base;
   environment : (string * string) list;
   mentat_bin : string;
-  git_url : string;
-  github : Github.t;
+  stop : unit -> [ `None | `Stop | `Force ];
+  say : string -> unit;
 }
 
 type outcome = Disposed | Interrupted
@@ -48,8 +53,19 @@ let envelope_capture_cap = 4 * 1024 * 1024
 let run_log_cap = 64 * 1024 * 1024
 
 (* How long a signalled run child may take to settle before SIGKILL — 0018
-   §5's shape: interrupt, a bounded grace, then the hard stop. *)
+   §5's shape: interrupt, a bounded grace, then the hard stop. The child
+   broker reaps its serve children on the same ladder with a 5-second grace;
+   a review run's teardown settles a whole model turn, so it gets the longer
+   leash. The two should converge on one boot-level reap primitive when the
+   resident node grows the fire path. *)
 let reap_grace_s = 10.0
+
+(* A stop request and a tty Ctrl-C can reach this parent while the run child,
+   sharing the process group, has already received the same SIGINT — and the
+   child's own guard force-quits on a second one. The courtesy grace lets a
+   child already tearing down gracefully exit before this parent delivers
+   the request itself. *)
+let stop_courtesy_s = 2.0
 let render_timeout_s = 120.0
 let publish_timeout_s = 300.0
 
@@ -62,26 +78,7 @@ let excerpt ?(cap = 300) s =
   let s = String.trim s in
   if String.length s > cap then String.sub s 0 cap ^ "…" else s
 
-(* JSON member plumbing over decoded [Jsont.json] values. *)
-
-let json_mem name = function
-  | Jsont.Object (mems, _) ->
-      Option.map snd (Jsont.Json.find_mem name mems)
-  | _ -> None
-
-let json_string = function Jsont.String (s, _) -> Some s | _ -> None
-let json_number = function Jsont.Number (v, _) -> Some v | _ -> None
-
-let decode_json bytes =
-  match Jsont_bytesrw.decode_string Jsont.json bytes with
-  | Ok json -> Some json
-  | Error _ -> None
-
-let lines bytes = String.split_on_char '\n' bytes
-
 (* Pure pieces. *)
-
-let review_class_actions = [ "opened"; "reopened"; "ready_for_review"; "synchronize" ]
 
 let sweep_events (arm : Charter.Trigger.Webhook.t) ~repo prs =
   let action =
@@ -93,7 +90,7 @@ let sweep_events (arm : Charter.Trigger.Webhook.t) ~repo prs =
             String.sub event (String.length prefix)
               (String.length event - String.length prefix)
           in
-          if List.mem action review_class_actions then Some action else None
+          if Event.Identity.review_class action then Some action else None
         else None)
       arm.Charter.Trigger.Webhook.events
   in
@@ -116,70 +113,28 @@ let sweep_events (arm : Charter.Trigger.Webhook.t) ~repo prs =
 let findings_of_log bytes =
   List.fold_left
     (fun acc line ->
-      match decode_json line with
+      match Mentat_json.Lenient.decode line with
       | None -> acc
       | Some json -> (
-          match Option.bind (json_mem "type" json) json_string with
+          match
+            Option.bind
+              (Mentat_json.Lenient.mem "type" json)
+              Mentat_json.Lenient.string
+          with
           | Some "turn.finished" -> (
-              match json_mem "output" json with
+              match Mentat_json.Lenient.mem "output" json with
               | Some (Jsont.Null _) | None -> acc
               | Some output -> (
                   match Jsont_bytesrw.encode_string Jsont.json output with
                   | Ok minified -> Some minified
                   | Error _ -> acc))
           | Some _ | None -> acc))
-    None (lines bytes)
-
-let summary_method_of_envelope bytes =
-  match decode_json bytes with
-  | None -> None
-  | Some json -> (
-      match
-        Option.bind (json_mem "summary" json) (fun summary ->
-            Option.bind (json_mem "method" summary) json_string)
-      with
-      | Some "POST" -> Some `Post
-      | Some "PATCH" -> Some `Patch
-      | Some _ | None -> None)
-
-let publish_lines bytes =
-  List.filter_map
-    (fun line ->
-      match decode_json line with
-      | Some json
-        when Option.bind (json_mem "type" json) json_string
-             = Some "github.publish" ->
-          Some json
-      | Some _ | None -> None)
-    (lines bytes)
-
-let two_xx json =
-  match Option.bind (json_mem "status" json) json_number with
-  | Some v -> v >= 200.0 && v < 300.0
-  | None -> false
-
-let labeled json =
-  match json_mem "label" json with
-  | Some (Jsont.Null _) | None -> false
-  | Some _ -> true
-
-let publish_threads_posted bytes =
-  List.length (List.filter (fun j -> labeled j && two_xx j) (publish_lines bytes))
-
-let publish_summary_ok bytes =
-  List.exists (fun j -> (not (labeled j)) && two_xx j) (publish_lines bytes)
+    None
+    (String.split_on_char '\n' bytes)
 
 (* Effect plumbing. *)
 
 let now () = Unix.gettimeofday ()
-
-let webhook_arm charter =
-  List.find_map
-    (function
-      | Charter.Trigger.Github_webhook arm -> Some arm
-      | Charter.Trigger.Cli -> None)
-    charter.Charter.triggers
-
 let store_error e = Charter_store.Error.message e
 
 let append_receipt env ~name receipt =
@@ -191,19 +146,8 @@ let read_receipts env ~name =
 let receipt_now ~identity ~digest kind =
   { Receipt.at = now (); identity; digest; kind }
 
-(* The two credential files this pipeline knows. A present-but-blank file is
-   an error, never an empty token. *)
-let secret_token (loaded : Charter_store.Loaded.t) file =
-  let path =
-    Filename.concat (Filename.concat loaded.Charter_store.Loaded.dir "secrets") file
-  in
-  match Fs.read_capped ~max_bytes:Fs.default_max_bytes path with
-  | Error e -> Error e
-  | Ok None -> Ok None
-  | Ok (Some bytes) -> (
-      match String.trim bytes with
-      | "" -> Error (path ^ ": file is empty")
-      | token -> Ok (Some token))
+let read_secret loaded ~file =
+  Result.map_error store_error (Charter_store.read_secret loaded ~file)
 
 (* Child environments. The run and publication children never inherit a
    GitHub credential from the invoking environment (N9): the write token is
@@ -296,7 +240,7 @@ let http_remote url =
    configuration, no prompt, no inherited GIT_* state, the hooks path empty,
    the file-transport hole closed for the derived https remote, and the read
    token as environment-scoped configuration — never argv, never a URL. *)
-let git_environment env ~hooks_dir ~token =
+let git_environment env ~git_url ~hooks_dir ~token =
   let base =
     List.filter
       (fun (k, _) -> not (String.starts_with ~prefix:"GIT_" k))
@@ -306,8 +250,8 @@ let git_environment env ~hooks_dir ~token =
     match token with
     | None -> []
     | Some token -> (
-        match url_origin env.git_url with
-        | Some origin when http_remote env.git_url ->
+        match url_origin git_url with
+        | Some origin when http_remote git_url ->
             [
               ( Printf.sprintf "http.%s/.extraheader" origin,
                 "AUTHORIZATION: basic "
@@ -317,7 +261,7 @@ let git_environment env ~hooks_dir ~token =
   in
   let config =
     [ ("core.hooksPath", hooks_dir); ("protocol.ext.allow", "never") ]
-    @ (if http_remote env.git_url then [ ("protocol.file.allow", "never") ] else [])
+    @ (if http_remote git_url then [ ("protocol.file.allow", "never") ] else [])
     @ header
   in
   let numbered =
@@ -366,19 +310,21 @@ type provisioned = {
    history (the merge base the diff anchors on cannot be resolved from a
    shallow pair), verify the payload head is still contained, check it out
    detached, and materialize the reviewed diff, the findings schema, and the
-   run prompt as session-named dotfiles the checkout cannot collide with
-   silently. *)
-let provision env (loaded : Charter_store.Loaded.t) ~(event : Event.Pull_request.t)
-    ~session ~run_root ~wall_clock =
+   run prompt as session-named dotfiles. A dotfile already present is not a
+   fault: the run root is keyed on the derived session, so an occupied slot
+   means another pass committed this identity first — the racing-adopter
+   loser's benign collision. *)
+let provision env (loaded : Charter_store.Loaded.t) ~git_url
+    ~(event : Event.Pull_request.t) ~session ~run_root ~wall_clock =
   let name = loaded.Charter_store.Loaded.name in
   let* () = Fs.mkdir_p run_root in
   let hooks_dir =
     Filename.concat (User_dirs.charter_state_dir env.dirs name) "empty-hooks"
   in
   let* () = Fs.mkdir_p hooks_dir in
-  let* token = secret_token loaded "read-token" in
+  let* token = read_secret loaded ~file:"read-token" in
   let* git = resolve_git env in
-  let genv = git_environment env ~hooks_dir ~token in
+  let genv = git_environment env ~git_url ~hooks_dir ~token in
   let run ?cap args = git_ok env ~git ~genv ~cwd_path:run_root ~timeout_s:wall_clock ?cap args in
   let* _ = run [ "init"; "-q" ] in
   let* _ =
@@ -387,7 +333,7 @@ let provision env (loaded : Charter_store.Loaded.t) ~(event : Event.Pull_request
         "fetch";
         "-q";
         "--no-tags";
-        env.git_url;
+        git_url;
         Printf.sprintf "+refs/heads/%s:refs/mentat/base" event.Event.Pull_request.base_ref;
         Printf.sprintf "+refs/pull/%d/head:refs/mentat/head" event.Event.Pull_request.number;
       ]
@@ -420,20 +366,19 @@ let provision env (loaded : Charter_store.Loaded.t) ~(event : Event.Pull_request
     in
     if String.length (String.trim diff) = 0 then Ok `Empty_diff
     else
-      let materialize rel perms bytes =
+      let materialize rel perms bytes k =
         let path = Filename.concat run_root rel in
         match Fs.write_new ~perms path bytes with
-        | Ok `Written -> Ok path
-        | Ok `Exists -> Error (Printf.sprintf "%s already exists; refusing to overwrite it" rel)
+        | Ok `Written -> k path
+        | Ok `Exists -> Ok `Collision
         | Error message -> Error message
       in
       let diff_rel = Printf.sprintf ".mentat-review-%s.patch" session in
-      let* _ = materialize diff_rel 0o600 diff in
-      let* schema_path =
-        materialize
-          (Printf.sprintf ".mentat-charter-schema-%s.json" session)
-          0o600 loaded.Charter_store.Loaded.output_schema
-      in
+      materialize diff_rel 0o600 diff @@ fun _ ->
+      materialize
+        (Printf.sprintf ".mentat-charter-schema-%s.json" session)
+        0o600 loaded.Charter_store.Loaded.output_schema
+      @@ fun schema_path ->
       let prompt =
         Printf.sprintf
           "%s\n\n\
@@ -448,10 +393,9 @@ let provision env (loaded : Charter_store.Loaded.t) ~(event : Event.Pull_request
           (excerpt ~cap:200 event.Event.Pull_request.base_ref)
           diff_rel
       in
-      let* prompt_path =
-        materialize (Printf.sprintf ".mentat-charter-prompt-%s.md" session) 0o600 prompt
-      in
-      Ok (`Ready { diff_rel; prompt_path; schema_path })
+      materialize (Printf.sprintf ".mentat-charter-prompt-%s.md" session) 0o600
+        prompt
+      @@ fun prompt_path -> Ok (`Ready { diff_rel; prompt_path; schema_path })
 
 (* Spawn and reap. *)
 
@@ -526,26 +470,42 @@ let spawn_run env ~argv ~run_root ~session ~prompt_path =
 
 (* Reap the run child under the wall-clock deadline: expiry walks SIGINT →
    grace → SIGKILL (the child's own guard turns SIGINT into an honest
-   exit 130). The owner's Ctrl-C reaches the child through the shared
-   process group; this parent notes it, keeps waiting, and still writes the
-   disposition — a second Ctrl-C force-quits. *)
+   exit 130). The stop seam is polled every beat: a first stop request asks
+   the child to stop — after the courtesy grace, in case the requester's own
+   signal already reached it through a shared process group — and the reap
+   continues normally; a force request SIGKILLs and returns at once, so the
+   caller's disposition receipt is written on every stop path. *)
 let reap env ~pid ~wall_clock =
   let clock = Eio.Stdenv.clock env.stdenv in
-  let sigints = Atomic.make 0 in
-  let previous =
-    Sys.signal Sys.sigint
-      (Sys.Signal_handle
-         (fun _ -> if Atomic.fetch_and_add sigints 1 >= 1 then exit 130))
+  let deadline = now () +. wall_clock in
+  let signal s = try Unix.kill pid s with Unix.Unix_error _ -> () in
+  let rec wait_dead () =
+    match Unix.waitpid [] pid with
+    | _, status -> status
+    | exception Unix.Unix_error (Unix.EINTR, _, _) -> wait_dead ()
   in
-  Fun.protect
-    ~finally:(fun () -> Sys.set_signal Sys.sigint previous)
-    (fun () ->
-      let deadline = now () +. wall_clock in
-      let signal s = try Unix.kill pid s with Unix.Unix_error _ -> () in
-      let rec loop expiry =
-        match Unix.waitpid [ Unix.WNOHANG ] pid with
-        | 0, _ ->
-            let t = now () in
+  let exit_code_of = function
+    | Unix.WEXITED code -> min 255 (max 0 code)
+    | Unix.WSIGNALED s | Unix.WSTOPPED s -> min 255 (128 + s)
+  in
+  let rec loop ~stop ~expiry =
+    match Unix.waitpid [ Unix.WNOHANG ] pid with
+    | 0, _ -> (
+        let t = now () in
+        match env.stop () with
+        | `Force ->
+            signal Sys.sigkill;
+            (exit_code_of (wait_dead ()), Receipt.Cause.Interrupted, true)
+        | (`None | `Stop) as level ->
+            let stop =
+              match (level, stop) with
+              | `Stop, None -> Some (`Pending_since t)
+              | `Stop, Some (`Pending_since asked)
+                when t -. asked > stop_courtesy_s ->
+                  signal Sys.sigint;
+                  Some `Signalled
+              | _, stop -> stop
+            in
             let expiry =
               match expiry with
               | None when t > deadline ->
@@ -557,20 +517,15 @@ let reap env ~pid ~wall_clock =
               | expiry -> expiry
             in
             Eio.Time.sleep clock 0.2;
-            loop expiry
-        | _, status ->
-            let exit_code =
-              match status with
-              | Unix.WEXITED code -> min 255 (max 0 code)
-              | Unix.WSIGNALED s | Unix.WSTOPPED s -> min 255 (128 + s)
-            in
-            let cause =
-              if Option.is_some expiry then Receipt.Cause.Wall_clock
-              else Receipt.Cause.Exited
-            in
-            (exit_code, cause, Atomic.get sigints > 0)
-      in
-      loop None)
+            loop ~stop ~expiry)
+    | _, status ->
+        let cause =
+          if Option.is_some expiry then Receipt.Cause.Wall_clock
+          else Receipt.Cause.Exited
+        in
+        (exit_code_of status, cause, Option.is_some stop)
+  in
+  loop ~stop:None ~expiry:None
 
 (* Journal head and spend, read once at reap: the exit code is liveness, the
    head is truth. *)
@@ -629,14 +584,12 @@ let derived_cost env view =
    transition dedups on its tripped meter's trailing window. The notify hook
    is a courtesy behind the charter's own contract. *)
 
-let transition_named a b =
-  String.equal (Receipt.Transition.to_string a) (Receipt.Transition.to_string b)
-
 let fire_hook env (loaded : Charter_store.Loaded.t) ~transition ~identity ~session =
   match loaded.Charter_store.Loaded.charter.Charter.notify with
   | None -> ()
   | Some notify ->
-      if List.exists (transition_named transition) notify.Charter.Notify.on then
+      if List.exists (Receipt.Transition.equal transition) notify.Charter.Notify.on
+      then
         Notify.fire
           ~proc_mgr:(Eio.Stdenv.process_mgr env.stdenv)
           ~clock:(Eio.Stdenv.clock env.stdenv)
@@ -671,30 +624,21 @@ let alert_identity env (loaded : Charter_store.Loaded.t) ~identity ~transition ~
    token in its environment alone. Both are short-lived [mentat] children. *)
 
 let findings_count bytes =
-  match Option.bind (decode_json bytes) (json_mem "findings") with
+  match
+    Option.bind (Mentat_json.Lenient.decode bytes)
+      (Mentat_json.Lenient.mem "findings")
+  with
   | Some (Jsont.Array (items, _)) -> List.length items
   | Some _ | None -> 1
 
 let posted_empty bytes =
-  match decode_json bytes with
+  match Mentat_json.Lenient.decode bytes with
   | Some (Jsont.Array ([], _)) -> true
   | Some _ | None -> false
 
-(* The origin token discriminating this charter's comments: the marker
-   grammar admits lowercase letters, digits, '-', and ':', so the charter
-   name's wider grammar is folded onto it. *)
-let origin_of_name name =
-  "charter:"
-  ^ String.map
-      (fun c ->
-        if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || Char.equal c '-'
-        then c
-        else if c >= 'A' && c <= 'Z' then Char.lowercase_ascii c
-        else '-')
-      name
-
-let publish env (loaded : Charter_store.Loaded.t) ~(event : Event.Pull_request.t)
-    ~identity ~session ~run_root ~diff_rel ~findings =
+let publish env ~(repo : Repo.t) (loaded : Charter_store.Loaded.t)
+    ~(event : Event.Pull_request.t) ~identity ~session ~run_root ~diff_rel
+    ~findings =
   let name = loaded.Charter_store.Loaded.name in
   let digest = loaded.Charter_store.Loaded.digest in
   let charter = loaded.Charter_store.Loaded.charter in
@@ -702,24 +646,24 @@ let publish env (loaded : Charter_store.Loaded.t) ~(event : Event.Pull_request.t
     append_receipt env ~name
       (receipt_now ~identity ~digest (Receipt.Kind.Egress { summary; threads }))
   in
-  let* write_token = secret_token loaded "write-token" in
+  let* write_token = read_secret loaded ~file:"write-token" in
   match write_token with
   | None ->
       let* () = egress `Skipped_no_token 0 in
-      Output.stdout_printf "publish skipped: no write token\n";
+      env.say "publish skipped: no write token";
       Ok ()
   | Some token -> (
       let* posted =
         Result.map_error
           (fun e -> Printf.sprintf "posted listing: %s" e)
-          (env.github.Github.posted ~number:event.Event.Pull_request.number)
+          (repo.Repo.github.Github.posted ~number:event.Event.Pull_request.number)
       in
       if
         findings_count findings = 0
         && charter.Charter.suppress_clean_run && posted_empty posted
       then (
         let* () = egress `None_needed 0 in
-        Output.stdout_printf "publish: clean run, nothing posted before — suppressed\n";
+        env.say "publish: clean run, nothing posted before — suppressed";
         Ok ())
       else
         let posted_rel = Printf.sprintf ".mentat-posted-%s.json" session in
@@ -739,7 +683,8 @@ let publish env (loaded : Charter_store.Loaded.t) ~(event : Event.Pull_request.t
                 "mentat"; "github"; "review"; "--pr"; pr; "--at";
                 event.Event.Pull_request.head_sha; "--base-label";
                 excerpt ~cap:200 event.Event.Pull_request.base_ref; "--origin";
-                origin_of_name name; "--diff"; diff_rel; "--posted"; posted_rel;
+                "charter:" ^ Publication.Marker.origin_of_name name; "--diff";
+                diff_rel; "--posted"; posted_rel;
               ]
           in
           let* code, stdout, stderr = child_result "github review" outcome in
@@ -756,26 +701,33 @@ let publish env (loaded : Charter_store.Loaded.t) ~(event : Event.Pull_request.t
             [ "mentat"; "github"; "publish"; "--pr"; pr ]
         in
         let* code, stdout, stderr = child_result "github publish" outcome in
-        if not (publish_summary_ok stdout) then
+        if not (Publication.Outcome.summary_ok stdout) then
           Error
-            (Printf.sprintf
-               "github publish exited %d without upserting the summary: %s" code
-               stderr)
+            (Printf.sprintf "github publish exited %d without upserting the summary%s"
+               code
+               (if String.equal stderr "" then "" else ": " ^ stderr))
         else
           let summary =
-            match summary_method_of_envelope rendered with
-            | Some `Patch -> `Updated
-            | Some `Post | None -> `Created
+            match Publication.Envelope.decode rendered with
+            | Ok envelope -> (
+                match
+                  envelope.Publication.Envelope.summary
+                    .Publication.Request.method_
+                with
+                | `PATCH -> `Updated
+                | `POST -> `Created)
+            | Error _ -> `Created
           in
-          let threads = publish_threads_posted stdout in
+          let threads = Publication.Outcome.threads_posted stdout in
           let* () = egress summary threads in
-          Output.stdout_printf "published: summary %s, %d threads\n"
-            (match summary with `Created -> "created" | `Updated -> "updated")
-            threads;
+          env.say
+            (Printf.sprintf "published: summary %s, %d threads"
+               (match summary with `Created -> "created" | `Updated -> "updated")
+               threads);
           if code <> 0 then
-            Output.stderr_printf
-              "mentat: some publish requests were refused; the upsert converges \
-               on the next publication\n";
+            env.say
+              "some publish requests were refused; the upsert converges on \
+               the next publication";
           Ok ())
 
 (* Admission. *)
@@ -803,10 +755,149 @@ let read_root_violation env ~name =
 
 let short sha = if String.length sha > 7 then String.sub sha 0 7 else sha
 
-(* One event, decoded or synthesized, driven to a disposition. [check_head]
-   is false for sweep-synthesized deliveries, whose listing is the head
-   read. Every arm below leaves its receipt before returning. *)
-let drive env (loaded : Charter_store.Loaded.t) ~(arm : Charter.Trigger.Webhook.t)
+(* What the committed half hands the reaping half. *)
+module Committed = struct
+  type t = {
+    pid : int;
+    session : string;
+    run_root : string;
+    log_rel : string;
+    diff_rel : string;
+  }
+end
+
+let fire_lock env ~name =
+  Filename.concat (User_dirs.charter_state_dir env.dirs name) "fire.lock"
+
+(* The run-claim commitment, serialized per charter: the fence fold, the
+   O_EXCL claim, the layout refusal, the session mint, provisioning, and the
+   spawned receipt happen under one lock, so a concurrent fire observes the
+   committed spawn before its own fence decision — the caps are bounds, not
+   estimates. The reap and the publication run outside the lock: the money
+   is committed the moment the child is spawned, and holding the lock for
+   the run's lifetime would serialize the charter to one run at a time. *)
+let commit env ~(repo : Repo.t) (loaded : Charter_store.Loaded.t)
+    ~(event : Event.Pull_request.t) ~identity ~record ~refuse ~dispose_skipped =
+  let name = loaded.Charter_store.Loaded.name in
+  let digest = loaded.Charter_store.Loaded.digest in
+  let charter = loaded.Charter_store.Loaded.charter in
+  let id = Event.Identity.to_string identity in
+  let dispose_already_exists session =
+    let* () = record (Receipt.Kind.Disposition Receipt.Disposition.Already_exists) in
+    env.say (Printf.sprintf "already exists %s: session %s" id session);
+    Ok `Done
+  in
+  let* receipts = read_receipts env ~name in
+  let at = now () in
+  match
+    Fence.admit ~digest ~budget:charter.Charter.budget ~trigger:`Webhook
+      ~now:at receipts
+  with
+  | Fence.Fenced meter ->
+      let* () = record (Receipt.Kind.Disposition (Receipt.Disposition.Fenced meter)) in
+      let* () =
+        if Fence.should_alert ~digest ~now:at ~meter receipts then (
+          let* () =
+            record
+              (Receipt.Kind.Alert
+                 { transition = Receipt.Transition.Fenced; window = `Meter meter })
+          in
+          fire_hook env loaded ~transition:Receipt.Transition.Fenced
+            ~identity:id ~session:None;
+          Ok ())
+        else Ok ()
+      in
+      env.say (Printf.sprintf "fenced %s: %s" id (Receipt.Meter.to_string meter));
+      Ok `Done
+  | Fence.Pass -> (
+      let* claim =
+        Result.map_error store_error
+          (Charter_store.claim_identity env.dirs ~name ~digest identity)
+      in
+      let* duplicate =
+        match claim with
+        | `Claimed -> Ok false
+        | `Dup ->
+            (* The torn-claim policy: a marker without its spawned line
+               belongs to a committer that died — or refused — between the
+               claim and the spawn; this pass adopts the commitment and
+               drives on. A completed commitment is a duplicate. *)
+            if Receipt.spawn_recorded ~digest ~identity:id receipts then (
+              let* () = record (Receipt.Kind.Disposition Receipt.Disposition.Dup) in
+              env.say (Printf.sprintf "dup %s" id);
+              Ok true)
+            else Ok false
+      in
+      if duplicate then Ok `Done
+      else
+        match read_root_violation env ~name with
+        | Some violation -> Result.map (fun _ -> `Done) (refuse violation)
+        | None -> (
+            let session = Run_id.mint ~policy_digest:digest identity in
+            match
+              Mentat_store.Session.load env.store
+                (Mentat_session.Id.of_string session)
+            with
+            | Ok _ -> dispose_already_exists session
+            | Error (Mentat_store.Session.Error.Not_found _) -> (
+                let run_root =
+                  Filename.concat (User_dirs.charter_runs_dir env.dirs name) session
+                in
+                let wall_clock = charter.Charter.budget.Charter.Budget.wall_clock in
+                let* provisioned =
+                  Result.map_error
+                    (fun e ->
+                      match refuse (Printf.sprintf "checkout: %s" (excerpt e)) with
+                      | Ok _ | Error _ -> e)
+                    (provision env loaded ~git_url:repo.Repo.git_url ~event
+                       ~session ~run_root ~wall_clock)
+                in
+                match provisioned with
+                | `Superseded ->
+                    let* () =
+                      record (Receipt.Kind.Disposition Receipt.Disposition.Superseded)
+                    in
+                    env.say (Printf.sprintf "superseded %s" id);
+                    Ok `Done
+                | `Empty_diff ->
+                    let* () = dispose_skipped "empty diff" in
+                    Ok `Done
+                | `Collision -> dispose_already_exists session
+                | `Ready ({ diff_rel; prompt_path; schema_path } : provisioned)
+                  -> (
+                    let title =
+                      Printf.sprintf "charter/%s PR#%d @%s" name
+                        event.Event.Pull_request.number
+                        (short event.Event.Pull_request.head_sha)
+                    in
+                    let argv =
+                      run_child_argv loaded ~identity:id ~session ~run_root
+                        ~schema_path ~title
+                    in
+                    match spawn_run env ~argv ~run_root ~session ~prompt_path with
+                    | Error e ->
+                        Result.map
+                          (fun _ -> `Done)
+                          (refuse (Printf.sprintf "spawn: %s" e))
+                    | Ok (pid, log_rel, _err_rel) ->
+                        let* () =
+                          record
+                            (Receipt.Kind.Disposition
+                               (Receipt.Disposition.Spawned { session }))
+                        in
+                        env.say (Printf.sprintf "spawned %s: session %s" id session);
+                        Ok
+                          (`Committed
+                             {
+                               Committed.pid;
+                               session;
+                               run_root;
+                               log_rel;
+                               diff_rel;
+                             })))
+            | Error e -> Error (Mentat_store.Session.Error.message e)))
+
+let dispose env ~(repo : Repo.t) (loaded : Charter_store.Loaded.t)
     ~(event : Event.Pull_request.t) ~check_head =
   let name = loaded.Charter_store.Loaded.name in
   let digest = loaded.Charter_store.Loaded.digest in
@@ -816,265 +907,205 @@ let drive env (loaded : Charter_store.Loaded.t) ~(arm : Charter.Trigger.Webhook.
   let record kind = append_receipt env ~name (receipt_now ~identity:id ~digest kind) in
   let dispose_skipped reason =
     let* () = record (Receipt.Kind.Disposition (Receipt.Disposition.Skipped reason)) in
-    Output.stdout_printf "skipped %s: %s\n" id reason;
-    Ok Disposed
+    env.say (Printf.sprintf "skipped %s: %s" id reason);
+    Ok ()
   in
-  let refuse ?session reason =
+  let refuse reason =
     let* () = record (Receipt.Kind.Disposition (Receipt.Disposition.Refused reason)) in
     let* () =
       alert_identity env loaded ~identity:id ~transition:Receipt.Transition.Failed
-        ~session
+        ~session:None
     in
-    Output.stdout_printf "refused %s: %s\n" id reason;
+    env.say (Printf.sprintf "refused %s: %s" id reason);
     Error reason
   in
-  if not charter.Charter.enabled then dispose_skipped "disabled"
-  else
-    match Gate.evaluate ~repo:charter.Charter.repo arm event with
-    | Gate.Skip reason -> dispose_skipped reason
-    | Gate.Pass -> (
-        let* fresh =
-          if not check_head then Ok true
-          else
-            match env.github.Github.current_head ~number:event.Event.Pull_request.number with
-            | Ok current -> Ok (String.equal current event.Event.Pull_request.head_sha)
-            | Error e ->
-                Result.map (fun _ -> true) (refuse (Printf.sprintf "head check: %s" e))
-        in
-        if not fresh then (
-          let* () =
-            record (Receipt.Kind.Disposition Receipt.Disposition.Superseded)
-          in
-          Output.stdout_printf "superseded %s\n" id;
-          Ok Disposed)
-        else
-          let* claim =
-            Result.map_error store_error
-              (Charter_store.claim_identity env.dirs ~name ~digest identity)
-          in
-          let* adopted =
-            match claim with
-            | `Claimed -> Ok true
-            | `Dup ->
+  match Charter.webhook_arm charter with
+  | None ->
+      Error "the charter has no github_webhook trigger to admit the delivery"
+  | Some arm -> (
+      if not charter.Charter.enabled then (
+        let* () = dispose_skipped "disabled" in
+        Ok Disposed)
+      else
+        match Gate.evaluate ~repo:charter.Charter.repo arm event with
+        | Gate.Skip reason ->
+            let* () = dispose_skipped reason in
+            Ok Disposed
+        | Gate.Pass -> (
+            (* The cheap dup pre-filter: a held run-claim whose spawn landed
+               needs no head check and no lock. The authoritative decision is
+               the claim under the lock; this probe only spares a redelivery
+               the network round-trip. *)
+            let* pre_dup =
+              if not (Charter_store.claim_held env.dirs ~name ~digest identity)
+              then Ok false
+              else
                 let* receipts = read_receipts env ~name in
-                (* The torn-claim policy: a marker without its delivery line
-                   belongs to a claimer that died between the two; this pass
-                   adopts it and drives on. A racing adopter is caught at
-                   the derived session id's loud create collision. *)
-                Ok (not (Receipt.delivery_recorded ~digest ~identity:id receipts))
-          in
-          match claim with
-          | `Dup when not adopted ->
+                Ok (Receipt.spawn_recorded ~digest ~identity:id receipts)
+            in
+            if pre_dup then (
               let* () = record (Receipt.Kind.Disposition Receipt.Disposition.Dup) in
-              Output.stdout_printf "dup %s\n" id;
-              Ok Disposed
-          | `Claimed | `Dup -> (
-              let* () = record Receipt.Kind.Delivery in
-              let* receipts = read_receipts env ~name in
-              let at = now () in
-              match
-                Fence.admit ~digest ~budget:charter.Charter.budget
-                  ~trigger:Charter.Trigger.Cli ~now:at receipts
-              with
-              | Fence.Fenced meter ->
-                  let* () =
-                    record (Receipt.Kind.Disposition (Receipt.Disposition.Fenced meter))
-                  in
-                  let* () =
-                    if Fence.should_alert ~digest ~now:at ~meter receipts then (
-                      let* () =
-                        record
-                          (Receipt.Kind.Alert
-                             {
-                               transition = Receipt.Transition.Fenced;
-                               window = `Meter meter;
-                             })
+              env.say (Printf.sprintf "dup %s" id);
+              Ok Disposed)
+            else
+              let* fresh =
+                if not check_head then Ok true
+                else
+                  match
+                    repo.Repo.github.Github.current_head
+                      ~number:event.Event.Pull_request.number
+                  with
+                  | Ok current ->
+                      Ok (String.equal current event.Event.Pull_request.head_sha)
+                  | Error e ->
+                      Result.map
+                        (fun _ -> true)
+                        (refuse (Printf.sprintf "head check: %s" e))
+              in
+              if not fresh then (
+                let* () =
+                  record (Receipt.Kind.Disposition Receipt.Disposition.Superseded)
+                in
+                env.say (Printf.sprintf "superseded %s" id);
+                Ok Disposed)
+              else
+                let* staged =
+                  Fs.with_lock (fire_lock env ~name) (fun () ->
+                      commit env ~repo loaded ~event ~identity ~record ~refuse
+                        ~dispose_skipped)
+                in
+                match staged with
+                | `Done -> Ok Disposed
+                | `Committed
+                    { Committed.pid; session; run_root; log_rel; diff_rel } -> (
+                    let wall_clock =
+                      charter.Charter.budget.Charter.Budget.wall_clock
+                    in
+                    let exit_code, cause, stopped = reap env ~pid ~wall_clock in
+                    let head, view = head_of_journal env ~session in
+                    let usage =
+                      match view with
+                      | Some view -> usage_json view
+                      | None -> Jsont.Json.object' []
+                    in
+                    let usd = Option.bind view (derived_cost env) in
+                    let* () =
+                      record
+                        (Receipt.Kind.Disposition
+                           (Receipt.Disposition.Reaped
+                              { session; exit = exit_code; head; usage; usd; cause }))
+                    in
+                    env.say
+                      (Printf.sprintf "reaped %s: exit %d, head %s, %s" session
+                         exit_code
+                         (Receipt.Head.to_string head)
+                         (match usd with
+                         | Some usd -> Printf.sprintf "$%.4f" usd
+                         | None -> "unpriced"));
+                    if stopped then Ok Interrupted
+                    else if
+                      exit_code = 0 && Receipt.Head.equal head Receipt.Head.Settled
+                    then
+                      let* log =
+                        match
+                          Fs.read_capped ~max_bytes:run_log_cap
+                            (Filename.concat run_root log_rel)
+                        with
+                        | Ok (Some bytes) -> Ok bytes
+                        | Ok None -> Ok ""
+                        | Error e -> Error e
                       in
-                      fire_hook env loaded ~transition:Receipt.Transition.Fenced
-                        ~identity:id ~session:None;
-                      Ok ())
-                    else Ok ()
-                  in
-                  Output.stdout_printf "fenced %s: %s\n" id (Receipt.Meter.to_string meter);
-                  Ok Disposed
-              | Fence.Pass -> (
-                  match read_root_violation env ~name with
-                  | Some violation ->
-                      Result.map (fun _ -> Disposed) (refuse violation)
-                  | None -> (
-                      let session = Run_id.mint ~policy_digest:digest identity in
-                      match
-                        Mentat_store.Session.load env.store
-                          (Mentat_session.Id.of_string session)
-                      with
-                      | Ok _ ->
-                          let live =
-                            match
-                              Mentat_store.Run_lock.holder env.store
-                                ~session:(Mentat_session.Id.of_string session)
-                            with
-                            | `Held _ -> " (live)"
-                            | `Free | `Io _ -> ""
-                          in
+                      match findings_of_log log with
+                      | None ->
                           let* () =
-                            record
-                              (Receipt.Kind.Disposition
-                                 Receipt.Disposition.Already_exists)
+                            alert_identity env loaded ~identity:id
+                              ~transition:Receipt.Transition.Failed
+                              ~session:(Some session)
                           in
-                          Output.stdout_printf "already exists %s: session %s%s\n"
-                            id session live;
+                          env.say
+                            "no findings document in the run log; nothing \
+                             published";
                           Ok Disposed
-                      | Error (Mentat_store.Session.Error.Not_found _) -> (
-                          let run_root =
-                            Filename.concat
-                              (User_dirs.charter_runs_dir env.dirs name)
-                              session
+                      | Some findings ->
+                          let* () =
+                            publish env ~repo loaded ~event ~identity:id ~session
+                              ~run_root ~diff_rel ~findings
                           in
-                          let wall_clock =
-                            charter.Charter.budget.Charter.Budget.wall_clock
-                          in
-                          let* provisioned =
-                            Result.map_error
-                              (fun e ->
-                                match
-                                  refuse
-                                    (Printf.sprintf "checkout: %s" (excerpt e))
-                                with
-                                | Ok _ | Error _ -> e)
-                              (provision env loaded ~event ~session ~run_root
-                                 ~wall_clock)
-                          in
-                          match provisioned with
-                          | `Superseded ->
-                              let* () =
-                                record
-                                  (Receipt.Kind.Disposition
-                                     Receipt.Disposition.Superseded)
-                              in
-                              Output.stdout_printf "superseded %s\n" id;
-                              Ok Disposed
-                          | `Empty_diff -> dispose_skipped "empty diff"
-                          | `Ready { diff_rel; prompt_path; schema_path } -> (
-                              let title =
-                                Printf.sprintf "charter/%s PR#%d @%s" name
-                                  event.Event.Pull_request.number
-                                  (short event.Event.Pull_request.head_sha)
-                              in
-                              let argv =
-                                run_child_argv loaded ~identity:id ~session
-                                  ~run_root ~schema_path ~title
-                              in
-                              let spawned =
-                                spawn_run env ~argv ~run_root ~session ~prompt_path
-                              in
-                              match spawned with
-                              | Error e ->
-                                  Result.map
-                                    (fun _ -> Disposed)
-                                    (refuse (Printf.sprintf "spawn: %s" e))
-                              | Ok (pid, log_rel, _err_rel) ->
-                                  let* () =
-                                    record
-                                      (Receipt.Kind.Disposition
-                                         (Receipt.Disposition.Spawned { session }))
-                                  in
-                                  Output.stdout_printf "spawned %s: session %s\n"
-                                    id session;
-                                  let exit_code, cause, owner_interrupted =
-                                    reap env ~pid ~wall_clock
-                                  in
-                                  let head, view = head_of_journal env ~session in
-                                  let usage =
-                                    match view with
-                                    | Some view -> usage_json view
-                                    | None -> Jsont.Json.object' []
-                                  in
-                                  let usd = Option.bind view (derived_cost env) in
-                                  let* () =
-                                    record
-                                      (Receipt.Kind.Disposition
-                                         (Receipt.Disposition.Reaped
-                                            {
-                                              session;
-                                              exit = exit_code;
-                                              head;
-                                              usage;
-                                              usd;
-                                              cause;
-                                            }))
-                                  in
-                                  Output.stdout_printf
-                                    "reaped %s: exit %d, head %s, %s\n" session
-                                    exit_code
-                                    (Receipt.Head.to_string head)
-                                    (match usd with
-                                    | Some usd -> Printf.sprintf "$%.4f" usd
-                                    | None -> "unpriced");
-                                  if owner_interrupted then Ok Interrupted
-                                  else if
-                                    exit_code = 0
-                                    && Receipt.Head.equal head Receipt.Head.Settled
-                                  then
-                                    let* log =
-                                      match
-                                        Fs.read_capped ~max_bytes:run_log_cap
-                                          (Filename.concat run_root log_rel)
-                                      with
-                                      | Ok (Some bytes) -> Ok bytes
-                                      | Ok None -> Ok ""
-                                      | Error e -> Error e
-                                    in
-                                    match findings_of_log log with
-                                    | None ->
-                                        let* () =
-                                          alert_identity env loaded ~identity:id
-                                            ~transition:Receipt.Transition.Failed
-                                            ~session:(Some session)
-                                        in
-                                        Output.stdout_printf
-                                          "no findings document in the run log; \
-                                           nothing published\n";
-                                        Ok Disposed
-                                    | Some findings ->
-                                        let* () =
-                                          publish env loaded ~event ~identity:id
-                                            ~session ~run_root ~diff_rel ~findings
-                                        in
-                                        Ok Disposed
-                                  else
-                                    let transition =
-                                      if
-                                        exit_code = 3
-                                        || Receipt.Head.equal head Receipt.Head.Parked
-                                      then Receipt.Transition.Parked
-                                      else Receipt.Transition.Failed
-                                    in
-                                    let* () =
-                                      alert_identity env loaded ~identity:id
-                                        ~transition ~session:(Some session)
-                                    in
-                                    Ok Disposed))
-                      | Error e -> Error (Mentat_store.Session.Error.message e)))))
+                          Ok Disposed
+                    else
+                      let transition =
+                        if
+                          exit_code = 3
+                          || Receipt.Head.equal head Receipt.Head.Parked
+                        then Receipt.Transition.Parked
+                        else Receipt.Transition.Failed
+                      in
+                      let* () =
+                        alert_identity env loaded ~identity:id ~transition
+                          ~session:(Some session)
+                      in
+                      Ok Disposed)))
 
 (* Entry points. *)
 
-let fire_event env (loaded : Charter_store.Loaded.t) ~body =
+let admit_delivery env (loaded : Charter_store.Loaded.t) ~body =
   if String.length body > max_event_bytes then
     Error
       (Printf.sprintf "event exceeds the %d-byte delivery cap" max_event_bytes)
   else
-    match webhook_arm loaded.Charter_store.Loaded.charter with
+    match Charter.webhook_arm loaded.Charter_store.Loaded.charter with
     | None ->
-        Error
-          "the charter has no github_webhook trigger; --event replays a \
-           webhook delivery"
-    | Some arm -> (
+        Error "the charter has no github_webhook trigger to admit a delivery"
+    | Some _ -> (
         match Event.Pull_request.decode body with
         | Error e -> Error ("event: " ^ Event.Pull_request.Error.message e)
-        | Ok event -> drive env loaded ~arm ~event ~check_head:true)
+        | Ok event ->
+            let name = loaded.Charter_store.Loaded.name in
+            let digest = loaded.Charter_store.Loaded.digest in
+            let identity =
+              Event.Identity.to_string (Event.Identity.of_pull_request event)
+            in
+            let* () =
+              append_receipt env ~name
+                (receipt_now ~identity ~digest Receipt.Kind.Delivery)
+            in
+            Ok event)
 
-let fire_sweep env (loaded : Charter_store.Loaded.t) =
-  match webhook_arm loaded.Charter_store.Loaded.charter with
+let fire_event env ~repo loaded ~body =
+  let* event = admit_delivery env loaded ~body in
+  dispose env ~repo loaded ~event ~check_head:true
+
+(* The publisher re-entry: a head that ran to settlement with findings but
+   holds no egress receipt is the one incomplete state a sweep may finish
+   without a fresh run — the upsert is idempotent, so re-entering the
+   publisher spends nothing. *)
+let republish env ~repo (loaded : Charter_store.Loaded.t) ~event ~identity
+    ~session =
+  let name = loaded.Charter_store.Loaded.name in
+  let run_root =
+    Filename.concat (User_dirs.charter_runs_dir env.dirs name) session
+  in
+  let* log =
+    match
+      Fs.read_capped ~max_bytes:run_log_cap
+        (Filename.concat run_root (Printf.sprintf ".mentat-run-%s.jsonl" session))
+    with
+    | Ok (Some bytes) -> Ok bytes
+    | Ok None -> Ok ""
+    | Error e -> Error e
+  in
+  match findings_of_log log with
+  | None ->
+      (* A settled run without a document already alerted at its reap;
+         there is nothing to publish and nothing pending. *)
+      Ok ()
+  | Some findings ->
+      publish env ~repo loaded ~event ~identity ~session ~run_root
+        ~diff_rel:(Printf.sprintf ".mentat-review-%s.patch" session)
+        ~findings
+
+let fire_sweep env ~repo (loaded : Charter_store.Loaded.t) =
+  match Charter.webhook_arm loaded.Charter_store.Loaded.charter with
   | None ->
       Error
         "the charter has no github_webhook trigger; --sweep reconciles \
@@ -1083,25 +1114,30 @@ let fire_sweep env (loaded : Charter_store.Loaded.t) =
       let* prs =
         Result.map_error
           (fun e -> Printf.sprintf "sweep: %s" e)
-          (env.github.Github.open_prs ())
+          (repo.Repo.github.Github.open_prs ())
       in
       let events =
         sweep_events arm ~repo:loaded.Charter_store.Loaded.charter.Charter.repo prs
       in
-      let* receipts = read_receipts env ~name:loaded.Charter_store.Loaded.name in
+      let name = loaded.Charter_store.Loaded.name in
       let digest = loaded.Charter_store.Loaded.digest in
-      let seen event =
-        let id = Event.Identity.to_string (Event.Identity.of_pull_request event) in
-        List.exists
-          (fun r ->
-            String.equal r.Receipt.identity id && String.equal r.Receipt.digest digest)
-          receipts
-      in
+      let* receipts = read_receipts env ~name in
       List.fold_left
         (fun acc event ->
           match acc with
           | Error _ | Ok Interrupted -> acc
           | Ok Disposed ->
-              if seen event then acc
-              else drive env loaded ~arm ~event ~check_head:false)
+              let identity = Event.Identity.of_pull_request event in
+              let id = Event.Identity.to_string identity in
+              if not (Charter_store.claim_held env.dirs ~name ~digest identity)
+              then dispose env ~repo loaded ~event ~check_head:false
+              else if Receipt.egress_recorded ~digest ~identity:id receipts then
+                acc
+              else (
+                match Receipt.settled_session ~digest ~identity:id receipts with
+                | None -> acc
+                | Some session ->
+                    Result.map
+                      (fun () -> Disposed)
+                      (republish env ~repo loaded ~event ~identity:id ~session)))
         (Ok Disposed) events

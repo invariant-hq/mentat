@@ -94,21 +94,40 @@ let write_new ~perms path bytes =
               (try Sys.remove path with Sys_error _ -> ());
               Error message))
 
+(* In-process serialization: one [Eio.Mutex] per lock path, keyed through a
+   registry the store's [Handle] pattern uses. The registry itself is guarded by
+   a stdlib mutex so the find-or-create is atomic. *)
+let registry_guard = Mutex.create ()
+let registry : (string, Eio.Mutex.t) Hashtbl.t = Hashtbl.create 8
+
+let mutex_for lock_path =
+  Mutex.protect registry_guard (fun () ->
+      match Hashtbl.find_opt registry lock_path with
+      | Some mutex -> mutex
+      | None ->
+          let mutex = Eio.Mutex.create () in
+          Hashtbl.add registry lock_path mutex;
+          mutex)
+
+(* Cross-process serialization on [fd]. [F_TLOCK] never parks the domain, so
+   the only wait is the cancellable sleep between tries; a blocking [F_LOCK]
+   in a systhread could not be interrupted by cancellation. The lock releases
+   with the descriptor, so a crashed holder cannot wedge anything. *)
+let acquire_lock ~path fd =
+  let rec acquire backoff =
+    match Unix.lockf fd Unix.F_TLOCK 0 with
+    | () -> Ok ()
+    | exception Unix.Unix_error (Unix.EINTR, _, _) -> acquire backoff
+    | exception Unix.Unix_error ((Unix.EACCES | Unix.EAGAIN), _, _) ->
+        Eio_unix.sleep backoff;
+        acquire (Float.min (backoff *. 2.) 0.1)
+    | exception Unix.Unix_error (e, _, _) -> Error (render path e)
+  in
+  acquire 0.001
+
 (* The ledger-append recipe, rewritten from the session store's over native
    [Unix]: repair any torn tail, write the framed record at the end, fsync the
    file, then the directory. *)
-
-(* Serialize cross-process appenders on the ledger descriptor itself — the
-   boundary repair reads the size before writing, so an unserialized second
-   writer could truncate a record in flight. The lock releases with the
-   descriptor, so a crashed holder cannot wedge the ledger. [F_LOCK] blocks,
-   but the hold spans one repair and one fsynced write. POSIX record locks are
-   per-process: fibers of one process are not excluded and serialize
-   themselves. *)
-let rec lock_all fd =
-  match Unix.lockf fd Unix.F_LOCK 0 with
-  | () -> ()
-  | exception Unix.Unix_error (Unix.EINTR, _, _) -> lock_all fd
 
 let rec read_retry fd buffer offset length =
   match Unix.read fd buffer offset length with
@@ -182,6 +201,11 @@ let fsync_dir dir =
           | () -> Ok ()
           | exception Unix.Unix_error (e, _, _) -> Error (render dir e))
 
+(* Appenders are serialized at both levels — the per-path [Eio.Mutex] for
+   fibers of this process (POSIX record locks are per-process and would not
+   exclude them) and the ledger descriptor's advisory lock across
+   processes — because the boundary repair reads the size before writing, so
+   an unserialized second writer could truncate a record in flight. *)
 let append path record =
   if String.contains record '\n' then
     Error (Printf.sprintf "%s: record must not contain a newline" path)
@@ -189,6 +213,7 @@ let append path record =
     match mkdir_p (Filename.dirname path) with
     | Error _ as e -> e
     | Ok () -> (
+        Eio.Mutex.use_ro (mutex_for path) @@ fun () ->
         match
           Unix.openfile path [ Unix.O_RDWR; Unix.O_CREAT; Unix.O_CLOEXEC ] 0o600
         with
@@ -199,20 +224,25 @@ let append path record =
                 ~finally:(fun () ->
                   try Unix.close fd with Unix.Unix_error _ -> ())
                 (fun () ->
-                  lock_all fd;
-                  let base = truncate_torn path fd in
-                  let (_ : int) = Unix.lseek fd 0 Unix.SEEK_END in
-                  (* Once the write begins, any failure restores the pre-append
-                     boundary best-effort so a retry cannot duplicate
-                     records. *)
-                  try
-                    write_all fd (record ^ "\n") 0;
-                    fsync_retry fd
-                  with exn ->
-                    (try Unix.ftruncate fd base with Unix.Unix_error _ -> ());
-                    raise exn)
+                  match acquire_lock ~path fd with
+                  | Error _ as e -> e
+                  | Ok () ->
+                      let base = truncate_torn path fd in
+                      let (_ : int) = Unix.lseek fd 0 Unix.SEEK_END in
+                      (* Once the write begins, any failure restores the
+                         pre-append boundary best-effort so a retry cannot
+                         duplicate records. *)
+                      (try
+                         write_all fd (record ^ "\n") 0;
+                         fsync_retry fd
+                       with exn ->
+                         (try Unix.ftruncate fd base
+                          with Unix.Unix_error _ -> ());
+                         raise exn);
+                      Ok ())
             with
-            | () -> fsync_dir (Filename.dirname path)
+            | Ok () -> fsync_dir (Filename.dirname path)
+            | Error _ as e -> e
             | exception Unix.Unix_error (e, _, _) -> Error (render path e)
             | exception Sys_error message -> Error message))
 
@@ -227,21 +257,6 @@ let require_private path =
              "%s: mode %03o grants group or world access; make it private \
               (chmod go-rwx)"
              path stat.Unix.st_perm)
-
-(* In-process serialization: one [Eio.Mutex] per lock path, keyed through a
-   registry the store's [Handle] pattern uses. The registry itself is guarded by
-   a stdlib mutex so the find-or-create is atomic. *)
-let registry_guard = Mutex.create ()
-let registry : (string, Eio.Mutex.t) Hashtbl.t = Hashtbl.create 8
-
-let mutex_for lock_path =
-  Mutex.protect registry_guard (fun () ->
-      match Hashtbl.find_opt registry lock_path with
-      | Some mutex -> mutex
-      | None ->
-          let mutex = Eio.Mutex.create () in
-          Hashtbl.add registry lock_path mutex;
-          mutex)
 
 let with_lock lock_path f =
   match mkdir_p (Filename.dirname lock_path) with
@@ -259,22 +274,7 @@ let with_lock lock_path f =
             ~finally:(fun () ->
               try Unix.close fd with Unix.Unix_error _ -> ())
             (fun () ->
-              (* [F_TLOCK] never parks the domain, so the only wait is the
-                 cancellable sleep between tries; a blocking [F_LOCK] in a
-                 systhread could not be interrupted by cancellation. *)
-              let rec acquire backoff =
-                match Unix.lockf fd Unix.F_TLOCK 0 with
-                | () -> Ok ()
-                | exception Unix.Unix_error (Unix.EINTR, _, _) ->
-                    acquire backoff
-                | exception Unix.Unix_error ((Unix.EACCES | Unix.EAGAIN), _, _)
-                  ->
-                    Eio_unix.sleep backoff;
-                    acquire (Float.min (backoff *. 2.) 0.1)
-                | exception Unix.Unix_error (e, _, _) ->
-                    Error (render lock_path e)
-              in
-              match acquire 0.001 with
+              match acquire_lock ~path:lock_path fd with
               | Error _ as e -> e
               | Ok () ->
                   Fun.protect
