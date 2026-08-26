@@ -63,15 +63,19 @@ type mode = Static of string | Dynamic of string
    what it sends. *)
 let session_version = ref (3, 24)
 
+(* Progress values are per-state constants, so physical equality is the
+   cheap "same progress as last sent" test the long-poll park rides on. *)
+let progress_equal = Option.equal (fun a b -> a == b)
+
 let message_for_state = function
   | "failing" ->
       Some
         "This expression has type string but an expression was expected of \
          type int"
   | "error2" -> Some "Unbound value restock"
-  (* A lint-marked head: the lane it lands in depends on who owns the watch —
-     a foreign watch's targets are unknown so the marker decides, an owned
-     watch's supervisor stated its lane fact. *)
+  (* A lint-shaped head on the watch stream: everything the stream carries
+     is a build finding whoever owns the watch — the state exists to pin
+     exactly that. *)
   | "marker" ->
       Some
         "comparison through List.length is a needless emptiness test \
@@ -266,9 +270,7 @@ let ticker state_file =
                   match (conn.prog_parked, conn.prog_sent) with
                   | Some id, sent
                     when not
-                           (Option.equal
-                              (fun a b -> a == b)
-                              sent
+                           (progress_equal sent
                               (Some (progress_for_state state))) ->
                       conn.prog_parked <- None;
                       (try answer_progress conn id
@@ -370,11 +372,8 @@ let serve mode fd =
       | Dynamic _, Some conn ->
           with_dyn (fun () ->
               let progress = progress_for_state !current_state in
-              if
-                Option.equal
-                  (fun a b -> a == b)
-                  conn.prog_sent (Some progress)
-              then conn.prog_parked <- Some id
+              if progress_equal conn.prog_sent (Some progress) then
+                conn.prog_parked <- Some id
               else answer_progress conn id)
       | Dynamic _, None -> assert false
     else if String.equal method_ "flush-file-watcher" then begin

@@ -72,9 +72,6 @@ val severity : t -> Severity.t
 val path : t -> string option
 (** [path t] is the workspace-relative file, when the finding has one. *)
 
-val location : t -> string option
-(** [location t] is the rendered position, when the finding has one. *)
-
 val head : t -> string
 (** [head t] is the first line of the diagnostic message. *)
 
@@ -88,10 +85,18 @@ val body_line : t -> string
     ["<location>: <head>"], or [head] alone when the finding has no location.
 *)
 
-(** {1:comparison Comparison and formatting} *)
+(** {1:derivation Derivation}
 
-val equal : t -> t -> bool
-(** [equal a b] is [true] iff [a] and [b] have equal {!val:key}s. *)
+    Both lanes — the watch stream's diagnostics and the lint runner's parsed
+    reports — derive their display data here, so the two renderings cannot
+    drift apart. *)
 
-val pp : Format.formatter -> t -> unit
-(** [pp ppf t] formats [t] for diagnostics. *)
+val head_of_message : string -> string
+(** [head_of_message message] is the head a converter derives from a raw
+    diagnostic message: the first line of the trimmed text, itself trimmed,
+    or ["(no message)"] when nothing remains. *)
+
+val rendered_location : Location.t -> string * string
+(** [rendered_location location] is the [(path, location)] display pair a
+    finding carries: {!Mentat_workspace.Path.display} of the location's path,
+    and the location rendered by {!Location.pp}. *)

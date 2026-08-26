@@ -62,17 +62,21 @@ let sleep t seconds =
    the linter's build-artifact inputs are fresh and unread. The generation
    is read before the snapshot it judges, so a fold racing the two reads
    can only make the stamp conservative — one redundant, idempotent run,
-   never a skipped settle. *)
+   never a skipped settle. The stamp is also judged before the snapshot is
+   built: the poll runs at 2 Hz for the session, and its steady state must
+   cost two reads, not a composed reading. *)
 let due t =
   let at = Mentat_ocaml_dune_rpc.Instance.activity t.rpc in
-  let snapshot = Mentat_ocaml_dune_rpc.Instance.snapshot t.rpc in
-  match snapshot.Mentat_ocaml_dune_rpc.Instance.Snapshot.reading with
-  | Some reading
-    when Mentat_workspace.Health.Verdict.equal
-           (Mentat_ocaml.Build_change.Reading.verdict reading)
-           Mentat_workspace.Health.Verdict.Clean ->
-      if at > t.ran_at then Some at else None
-  | Some _ | None -> None
+  if at <= t.ran_at then None
+  else
+    let snapshot = Mentat_ocaml_dune_rpc.Instance.snapshot t.rpc in
+    match snapshot.Mentat_ocaml_dune_rpc.Instance.Snapshot.reading with
+    | Some reading
+      when Mentat_workspace.Health.Verdict.equal
+             (Mentat_ocaml.Build_change.Reading.verdict reading)
+             Mentat_workspace.Health.Verdict.Clean ->
+        Some at
+    | Some _ | None -> None
 
 (* Availability is the first run's answer, in both worlds: a direct
    command that cannot spawn is a structural error; a [dune exec]-reached
@@ -93,21 +97,11 @@ let says_not_found t output =
   match target t with
   | None -> false
   | Some name ->
-      let head =
-        if String.length output <= 8192 then output
-        else String.sub output 0 8192
-      in
-      let contains needle =
-        let length = String.length needle in
-        let rec search from =
-          from + length <= String.length head
-          && (String.equal (String.sub head from length) needle
-             || search (from + 1))
-        in
-        search 0
-      in
-      contains (Printf.sprintf "Program '%s' not found" name)
-      || contains (Printf.sprintf "Program %S not found" name)
+      let head = String.take_first 8192 output in
+      String.includes ~affix:(Printf.sprintf "Program '%s' not found" name)
+        head
+      || String.includes ~affix:(Printf.sprintf "Program %S not found" name)
+           head
 
 let captured_text outcome =
   Command.Captured.render outcome.Command.stdout
@@ -157,12 +151,13 @@ let run_once t at =
       | Command.Supervision_failed _ ->
           Log.warn (fun m -> m "lint run did not complete; findings kept")
       | Command.Exited status -> (
+          let text = captured_text outcome in
           (* Any raise out of the parse — hostile output overflowing the
              lexer included — is the crashed-run case, never the daemon
              fiber's death; cancellation alone passes through. *)
           match
             Mentat_ocaml_dune_rpc.Lint_output.findings ~workspace:t.workspace
-              (captured_text outcome)
+              text
           with
           | exception (Eio.Cancel.Cancelled _ as cancelled) -> raise cancelled
           | exception exn ->
@@ -184,7 +179,7 @@ let run_once t at =
                   Mentat_ocaml_dune_rpc.Instance.set_lint t.rpc
                     (Some findings)
               | `Exited _, [] ->
-                  if says_not_found t (captured_text outcome) then
+                  if says_not_found t text then
                     lane_off t "the lint target is not in the project"
                   else
                     Log.warn (fun m ->

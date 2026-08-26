@@ -21,6 +21,8 @@ type word =
           child not yet attached ([Starting]), a restart with its cause, no
           dune on the PATH, or given up. *)
 
+val word_equal : word -> word -> bool
+
 val compose :
   word -> observed:Mentat_workspace.Health.t -> Mentat_workspace.Health.t
 (** [compose word ~observed] is the status a frontend renders. An attached

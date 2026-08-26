@@ -165,27 +165,20 @@ end
 
 module Dune_rpc_client = Drpc.Client.Make (Dune_rpc_fiber) (Dune_rpc_chan)
 
-let csexp_text sexp = Csexp.to_string sexp
-
 let protocol_error ?payload message =
   Error
-    (Error.Protocol_error { message; payload = Option.map csexp_text payload })
+    (Error.Protocol_error
+       { message; payload = Option.map Csexp.to_string payload })
 
 let response_error error =
-  Error
-    (Error.Protocol_error
-       {
-         message = Drpc.Response.Error.message error;
-         payload = Option.map csexp_text (Drpc.Response.Error.payload error);
-       })
+  protocol_error
+    ?payload:(Drpc.Response.Error.payload error)
+    (Drpc.Response.Error.message error)
 
 let version_error error =
-  Error
-    (Error.Protocol_error
-       {
-         message = Drpc.Version_error.message error;
-         payload = Option.map csexp_text (Drpc.Version_error.payload error);
-       })
+  protocol_error
+    ?payload:(Drpc.Version_error.payload error)
+    (Drpc.Version_error.message error)
 
 module Endpoint = struct
   type address = Unix of string | Tcp of { host : string; port : int }
@@ -270,12 +263,15 @@ module Registry = struct
             Dune_rpc_fiber.return
               (with_error (fun () -> Eio.Path.load (path raw)))
         end) in
-    reset t;
+    (* The registry's mtime memory survives clean polls — dune answers an
+       unchanged watch dir with a single stat — and is rebuilt from nothing
+       after any unclean poll, whose partial state is not worth trusting. *)
     match Dune_rpc_fiber.run (Poll.poll t.registry) with
     | Ok refresh -> (
         match Dune_registry.Refresh.errored refresh with
         | [] -> Ok (current t)
         | (path, exn) :: remaining ->
+            reset t;
             Error
               (Error.Connection_failed
                  {
@@ -285,8 +281,11 @@ module Registry = struct
                      ^ string_of_int (List.length remaining + 1)
                      ^ " registry error(s))";
                  }))
-    | Error Missing_registry_dir -> Ok (current t)
+    | Error Missing_registry_dir ->
+        reset t;
+        Ok (current t)
     | Error exn ->
+        reset t;
         Error
           (Error.Connection_failed
              {
@@ -595,12 +594,30 @@ module Instance = struct
     Filename.concat (primary_root t)
       (Filename.concat "_build" (Filename.concat ".rpc" "dune"))
 
+  let own_endpoint t =
+    Endpoint.make ~root:(primary_root t) (Endpoint.Unix (socket_path t))
+
+  (* A bounded visit to the workspace socket: [f]'s answer, [failed] when the
+     connection cannot be made, [timed_out] when nothing answers within
+     [seconds] — dead sockets accept and then stall. *)
+  let bounded_connection t ~seconds ~timed_out ~failed f =
+    let (Net net) = t.net in
+    let (Mono mono) = t.mono in
+    Eio.Fiber.first
+      (fun () ->
+        match
+          Eio.Switch.run @@ fun sw ->
+          Connection.with_connection ~sw ~net (own_endpoint t) ~f
+        with
+        | Ok answer -> answer
+        | Error _ -> failed)
+      (fun () ->
+        Eio.Time.Mono.sleep mono seconds;
+        timed_out)
+
   let pin t ~pid =
-    let endpoint =
-      Endpoint.make ~root:(primary_root t) (Endpoint.Unix (socket_path t))
-    in
     Log.info (fun m -> m "dune rpc endpoint pinned (pid %d)" pid);
-    t.pinned <- Some { pin_endpoint = endpoint; pin_pid = pid }
+    t.pinned <- Some { pin_endpoint = own_endpoint t; pin_pid = pid }
 
   let set_lint t findings = t.lint <- findings
 
@@ -612,28 +629,18 @@ module Instance = struct
   let probe_timeout_s = 1.0
 
   let probe t =
-    let (Net net) = t.net in
-    let (Mono mono) = t.mono in
-    let endpoint =
-      Endpoint.make ~root:(primary_root t) (Endpoint.Unix (socket_path t))
-    in
-    Eio.Fiber.first
-      (fun () ->
-        let result =
-          Eio.Switch.run @@ fun sw ->
-          Connection.with_connection ~sw ~net endpoint ~f:(fun _ -> Ok ())
-        in
-        match result with Ok () -> true | Error _ -> false)
-      (fun () ->
-        Eio.Time.Mono.sleep mono probe_timeout_s;
-        false)
+    bounded_connection t ~seconds:probe_timeout_s ~timed_out:false
+      ~failed:false (fun _ -> Ok true)
 
   let mirror t ~pid =
     Mirror.write ~env:t.env ~root:(primary_root t) ~pid
       ~socket:(socket_path t)
 
   (* Test-only scaling, like the reading windows below: a hermetic fake
-     answers or parks a flush in microseconds. Production never sets it. *)
+     answers or parks a flush in microseconds. Production never sets it.
+     Read from the process environment at module load, deliberately outside
+     the instance's [~env] seam — a scaling knob is the harness's, never a
+     caller's. *)
   let env_float name default =
     match Sys.getenv_opt name with
     | None | Some "" -> default
@@ -642,42 +649,27 @@ module Instance = struct
   let flush_timeout_s = env_float "MENTAT_DUNE_WATCH_FLUSH_S" 10.0
 
   let flush t =
-    let (Net net) = t.net in
-    let (Mono mono) = t.mono in
-    let endpoint =
-      Endpoint.make ~root:(primary_root t) (Endpoint.Unix (socket_path t))
-    in
-    Eio.Fiber.first
-      (fun () ->
-        let result =
-          Eio.Switch.run @@ fun sw ->
-          Connection.with_connection ~sw ~net endpoint ~f:(fun connection ->
-              let witness =
-                Drpc.Decl.Request.witness
-                  Drpc.Procedures.Public.flush_file_watcher
-              in
-              let client = connection.Connection.client in
-              match
-                Dune_rpc_fiber.run
-                  (Dune_rpc_client.Versioned.prepare_request client witness)
-              with
-              (* A server without the method still answered the version
-                 negotiation: its event loop is alive, which is all the
-                 verification asks. *)
-              | Error _ -> Ok `Answered
-              | Ok staged -> (
-                  match
-                    Dune_rpc_fiber.run
-                      (Dune_rpc_client.request client staged ())
-                  with
-                  | Ok (`Ok | `Not_in_watch_mode) -> Ok `Answered
-                  (* An error response is a response: the loop answered. *)
-                  | Error _ -> Ok `Answered))
+    bounded_connection t ~seconds:flush_timeout_s ~timed_out:`Timed_out
+      ~failed:`No_server (fun connection ->
+        let witness =
+          Drpc.Decl.Request.witness Drpc.Procedures.Public.flush_file_watcher
         in
-        match result with Ok verdict -> verdict | Error _ -> `No_server)
-      (fun () ->
-        Eio.Time.Mono.sleep mono flush_timeout_s;
-        `Timed_out)
+        let client = connection.Connection.client in
+        match
+          Dune_rpc_fiber.run
+            (Dune_rpc_client.Versioned.prepare_request client witness)
+        with
+        (* A server without the method still answered the version
+           negotiation: its event loop is alive, which is all the
+           verification asks. *)
+        | Error _ -> Ok `Answered
+        | Ok staged -> (
+            match
+              Dune_rpc_fiber.run (Dune_rpc_client.request client staged ())
+            with
+            | Ok (`Ok | `Not_in_watch_mode) -> Ok `Answered
+            (* An error response is a response: the loop answered. *)
+            | Error _ -> Ok `Answered))
 
   let normalize_abs path =
     match Lpath.Abs.of_string path with
@@ -788,11 +780,6 @@ module Instance = struct
 
   let activity t = t.events
 
-  let first_line text =
-    match String.index_opt text '\n' with
-    | Some i -> String.sub text 0 i
-    | None -> text
-
   let finding_of_diagnostic diagnostic =
     let severity =
       match Mentat_ocaml.Diagnostic.severity diagnostic with
@@ -807,15 +794,17 @@ module Instance = struct
           Mentat_ocaml.Finding.Severity.Error
     in
     let head =
-      let head = first_line (Mentat_ocaml.Diagnostic.message diagnostic) in
-      if String.is_empty head then "(no message)" else head
+      Mentat_ocaml.Finding.head_of_message
+        (Mentat_ocaml.Diagnostic.message diagnostic)
     in
     let path, location =
       match Mentat_ocaml.Diagnostic.location diagnostic with
       | None -> (None, None)
       | Some location ->
-          ( Some (Workspace.Path.display (Mentat_ocaml.Location.path location)),
-            Some (Format.asprintf "%a" Mentat_ocaml.Location.pp location) )
+          let path, rendered =
+            Mentat_ocaml.Finding.rendered_location location
+          in
+          (Some path, Some rendered)
     in
     (* The lane is the source: everything on the watch's stream is a build
        finding — a watch that builds a lint alias reports those findings as

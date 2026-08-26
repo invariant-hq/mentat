@@ -812,22 +812,12 @@ let prompt_content ~client ~prompt =
 (* Ephemeral runs stage the session store under a throwaway root removed when the
    run ends, so one-shot scripted calls leave nothing behind. A blocked ephemeral
    run is discarded with it: the exit code is the only durable fact. *)
-let rec remove_tree path =
-  match Sys.is_directory path with
-  | true -> (
-      Array.iter
-        (fun name -> remove_tree (Filename.concat path name))
-        (Sys.readdir path);
-      try Unix.rmdir path with Unix.Unix_error _ -> ())
-  | false -> ( try Sys.remove path with Sys_error _ -> ())
-  | exception Sys_error _ -> ()
-
 let with_run_base ~cwd ~overrides ~ephemeral f =
   if not ephemeral then Composition.with_base ~cwd ~overrides f
   else
     let root = Filename.temp_dir "mentat-ephemeral" "" in
     Fun.protect
-      ~finally:(fun () -> remove_tree root)
+      ~finally:(fun () -> Fs.remove_tree root)
       (fun () -> Composition.with_base ~cwd ~overrides ~data_home:root f)
 
 (* [--output-schema FILE] validation at the argv boundary: read the file

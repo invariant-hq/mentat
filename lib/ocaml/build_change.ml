@@ -152,9 +152,7 @@ let failing_title lane ~errors ~warnings ~fresh ~resolved =
 let failing_body ~fresh ~unchanged =
   let shown, elided =
     if List.length fresh <= max_body_findings then (fresh, 0)
-    else
-      ( List.filteri (fun i _ -> i < max_body_findings) fresh,
-        List.length fresh - max_body_findings )
+    else (List.take max_body_findings fresh, List.length fresh - max_body_findings)
   in
   let lines = List.map Finding.body_line shown in
   let lines =
@@ -178,12 +176,14 @@ let key_of = function
   | Finding.Lane.Lint -> "dune.lint"
 
 let notice = function
-  | Recovered Finding.Lane.Build ->
-      Mentat_workspace.Notice.make ~source:"dune" ~severity:Mentat_workspace.Notice.Severity.Info
-        ~title:"Build recovered" ~key:"dune.build" ()
-  | Recovered Finding.Lane.Lint ->
-      Mentat_workspace.Notice.make ~source:"lint" ~severity:Mentat_workspace.Notice.Severity.Info
-        ~title:"Lint clean" ~key:"dune.lint" ()
+  | Recovered (Finding.Lane.Build as lane) ->
+      Mentat_workspace.Notice.make ~source:(source_of lane)
+        ~severity:Mentat_workspace.Notice.Severity.Info
+        ~title:"Build recovered" ~key:(key_of lane) ()
+  | Recovered (Finding.Lane.Lint as lane) ->
+      Mentat_workspace.Notice.make ~source:(source_of lane)
+        ~severity:Mentat_workspace.Notice.Severity.Info ~title:"Lint clean"
+        ~key:(key_of lane) ()
   | Failing { lane; current; fresh; resolved } ->
       let errors, warnings = severity_counts current in
       let severity =

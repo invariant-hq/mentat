@@ -33,6 +33,13 @@ val mkdir_p : string -> (unit, string) result
     source. A path component that is a regular file surfaces as a rendered
     [Error] rather than an uncaught exception. *)
 
+val remove_tree : string -> unit
+(** [remove_tree path] removes [path] and everything under it, best-effort:
+    entries are examined with [lstat], so a symlink is unlinked — never
+    followed into its target — and failures are swallowed rather than rendered
+    (the tree may be half-gone already, and the caller can do nothing about
+    leftovers a race keeps alive). *)
+
 val atomic_write : perms:int -> string -> string -> (unit, string) result
 (** [atomic_write ~perms path bytes] writes [bytes] to [path] atomically: create
     the parent chain, write a sibling temporary at [perms], [chmod] it to

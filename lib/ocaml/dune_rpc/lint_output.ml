@@ -3,11 +3,6 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-let first_line text =
-  match String.index_opt text '\n' with
-  | Some i -> String.sub text 0 i
-  | None -> text
-
 let severity (severity : Ocamlc_loc.severity) =
   match severity with
   | Ocamlc_loc.Error _ -> Mentat_ocaml.Finding.Severity.Error
@@ -44,16 +39,13 @@ let location ~workspace (loc : Ocamlc_loc.loc) =
           ~range:(Mentat_ocaml.Range.make ~start ~end_)
       with
       | location ->
-          ( Some (Mentat_workspace.Path.display path),
-            Some (Format.asprintf "%a" Mentat_ocaml.Location.pp location) )
+          let path, rendered = Mentat_ocaml.Finding.rendered_location location in
+          (Some path, Some rendered)
       | exception Invalid_argument _ ->
           (Some (Mentat_workspace.Path.display path), None))
 
 let finding ~workspace (report : Ocamlc_loc.report) =
-  let head =
-    let head = String.trim (first_line (String.trim report.Ocamlc_loc.message)) in
-    if String.is_empty head then "(no message)" else head
-  in
+  let head = Mentat_ocaml.Finding.head_of_message report.Ocamlc_loc.message in
   let path, location = location ~workspace report.Ocamlc_loc.loc in
   Mentat_ocaml.Finding.v ~lane:Mentat_ocaml.Finding.Lane.Lint
     ~severity:(severity report.Ocamlc_loc.severity)

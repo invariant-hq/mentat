@@ -193,6 +193,30 @@ module Mode : sig
   (** [pp ppf t] formats [t]'s spelling. *)
 end
 
+module Dune_watch : sig
+  (** Build-watch posture.
+
+      The values of the [dune.watch] field. *)
+
+  type t = Auto | Observe | Off
+
+  val all : t list
+  (** [all] are the postures in declaration order. *)
+
+  val to_string : t -> string
+  (** [to_string t] is [t]'s config spelling, for example ["observe"]. *)
+
+  val of_string : string -> t option
+  (** [of_string s] is the posture spelled [s], or [None] for an unknown
+      spelling. *)
+
+  val equal : t -> t -> bool
+  (** [equal a b] is [true] iff [a] and [b] are the same posture. *)
+
+  val pp : Format.formatter -> t -> unit
+  (** [pp ppf t] formats [t]'s spelling. *)
+end
+
 module Read : sig
   (** Filesystem read scope for confined commands.
 
@@ -500,7 +524,7 @@ module Field : sig
       file watcher — are [dune.watch]'s and still surface. Defaults to
       [true]. *)
 
-  val dune_watch : (string, defaulted) t
+  val dune_watch : (Dune_watch.t, defaulted) t
   (** [dune_watch] is the [dune.watch] field: [auto], [observe], or [off].
       [auto] attaches to an already-running build watch, or starts and
       supervises one when nothing answers; [observe] only attaches, never

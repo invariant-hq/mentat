@@ -47,7 +47,6 @@ let v ~lane ~severity ?path ?location ~head () =
 let lane t = t.lane
 let severity t = t.severity
 let path t = t.path
-let location t = t.location
 let head t = t.head
 
 let key t =
@@ -66,8 +65,15 @@ let body_line t =
   | Some location -> location ^ ": " ^ t.head
   | None -> t.head
 
-let equal a b = String.equal (key a) (key b)
+let head_of_message message =
+  let first_line text =
+    match String.index_opt text '\n' with
+    | Some i -> String.sub text 0 i
+    | None -> text
+  in
+  let head = String.trim (first_line (String.trim message)) in
+  if String.is_empty head then "(no message)" else head
 
-let pp ppf t =
-  Format.fprintf ppf "@[<h>%a/%a %s@]" Lane.pp t.lane Severity.pp t.severity
-    (body_line t)
+let rendered_location location =
+  ( Mentat_workspace.Path.display (Location.path location),
+    Format.asprintf "%a" Location.pp location )

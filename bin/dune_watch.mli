@@ -45,12 +45,12 @@ val make :
   mono:_ Eio.Time.Mono.t ->
   sw:Eio.Switch.t ->
   root:Lpath.Abs.t ->
-  run_id:string ->
+  pid:int ->
   mode:Mode.t ->
   program:string list option ->
   targets:string list ->
   t
-(** [make ~rpc ~capability ~mono ~sw ~root ~run_id ~mode ~program ~targets]
+(** [make ~rpc ~capability ~mono ~sw ~root ~pid ~mode ~program ~targets]
     is a supervisor for the workspace rooted at [root].
 
     [rpc] is the workspace's shared attach observer: the supervisor pins a
@@ -63,8 +63,10 @@ val make :
     (the supervisor then never spawns and reports it); the launch itself
     resolves the program on the sealed route, as every launch does. [targets]
     are the watch's build targets, each passed verbatim after
-    [build --root . --watch]. [run_id] names the private runtime directory
-    [<root>/.mentat/run/<run_id>] the watch's registry entry is confined to.
+    [build --root . --watch]. [pid] is this process's own: it names the
+    private runtime directory [<root>/.mentat/run/watch-<pid>] the watch's
+    registry entry is confined to, and the sweep of dead siblings'
+    directories parses the same naming back.
 
     Construction performs no IO and spawns nothing. *)
 

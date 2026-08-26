@@ -85,6 +85,12 @@ let muted_segs ~palette words =
       [ sep ~palette; Prims.seg (Theme.Palette.muted_style palette) word ])
     words
 
+let warning_segs ~palette words =
+  List.concat_map
+    (fun word ->
+      [ sep ~palette; Prims.seg (Theme.Palette.warning_style palette) word ])
+    words
+
 let verdict_segs ~palette (verdict : Mentat_workspace.Health.Verdict.t) =
   match verdict with
   | Mentat_workspace.Health.Verdict.Clean ->
@@ -132,34 +138,18 @@ let tooling ~palette ~tooling =
   | Mentat_workspace.Health.Probing | Mentat_workspace.Health.Starting ->
       dune_row ~palette (muted_segs ~palette [ "starting" ])
   | Mentat_workspace.Health.Restarting Mentat_workspace.Health.Restart.Hung ->
-      dune_row ~palette
-        [
-          sep ~palette;
-          Prims.seg (Theme.Palette.warning_style palette) "hung";
-          sep ~palette;
-          Prims.seg (Theme.Palette.warning_style palette) "restarting";
-        ]
+      dune_row ~palette (warning_segs ~palette [ "hung"; "restarting" ])
   | Mentat_workspace.Health.Restarting
       (Mentat_workspace.Health.Restart.Exited detail) ->
       dune_row ~palette
-        [
-          sep ~palette;
-          Prims.seg
-            (Theme.Palette.warning_style palette)
-            (Printf.sprintf "restarting (%s)" detail);
-        ]
+        (warning_segs ~palette [ Printf.sprintf "restarting (%s)" detail ])
   | Mentat_workspace.Health.Live { owner; phase } -> (
       let prefix = owner_segs ~palette owner in
       match phase with
       | Mentat_workspace.Health.Phase.Building ->
           dune_row ~palette (prefix @ muted_segs ~palette [ "building" ])
       | Mentat_workspace.Health.Phase.Unresponsive ->
-          dune_row ~palette
-            (prefix
-            @ [
-                sep ~palette;
-                Prims.seg (Theme.Palette.warning_style palette) "unresponsive";
-              ])
+          dune_row ~palette (prefix @ warning_segs ~palette [ "unresponsive" ])
       | Mentat_workspace.Health.Phase.Settled { build; lint } ->
           dune_row ~palette
             (prefix

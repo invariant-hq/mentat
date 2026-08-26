@@ -58,14 +58,20 @@ let foreign_recheck_s = 2.0
    avoid. This path runs once per life. *)
 let stop_grace_s = 2.0
 
-let make ~rpc ~capability ~mono ~sw ~root ~run_id ~mode ~program ~targets =
+(* The supervisor owns its run-directory naming end to end: the id minted
+   here is the id the sweep parses, so a rename cannot silently orphan dead
+   siblings' directories. *)
+let run_prefix = "watch-"
+let run_id_of_pid pid = Printf.sprintf "%s%d" run_prefix pid
+
+let make ~rpc ~capability ~mono ~sw ~root ~pid ~mode ~program ~targets =
   {
     rpc;
     capability;
     mono = Mono mono;
     sw;
     root;
-    run_id;
+    run_id = run_id_of_pid pid;
     mode;
     program;
     targets;
@@ -92,20 +98,8 @@ let observed t =
 
 let health t = Mentat_ocaml_dune_rpc.Watch.compose t.word ~observed:(observed t)
 
-let word_equal a b =
-  match (a, b) with
-  | Mentat_ocaml_dune_rpc.Watch.Defer, Mentat_ocaml_dune_rpc.Watch.Defer ->
-      true
-  | Mentat_ocaml_dune_rpc.Watch.Announce a, Mentat_ocaml_dune_rpc.Watch.Announce b
-    ->
-      Health.equal a b
-  | ( ( Mentat_ocaml_dune_rpc.Watch.Defer
-      | Mentat_ocaml_dune_rpc.Watch.Announce _ ),
-      _ ) ->
-      false
-
 let set_word t word =
-  if not (word_equal t.word word) then begin
+  if not (Mentat_ocaml_dune_rpc.Watch.word_equal t.word word) then begin
     t.word <- word;
     Log.info (fun m ->
         m "dune watch supervisor: %s"
@@ -118,45 +112,14 @@ let set_word t word =
 let observed_live t =
   match observed t with Health.Live _ -> true | _ -> false
 
+let announce t health = set_word t (Mentat_ocaml_dune_rpc.Watch.Announce health)
+
 let probe t = Mentat_ocaml_dune_rpc.Instance.probe t.rpc
 
 let private_dir t =
   Filename.concat (Lpath.Abs.to_string t.root)
-    (Filename.concat ".mentat" (Filename.concat "run" t.run_id))
-
-(* The host side is unconfined; directory maintenance is plain Unix, lexical,
-   and never traverses a symlink it did not create. *)
-let rec mkdir_p dir =
-  if not (Sys.file_exists dir) then begin
-    let parent = Filename.dirname dir in
-    if not (String.equal parent dir) then mkdir_p parent;
-    try Unix.mkdir dir 0o755
-    with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
-  end
-
-let rec remove_tree path =
-  match Unix.lstat path with
-  | { Unix.st_kind = Unix.S_DIR; _ } ->
-      (match Sys.readdir path with
-      | entries ->
-          Array.iter
-            (fun entry -> remove_tree (Filename.concat path entry))
-            entries
-      | exception Sys_error _ -> ());
-      (try Unix.rmdir path with Unix.Unix_error _ -> ())
-  | _ -> ( try Unix.unlink path with Unix.Unix_error _ -> ())
-  | exception Unix.Unix_error _ -> ()
-
-let write_self_ignore run_parent =
-  let path = Filename.concat run_parent ".gitignore" in
-  if not (Sys.file_exists path) then begin
-    match open_out_bin path with
-    | out ->
-        Fun.protect
-          ~finally:(fun () -> close_out_noerr out)
-          (fun () -> output_string out "*\n")
-    | exception Sys_error _ -> ()
-  end
+    (Filename.concat ".mentat"
+       (Filename.concat Mentat_workspace.run_dir_name t.run_id))
 
 let pid_alive pid =
   match Unix.kill pid 0 with
@@ -174,7 +137,7 @@ let sweep_stale_run_dirs t =
   | entries ->
       Array.iter
         (fun entry ->
-          let prefix = "watch-" in
+          let prefix = run_prefix in
           if
             (not (String.equal entry t.run_id))
             && String.starts_with ~prefix entry
@@ -184,7 +147,7 @@ let sweep_stale_run_dirs t =
                 (String.drop_first (String.length prefix) entry)
             with
             | Some pid when not (pid_alive pid) ->
-                remove_tree (Filename.concat parent entry)
+                Fs.remove_tree (Filename.concat parent entry)
             | Some _ | None -> ())
         entries
   | exception Sys_error _ -> ()
@@ -201,21 +164,21 @@ let clear_private_registry t =
   match Sys.readdir registry with
   | entries ->
       Array.iter
-        (fun entry -> remove_tree (Filename.concat registry entry))
+        (fun entry -> Fs.remove_tree (Filename.concat registry entry))
         entries
   | exception Sys_error _ -> ()
 
 let prepare_private_dir t =
-  match
-    let dir = private_dir t in
-    mkdir_p dir;
-    write_self_ignore (Filename.dirname dir);
-    clear_private_registry t;
-    dir
-  with
-  | dir -> Ok dir
-  | exception Unix.Unix_error (error, _, _) ->
-      Error (Unix.error_message error)
+  let dir = private_dir t in
+  match Fs.mkdir_p dir with
+  | Error _ as error -> error
+  | Ok () ->
+      (* Keeping the run scratch out of the project's status is a courtesy,
+         not a precondition — a read-only checkout still gets its watch. *)
+      (match Config_io.ensure_gitignored ~root:t.root "run" with
+      | Ok () | Error _ -> ());
+      clear_private_registry t;
+      Ok dir
 
 let private_entry_registered t =
   match Sys.readdir (private_registry_dir t) with
@@ -287,19 +250,14 @@ let dying_words tail =
   in
   Option.map
     (fun line ->
-      if String.length line <= 80 then line else String.sub line 0 77 ^ "...")
+      if String.length line <= 80 then line else String.take_first 77 line ^ "...")
     chosen
 
 let retained_tail_bytes = 4096
 
 let retain_tail previous appended =
   if String.is_empty appended then previous
-  else
-    let combined = previous ^ appended in
-    let length = String.length combined in
-    if length <= retained_tail_bytes then combined
-    else
-      String.sub combined (length - retained_tail_bytes) retained_tail_bytes
+  else String.take_last retained_tail_bytes (previous ^ appended)
 
 let exit_cause session tail =
   match Command.Session.status session with
@@ -438,8 +396,11 @@ let live_once t session =
     match chunk.Command.Session.status with
     | Command.Session.Running ->
         if not t.stopped then begin
-          if Option.is_none t.mirror && private_entry_registered t then
-            write_mirror t session;
+          if
+            Option.is_none t.mirror
+            && t.mirror_failures < mirror_attempts
+            && private_entry_registered t
+          then write_mirror t session;
           if (not !reached) && observed_live t then reached := true;
           (* The first flush after the watch comes up is the confinement
              self-test: a fresh watch whose file watcher never answers is
@@ -516,8 +477,7 @@ let rec wait_while_foreign t =
    caller the lease protects. *)
 let park_while_leased t =
   if t.leases > 0 then begin
-    set_word t
-      (Mentat_ocaml_dune_rpc.Watch.Announce Mentat_workspace.Health.Starting);
+    announce t Health.Starting;
     let rec park () =
       if t.leases > 0 && not t.stopped then begin
         sleep t 0.1;
@@ -535,8 +495,7 @@ let park_while_leased t =
 let rec cycle t deaths =
   if not t.stopped then begin
     park_while_leased t;
-    set_word t
-      (Mentat_ocaml_dune_rpc.Watch.Announce Mentat_workspace.Health.Probing);
+    announce t Health.Probing;
     if observed_live t || probe t then begin
       wait_while_foreign t;
       cycle t 0
@@ -546,8 +505,7 @@ let rec cycle t deaths =
 
 and spawn t deaths =
   if not t.stopped then begin
-    set_word t
-      (Mentat_ocaml_dune_rpc.Watch.Announce Mentat_workspace.Health.Starting);
+    announce t Health.Starting;
     match start t with
     | Error message ->
         Log.warn (fun m -> m "dune watch spawn failed: %s" message);
@@ -566,26 +524,17 @@ and spawn t deaths =
         remove_endpoint_debris t;
         if not t.stopped then
           match cause with
-          | `Stopped ->
+          | `Stopped | `Leased ->
               (* A deliberate kill without the stop latch: a restart's
                  preemption, or a lease signalling the child directly. Not
                  a death — cycle from the probe; the cycle's own park gate
-                 honours an outstanding lease first. *)
-              cycle t 0
-          | `Leased ->
-              (* Parked for a lease: the lock is a one-shot's for a moment.
-                 No death is counted, and nothing is announced beyond
-                 Starting — the watch is deliberately down and coming
-                 back. *)
-              park_while_leased t;
+                 honours an outstanding lease before anything is spawned. *)
               cycle t 0
           | `Blocked ->
               queue_notice t (blocked_notice ());
-              set_word t
-                (Mentat_ocaml_dune_rpc.Watch.Announce
-                   (Health.Off
-                      (Health.Off.Blocked
-                         "file watcher blocked by the sandbox")))
+              announce t
+                (Health.Off
+                   (Health.Off.Blocked "file watcher blocked by the sandbox"))
           | `Hung ->
               queue_notice t (hung_notice ());
               death t deaths ~reached:true ~restart:Health.Restart.Hung
@@ -602,23 +551,35 @@ and death t deaths ~reached ~restart =
   if not t.stopped then
     match Mentat_ocaml_dune_rpc.Watch.after_death ~reached ~deaths with
     | `Give_up ->
-        set_word t
-          (Mentat_ocaml_dune_rpc.Watch.Announce
-             (Health.Off Health.Off.Gave_up))
+        announce t (Health.Off Health.Off.Gave_up)
     | `Retry deaths ->
-        set_word t
-          (Mentat_ocaml_dune_rpc.Watch.Announce (Health.Restarting restart));
+        announce t (Health.Restarting restart);
         sleep t restart_pause_s;
         cycle t deaths
+
+(* Preempting kill shared by stop and restart: clear the slot first so the
+   life loop's own reap never doubles it. *)
+let signal_session t =
+  match t.session with
+  | Some session ->
+      t.session <- None;
+      Command.Session.signal ~grace:stop_grace_s session
+  | None -> ()
+
+let fork_cycle t ~sweep =
+  t.cycling <- true;
+  Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
+      Fun.protect
+        ~finally:(fun () -> t.cycling <- false)
+        (fun () ->
+          if sweep then sweep_stale_run_dirs t;
+          cycle t 0);
+      `Stop_daemon)
 
 let stop t =
   if not t.stopped then begin
     t.stopped <- true;
-    (match t.session with
-    | Some session ->
-        t.session <- None;
-        Command.Session.signal ~grace:stop_grace_s session
-    | None -> ());
+    signal_session t;
     Mentat_ocaml_dune_rpc.Instance.unpin t.rpc;
     remove_mirror t;
     (* The private directory exists exactly when this supervisor spawned, so
@@ -626,7 +587,7 @@ let stop t =
        touches anything at shutdown. *)
     if Sys.file_exists (private_dir t) then begin
       remove_endpoint_debris t;
-      remove_tree (private_dir t)
+      Fs.remove_tree (private_dir t)
     end;
     set_word t Mentat_ocaml_dune_rpc.Watch.Defer
   end
@@ -640,18 +601,8 @@ let engage t =
     | Mode.Auto -> (
         match t.program with
         | None ->
-            set_word t
-              (Mentat_ocaml_dune_rpc.Watch.Announce
-                 (Health.Off Health.Off.No_dune))
-        | Some _ ->
-            t.cycling <- true;
-            Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
-                Fun.protect
-                  ~finally:(fun () -> t.cycling <- false)
-                  (fun () ->
-                    sweep_stale_run_dirs t;
-                    cycle t 0);
-                `Stop_daemon))
+            announce t (Health.Off Health.Off.No_dune)
+        | Some _ -> fork_cycle t ~sweep:true)
   end
 
 (* The lease: park the machine and hand the lock to a one-shot. The
@@ -696,7 +647,7 @@ let lease t =
         end
         else (
           match health t with
-          | Mentat_workspace.Health.Live _ -> `Held
+          | Health.Live _ -> `Held
           | _ -> `Free)
 
 (* A user's restart: forgive a terminal word — gave up, blocked, a stop —
@@ -711,20 +662,7 @@ let restart t =
       if Option.is_none t.program then ()
       else begin
         t.stopped <- false;
-        set_word t
-          (Mentat_ocaml_dune_rpc.Watch.Announce
-             Mentat_workspace.Health.Probing);
-        (match t.session with
-        | Some session ->
-            t.session <- None;
-            Command.Session.signal ~grace:stop_grace_s session
-        | None -> ());
-        if not t.cycling then begin
-          t.cycling <- true;
-          Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
-              Fun.protect
-                ~finally:(fun () -> t.cycling <- false)
-                (fun () -> cycle t 0);
-              `Stop_daemon)
-        end
+        announce t Health.Probing;
+        signal_session t;
+        if not t.cycling then fork_cycle t ~sweep:false
       end

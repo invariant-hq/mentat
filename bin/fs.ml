@@ -20,6 +20,19 @@ let mkdir_p path =
   in
   go path
 
+let rec remove_tree path =
+  match Unix.lstat path with
+  | { Unix.st_kind = Unix.S_DIR; _ } ->
+      (match Sys.readdir path with
+      | entries ->
+          Array.iter
+            (fun entry -> remove_tree (Filename.concat path entry))
+            entries
+      | exception Sys_error _ -> ());
+      (try Unix.rmdir path with Unix.Unix_error _ -> ())
+  | _ -> ( try Unix.unlink path with Unix.Unix_error _ -> ())
+  | exception Unix.Unix_error _ -> ()
+
 let read_capped ~max_bytes path =
   match Unix.stat path with
   | exception Unix.Unix_error (Unix.ENOENT, _, _) -> Ok None

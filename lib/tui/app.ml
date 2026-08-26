@@ -1220,8 +1220,6 @@ let issue_workspace_status t =
   let t, dune = issue_workspace_dune t in
   (t, [ glance; dune ])
 
-
-
 let issue_session_view session t =
   let request, t = fresh_request t in
   ( { t with session_view_request = Some (request, session) },
@@ -5565,7 +5563,7 @@ let workspace_tooling t =
    a settled row must still follow an editor save between turns (the rebuild
    happens without any engine boundary), and a transitional one must resolve.
    Only an absent watch is not polled — the glance moments cover attachment. *)
-let workspace_dune_transitional t =
+let workspace_dune_followed t =
   match workspace_tooling t with
   | Mentat_workspace.Health.Probing | Mentat_workspace.Health.Starting
   | Mentat_workspace.Health.Restarting _ | Mentat_workspace.Health.Live _ ->
@@ -6403,7 +6401,7 @@ let subscriptions t =
       (if home_motion then Mosaic.Sub.on_tick (fun ~dt -> Frame_tick dt)
        else Mosaic.Sub.none);
       Mosaic.Sub.every 1. (fun () -> Clock_tick);
-      (if workspace_dune_transitional t then
+      (if workspace_dune_followed t then
          Mosaic.Sub.every 2. (fun () -> Workspace_dune_tick)
        else Mosaic.Sub.none);
       (if turn_in_flight t || Option.is_some (compaction_started t) then
