@@ -636,3 +636,54 @@
  (flags
   (:standard -open Mentat_boot))
  (libraries windtrap mentat_boot unix))
+
+; The resident charter node lives in bin/mentatd as the module node; its
+; source is copied in like service's, and only the pure folds (ingress
+; resolution, the delivery route, the child-environment scrub) are driven —
+; the effectful surfaces need a daemon behind them. The copy compiles whole,
+; so the stanza links the node's libraries under the executable's own -open.
+
+(copy_files
+ (files ../../bin/mentatd/node.{ml,mli}))
+
+(test
+ (name test_node)
+ (modules test_node node)
+ (flags
+  (:standard -open Mentat_boot))
+ (libraries
+  windtrap
+  mentat_boot
+  mentat_charter
+  mentat_github
+  mentat_provider_runtime
+  mentat_server
+  eio
+  unix))
+
+; The node's charter reconcile fold lives in bin/mentatd as the module
+; charter_reconcile; its source is copied in like reconcile's and the pure
+; decision tables and receipt folds are driven directly, while the drivers
+; are exercised over a temporary charter estate. The copy compiles whole, so
+; the stanza links the fold's libraries under the executable's own -open.
+
+(copy_files
+ (files ../../bin/mentatd/charter_reconcile.{ml,mli}))
+
+(test
+ (name test_charter_reconcile)
+ (modules test_charter_reconcile charter_reconcile)
+ (flags
+  (:standard -open Mentat_boot))
+ (libraries
+  windtrap
+  mentat_boot
+  mentat_charter
+  mentat_provider
+  mentat_session
+  mentat_store
+  jsont
+  eio
+  eio.unix
+  eio_main
+  unix))

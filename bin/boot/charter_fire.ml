@@ -1129,7 +1129,9 @@ let fire_sweep env ~repo (loaded : Charter_store.Loaded.t) =
           | Ok Disposed ->
               let identity = Event.Identity.of_pull_request event in
               let id = Event.Identity.to_string identity in
-              if not (Charter_store.claim_held env.dirs ~name ~digest identity)
+              if
+                (not (Charter_store.claim_held env.dirs ~name ~digest identity))
+                || not (Receipt.spawn_recorded ~digest ~identity:id receipts)
               then dispose env ~repo loaded ~event ~check_head:false
               else if Receipt.egress_recorded ~digest ~identity:id receipts then
                 acc
@@ -1141,3 +1143,70 @@ let fire_sweep env ~repo (loaded : Charter_store.Loaded.t) =
                       (fun () -> Disposed)
                       (republish env ~repo loaded ~event ~identity:id ~session)))
         (Ok Disposed) events
+
+(* The reconcile fold's honest settle: a spawned run whose reaping process
+   died leaves a disposition owed. The caller has read the run fence as
+   free — the child is gone — so the journal head, not the unobservable
+   exit status, is the truth to stamp: a settled head reads exit 0, which
+   is what lets the sweep's publisher re-entry find the run; every other
+   head reads 255 and alerts, because the identity's claim is spent and the
+   alert is the only surface the owner has left. The receipt takes the
+   run's own digest — the policy it was spawned under, which may not be the
+   policy in force — so the spawn/reap pair stays whole under one digest
+   and a later policy's folds never adopt another policy's run. The re-check
+   and append ride the fire lock: two passes finding the same orphan settle
+   it once. *)
+let settle_recovered env (loaded : Charter_store.Loaded.t) ~identity ~digest
+    ~session =
+  let name = loaded.Charter_store.Loaded.name in
+  let head, view = head_of_journal env ~session in
+  let usage =
+    match view with Some view -> usage_json view | None -> Jsont.Json.object' []
+  in
+  let usd = Option.bind view (derived_cost env) in
+  let settled = Receipt.Head.equal head Receipt.Head.Settled in
+  let* fresh =
+    Fs.with_lock (fire_lock env ~name) (fun () ->
+        let* receipts = read_receipts env ~name in
+        let reaped =
+          List.exists
+            (fun (r : Receipt.t) ->
+              String.equal r.Receipt.digest digest
+              && String.equal r.Receipt.identity identity
+              &&
+              match r.Receipt.kind with
+              | Receipt.Kind.Disposition (Receipt.Disposition.Reaped _) -> true
+              | _ -> false)
+            receipts
+        in
+        if reaped then Ok false
+        else
+          let* () =
+            append_receipt env ~name
+              (receipt_now ~identity ~digest
+                 (Receipt.Kind.Disposition
+                    (Receipt.Disposition.Reaped
+                       {
+                         session;
+                         exit = (if settled then 0 else 255);
+                         head;
+                         usage;
+                         usd;
+                         cause = Receipt.Cause.Recovered;
+                       })))
+          in
+          Ok true)
+  in
+  if not fresh then Ok ()
+  else (
+    env.say
+      (Printf.sprintf "recovered %s: session %s, head %s" identity session
+         (Receipt.Head.to_string head));
+    if settled then Ok ()
+    else
+      let transition =
+        if Receipt.Head.equal head Receipt.Head.Parked then
+          Receipt.Transition.Parked
+        else Receipt.Transition.Failed
+      in
+      alert_identity env loaded ~identity ~transition ~session:(Some session))

@@ -3,7 +3,15 @@
  (public_name mentatd)
  (package mentat)
  (flags (:standard -open Mentat_boot))
- (modules child_broker child_spawn daemon_server main reconcile service)
+ (modules
+  charter_reconcile
+  child_broker
+  child_spawn
+  daemon_server
+  main
+  node
+  reconcile
+  service)
  (libraries
   cmdliner
   eio
@@ -12,8 +20,11 @@
   lpath
   mentat_agent
   mentat_boot
+  mentat_charter
   mentat_client
+  mentat_github
   mentat_protocol
+  mentat_provider_runtime
   mentat_server
   mentat_session
   mentat_store

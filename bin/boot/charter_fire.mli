@@ -216,14 +216,40 @@ val fire_sweep :
     is not held under the current policy digest (the listing is the head
     read, so the current-head check is not repeated; no delivery receipt is
     admitted — the sweep observes, it never re-delivers). A head whose
-    claim is held is passed over silently, with one exception: an identity
-    that ran to settlement with findings and holds no egress receipt
-    re-enters the {e publisher} only — the upsert is idempotent, so
-    finishing an interrupted publication spends nothing and mints no run.
-    Heads a gate skipped or a fence refused hold no claim and re-enter on
-    every pass, so a draft that goes ready is reviewed and a fenced head
-    runs when its window frees. Events are driven in listing order; the
-    first machinery failure stops the sweep. *)
+    claim is held is passed over silently, with two exceptions: a claim
+    with no spawned line — a committer that died between claim and spawn —
+    re-enters {!dispose} whole, whose admission adopts the abandoned
+    commitment; and an identity that ran to settlement with findings and
+    holds no egress receipt re-enters the {e publisher} only — the upsert
+    is idempotent, so finishing an interrupted publication spends nothing
+    and mints no run. Heads a gate skipped or a fence refused hold no claim
+    and re-enter on every pass, so a draft that goes ready is reviewed and
+    a fenced head runs when its window frees. Events are driven in listing
+    order; the first machinery failure stops the sweep. *)
+
+val settle_recovered :
+  env ->
+  Charter_store.Loaded.t ->
+  identity:string ->
+  digest:string ->
+  session:string ->
+  (unit, string) result
+(** [settle_recovered env loaded ~identity ~digest ~session] writes the one
+    reaped line a dead run's record owes — the honest settle a reconcile
+    pass performs for a spawned disposition with no reaped line, once it
+    has read the run fence for [session] as free: the child is gone and no
+    reaper survives it. Nothing is signalled and nothing is spawned. The
+    reaped disposition carries cause [recovered] and is stamped with
+    [digest] — the policy the run was spawned under, which may not be the
+    policy in force — so the spawn/reap pair stays whole under one digest.
+    The journal head, not the unobservable exit status, carries the truth:
+    a settled head stamps exit 0, making the run's findings publishable to
+    the next sweep's publisher re-entry; every other head stamps 255 and
+    alerts, [parked] for a parked head and [failed] otherwise — the
+    identity's claim is spent, so the alert is the only surface the owner
+    has left. Settling is serialized under the charter's fire lock and
+    re-checked there, so concurrent passes finding the same orphan settle
+    it once; a record already reaped is left untouched. *)
 
 (** {1:folds Pure pieces}
 
