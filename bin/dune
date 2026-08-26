@@ -18,6 +18,7 @@
   cli_auth
   cli_session
   cli_run
+  cli_serve_session
   cli_github
   cli_skills
   cli_commands
@@ -56,6 +57,9 @@
   mentat_agent
   mentat_client
   mentat_connector
+  ; mentat_server: consumed by cli_serve_session's per-session child server —
+  ; the one serve boot in this binary; the daemon's serve boot lives in mentatd.
+  mentat_server
   mentat_provider_runtime
   mentat_provider
   mentat_config

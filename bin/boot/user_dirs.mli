@@ -58,3 +58,15 @@ val daemon_socket_dir : t -> string
     writable, and the socket authorizes any local peer without a token, so a
     confined command able to reach it would be driving Mentat instead of being
     confined by it. *)
+
+val child_socket_dir : t -> session:string -> string
+(** [child_socket_dir t ~session] is the directory a per-session child server
+    binds its socket in: [s/<leaf>] under {!daemon_socket_dir}, so the sandbox
+    denial covering the daemon's socket tree covers every child endpoint with no
+    further policy. [leaf] is [session] itself when it is a plain filename
+    component (ASCII alphanumerics, [-], [_], [.]; no leading dot) of at most 40
+    bytes — which keeps the whole [<dir>/mentat.sock] path more than 15 bytes
+    under the tightest (macOS, 104-byte) [sun_path] cap for any uid up to seven
+    digits — and a 16-hex keyed digest of [session] otherwise. Either way the
+    endpoint is a pure function of the session id, so the binding child and a
+    connecting broker derive the same path independently. *)
