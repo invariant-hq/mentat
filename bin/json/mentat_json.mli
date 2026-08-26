@@ -3,12 +3,20 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(** Strict-decode machinery shared by the charter library's readers. *)
+(** JSON reading machinery shared by the executable's document readers.
 
-(** Decode errors. *)
+    Two postures over decoded {!Jsont.json} values, matching the two kinds
+    of document this executable reads. The strict readers serve closed
+    envelopes this program owns — every member routed exactly once, an
+    unknown or missing member an {!Error.t} naming it. {!Lenient} serves
+    another service's documents — take the named member if it has the
+    expected shape, ignore everything else, and let the caller decide what
+    absence means. *)
+
+(** Read errors. *)
 module Error : sig
   type t
-  (** The type for decode errors: which part of an input is unacceptable, and
+  (** The type for read errors: which part of an input is unacceptable, and
       why. *)
 
   val make : context:string -> string -> t
@@ -71,3 +79,31 @@ val repo_full_name : context:string -> string -> (string, Error.t) result
     [owner/name]: exactly one ['/'], both halves non-empty, both drawn from
     letters, digits, ['.'], ['_'], and ['-']. Anything else is an [Error]
     rejecting [context]. *)
+
+(** Narrow reads over another service's documents.
+
+    Every reader answers [None] for a missing member or an unexpected
+    shape — the foreign document grows members freely, and what absence
+    means is the caller's decision, so nothing here mints an error. *)
+module Lenient : sig
+  val mem : string -> Jsont.json -> Jsont.json option
+  (** [mem name json] is the value of member [name] when [json] is an
+      object carrying it. *)
+
+  val string : Jsont.json -> string option
+  (** [string json] is [json]'s value when it is a string. *)
+
+  val bool : Jsont.json -> bool option
+  (** [bool json] is [json]'s value when it is a boolean. *)
+
+  val number : Jsont.json -> float option
+  (** [number json] is [json]'s value when it is a number. *)
+
+  val int : Jsont.json -> int option
+  (** [int json] is [json]'s value when it is a number that is an exact
+      integer. *)
+
+  val decode : string -> Jsont.json option
+  (** [decode bytes] is the JSON value [bytes] denotes, or [None] when it
+      does not parse. *)
+end

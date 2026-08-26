@@ -1,5 +1,4 @@
 (library
  (name mentat_charter)
- (modules charter receipt event gate fence run_id decode)
- (private_modules decode)
- (libraries jsont jsont.bytesrw mentat_digest))
+ (modules charter receipt event gate fence run_id)
+ (libraries jsont jsont.bytesrw mentat_digest mentat_json))

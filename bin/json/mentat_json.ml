@@ -88,3 +88,23 @@ let repo_full_name ~context s =
          && String.for_all repo_char name ->
       Ok s
   | _ -> error ~context "must name a repository as owner/name"
+
+module Lenient = struct
+  let mem name = function
+    | Jsont.Object (mems, _) ->
+        Option.map snd (Jsont.Json.find_mem name mems)
+    | _ -> None
+
+  let string = function Jsont.String (s, _) -> Some s | _ -> None
+  let bool = function Jsont.Bool (b, _) -> Some b | _ -> None
+  let number = function Jsont.Number (v, _) -> Some v | _ -> None
+
+  let int = function
+    | Jsont.Number (v, _) when Float.is_integer v -> Some (int_of_float v)
+    | _ -> None
+
+  let decode bytes =
+    match Jsont_bytesrw.decode_string Jsont.json bytes with
+    | Ok json -> Some json
+    | Error _ -> None
+end

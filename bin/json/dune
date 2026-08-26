@@ -1,0 +1,3 @@
+(library
+ (name mentat_json)
+ (libraries jsont jsont.bytesrw))

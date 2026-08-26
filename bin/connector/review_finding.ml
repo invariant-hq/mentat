@@ -54,7 +54,7 @@ module Body = struct
   let text t = t
 end
 
-module Error = Decode.Error
+module Error = Mentat_json.Error
 
 type t = {
   severity : Severity.t;
@@ -86,38 +86,6 @@ module Document = struct
   let ( let* ) = Result.bind
   let error ~context reason = Error (Error.make ~context reason)
 
-  let as_string ~context = function
-    | Jsont.String (s, _) -> Ok s
-    | _ -> error ~context "must be a string"
-
-  let as_non_empty_string ~context json =
-    let* s = as_string ~context json in
-    if String.equal s "" then error ~context "must be a non-empty string"
-    else Ok s
-
-  (* Route each member of [mems] into its slot exactly once; an unlisted or
-     repeated member is the caller's strictness error. *)
-  let route_members ~context ~slots mems =
-    List.fold_left
-      (fun acc mem ->
-        let* () = acc in
-        let name = fst (fst mem) in
-        match List.assoc_opt name slots with
-        | None -> error ~context (Printf.sprintf "unknown member %S" name)
-        | Some slot -> (
-            match !slot with
-            | Some _ ->
-                error ~context (Printf.sprintf "duplicate member %S" name)
-            | None ->
-                slot := Some (snd mem);
-                Ok ()))
-      (Ok ()) mems
-
-  let require ~context name slot =
-    match !slot with
-    | Some json -> Ok json
-    | None -> error ~context (Printf.sprintf "missing member %S" name)
-
   let decode_finding ~index json =
     let context = Printf.sprintf "findings[%d]" index in
     let in_finding name = Printf.sprintf "%s.%s" context name in
@@ -141,10 +109,10 @@ module Document = struct
             ("body", body);
           ]
         in
-        let* () = route_members ~context ~slots mems in
+        let* () = Mentat_json.route_members ~context ~slots mems in
         let* severity =
-          let* json = require ~context "severity" severity in
-          let* s = as_string ~context:(in_finding "severity") json in
+          let* json = Mentat_json.require ~context "severity" severity in
+          let* s = Mentat_json.as_string ~context:(in_finding "severity") json in
           match Severity.of_string s with
           | Some severity -> Ok severity
           | None ->
@@ -152,19 +120,19 @@ module Document = struct
                 "must be one of P0, P1, P2, or P3"
         in
         let* path =
-          let* json = require ~context "path" path in
-          as_non_empty_string ~context:(in_finding "path") json
+          let* json = Mentat_json.require ~context "path" path in
+          Mentat_json.as_non_empty_string ~context:(in_finding "path") json
         in
         let* line =
-          let* json = require ~context "line" line in
-          Decode.positive_int ~context:(in_finding "line") json
+          let* json = Mentat_json.require ~context "line" line in
+          Mentat_json.positive_int ~context:(in_finding "line") json
         in
         let* end_line =
           match !end_line with
           | None -> Ok None
           | Some json ->
               let* value =
-                Decode.positive_int ~context:(in_finding "end_line") json
+                Mentat_json.positive_int ~context:(in_finding "end_line") json
               in
               if value < line then
                 error ~context:(in_finding "end_line")
@@ -172,19 +140,19 @@ module Document = struct
               else Ok (Some value)
         in
         let* anchor =
-          let* json = require ~context "anchor" anchor in
-          let* anchor = as_non_empty_string ~context:(in_finding "anchor") json in
+          let* json = Mentat_json.require ~context "anchor" anchor in
+          let* anchor = Mentat_json.as_non_empty_string ~context:(in_finding "anchor") json in
           if String.equal (String.trim anchor) "" then
             error ~context:(in_finding "anchor") "must not be only whitespace"
           else Ok anchor
         in
         let* title =
-          let* json = require ~context "title" title in
-          as_non_empty_string ~context:(in_finding "title") json
+          let* json = Mentat_json.require ~context "title" title in
+          Mentat_json.as_non_empty_string ~context:(in_finding "title") json
         in
         let* body =
-          let* json = require ~context "body" body in
-          as_string ~context:(in_finding "body") json
+          let* json = Mentat_json.require ~context "body" body in
+          Mentat_json.as_string ~context:(in_finding "body") json
         in
         Ok
           {
@@ -204,13 +172,13 @@ module Document = struct
     | Ok (Jsont.Object (mems, _)) ->
         let summary = ref None and findings = ref None in
         let slots = [ ("summary", summary); ("findings", findings) ] in
-        let* () = route_members ~context:"" ~slots mems in
+        let* () = Mentat_json.route_members ~context:"" ~slots mems in
         let* summary =
-          let* json = require ~context:"" "summary" summary in
-          as_string ~context:"summary" json
+          let* json = Mentat_json.require ~context:"" "summary" summary in
+          Mentat_json.as_string ~context:"summary" json
         in
         let* findings =
-          let* json = require ~context:"" "findings" findings in
+          let* json = Mentat_json.require ~context:"" "findings" findings in
           match json with
           | Jsont.Array (elements, _) ->
               let* _, reversed =
