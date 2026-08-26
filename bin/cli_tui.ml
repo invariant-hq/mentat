@@ -388,28 +388,31 @@ let notify_policy t =
         (get Mentat_config.Field.notify_on);
   }
 
-(* The external notification hook for the [command] channel: the configured argv
-   with the title and body appended, run best-effort with its output discarded so
-   it never reaches the TUI-owned terminal. Absent when [notify.command] is
-   empty, so the reducer does not advertise the [command] channel. *)
+(* The external notification hook for the [command] channel: the configured
+   argv run through the shared firing module, which writes one JSON event —
+   here [{"title": …, "body": …}] — to the hook's stdin, best-effort with its
+   output discarded so it never reaches the TUI-owned terminal. Absent when
+   [notify.command] is empty, so the reducer does not advertise the [command]
+   channel. *)
 let notify_hook t =
   match
     Mentat_config.Resolved.get Mentat_config.Field.notify_command
       (Composition.config t)
   with
   | [] -> None
-  | _ :: _ as prefix ->
+  | _ :: _ as argv ->
       Some
         (fun ~title ~body ->
-          let argv = prefix @ [ title; body ] in
-          try
-            let process_mgr = Eio.Stdenv.process_mgr (Composition.stdenv t) in
-            let discard = Buffer.create 256 in
-            ignore
-              (Eio.Process.parse_out process_mgr Eio.Buf_read.take_all
-                 ~stderr:(Eio.Flow.buffer_sink discard)
-                 argv)
-          with _ -> ())
+          let stdenv = Composition.stdenv t in
+          Notify.fire
+            ~proc_mgr:(Eio.Stdenv.process_mgr stdenv)
+            ~clock:(Eio.Stdenv.clock stdenv) ~argv
+            ~event:
+              (Output.Json.obj
+                 [
+                   ("title", Output.Json.string title);
+                   ("body", Output.Json.string body);
+                 ]))
 
 (* The external-editor escape. The runtime has already suspended the terminal
    (alternate screen left, cooked mode), so the editor spawns attached to the

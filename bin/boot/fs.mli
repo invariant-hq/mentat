@@ -56,6 +56,32 @@ val write_new :
     check-then-write would. [Error message] on any other IO failure, with the
     partial file removed. *)
 
+val append : string -> string -> (unit, string) result
+(** [append path record] durably appends [record] plus a ['\n'] frame to the
+    line-framed ledger at [path], creating it (and its parent chain) at
+    [0o600] if missing. The append follows the store's ledger discipline: any
+    torn, newline-less tail left by an interrupted writer is first truncated
+    to the last record boundary, then the framed record is written at the end
+    and fsynced, then the parent directory is fsynced. Once the write begins,
+    a failure restores the pre-append boundary best-effort, so a caller's
+    retry cannot duplicate records.
+
+    Concurrent appenders in {e separate processes} are serialized by an
+    advisory lock on the ledger itself, so one writer's boundary repair cannot
+    truncate another's in-flight record. The lock does not exclude fibers of
+    one process (POSIX record locks are per-process); in-process callers
+    serialize themselves. A [record] containing a raw ['\n'] would forge a
+    record boundary and is refused. [Error message] on any IO failure. *)
+
+val require_private : string -> (unit, string) result
+(** [require_private path] is [Ok ()] when the entry at [path] is accessible
+    by its owner alone — no group or world permission bit set — and [Error]
+    otherwise, naming the loose mode, the way sshd refuses a loose key file. A
+    missing or unstattable entry is also an [Error]: the caller asks because
+    the entry guards a secret, and an absent guard is not a private one.
+    Symlinks are followed — the verdict is about the entry that would actually
+    be read. *)
+
 val with_lock : string -> (unit -> ('a, string) result) -> ('a, string) result
 (** [with_lock lock_path f] runs [f] holding the advisory lock at [lock_path]:
     an in-process [Eio.Mutex] keyed by [lock_path] (so a second fiber in this

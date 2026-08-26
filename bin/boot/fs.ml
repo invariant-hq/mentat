@@ -94,6 +94,140 @@ let write_new ~perms path bytes =
               (try Sys.remove path with Sys_error _ -> ());
               Error message))
 
+(* The ledger-append recipe, rewritten from the session store's over native
+   [Unix]: repair any torn tail, write the framed record at the end, fsync the
+   file, then the directory. *)
+
+(* Serialize cross-process appenders on the ledger descriptor itself — the
+   boundary repair reads the size before writing, so an unserialized second
+   writer could truncate a record in flight. The lock releases with the
+   descriptor, so a crashed holder cannot wedge the ledger. [F_LOCK] blocks,
+   but the hold spans one repair and one fsynced write. POSIX record locks are
+   per-process: fibers of one process are not excluded and serialize
+   themselves. *)
+let rec lock_all fd =
+  match Unix.lockf fd Unix.F_LOCK 0 with
+  | () -> ()
+  | exception Unix.Unix_error (Unix.EINTR, _, _) -> lock_all fd
+
+let rec read_retry fd buffer offset length =
+  match Unix.read fd buffer offset length with
+  | read -> read
+  | exception Unix.Unix_error (Unix.EINTR, _, _) ->
+      read_retry fd buffer offset length
+
+(* Truncate a torn final fragment at the last record boundary and return the
+   repaired size — the boundary a failed write restores. Scans backwards in
+   chunks for the last ['\n']; a ledger holding none is truncated to empty. *)
+let truncate_torn path fd =
+  let size = (Unix.fstat fd).Unix.st_size in
+  if size = 0 then 0
+  else begin
+    let chunk = 8192 in
+    let buffer = Bytes.create chunk in
+    let rec last_newline stop =
+      if stop = 0 then None
+      else begin
+        let start = Stdlib.max 0 (stop - chunk) in
+        let length = stop - start in
+        let (_ : int) = Unix.lseek fd start Unix.SEEK_SET in
+        let rec fill offset =
+          if offset < length then
+            match read_retry fd buffer offset (length - offset) with
+            | 0 -> raise (Sys_error (path ^ ": short read"))
+            | read -> fill (offset + read)
+        in
+        fill 0;
+        let rec find index =
+          if index < 0 then None
+          else if Char.equal (Bytes.get buffer index) '\n' then
+            Some (start + index)
+          else find (index - 1)
+        in
+        match find (length - 1) with
+        | Some absolute -> Some absolute
+        | None -> last_newline start
+      end
+    in
+    let keep =
+      match last_newline size with None -> 0 | Some newline -> newline + 1
+    in
+    if keep <> size then Unix.ftruncate fd keep;
+    keep
+  end
+
+let rec write_all fd text offset =
+  if offset < String.length text then
+    match Unix.write_substring fd text offset (String.length text - offset) with
+    | 0 -> raise (Sys_error "no bytes written")
+    | written -> write_all fd text (offset + written)
+    | exception Unix.Unix_error (Unix.EINTR, _, _) -> write_all fd text offset
+
+let rec fsync_retry fd =
+  match Unix.fsync fd with
+  | () -> ()
+  | exception Unix.Unix_error (Unix.EINTR, _, _) -> fsync_retry fd
+
+(* The directory sync makes a first append's creation as durable as its bytes.
+   It sits after the append landed, so a sync failure has changed durable
+   state; the caller re-anchors from disk. *)
+let fsync_dir dir =
+  match Unix.openfile dir [ Unix.O_RDONLY; Unix.O_CLOEXEC ] 0 with
+  | exception Unix.Unix_error (e, _, _) -> Error (render dir e)
+  | fd ->
+      Fun.protect
+        ~finally:(fun () -> try Unix.close fd with Unix.Unix_error _ -> ())
+        (fun () ->
+          match fsync_retry fd with
+          | () -> Ok ()
+          | exception Unix.Unix_error (e, _, _) -> Error (render dir e))
+
+let append path record =
+  if String.contains record '\n' then
+    Error (Printf.sprintf "%s: record must not contain a newline" path)
+  else
+    match mkdir_p (Filename.dirname path) with
+    | Error _ as e -> e
+    | Ok () -> (
+        match
+          Unix.openfile path [ Unix.O_RDWR; Unix.O_CREAT; Unix.O_CLOEXEC ] 0o600
+        with
+        | exception Unix.Unix_error (e, _, _) -> Error (render path e)
+        | fd -> (
+            match
+              Fun.protect
+                ~finally:(fun () ->
+                  try Unix.close fd with Unix.Unix_error _ -> ())
+                (fun () ->
+                  lock_all fd;
+                  let base = truncate_torn path fd in
+                  let (_ : int) = Unix.lseek fd 0 Unix.SEEK_END in
+                  (* Once the write begins, any failure restores the pre-append
+                     boundary best-effort so a retry cannot duplicate
+                     records. *)
+                  try
+                    write_all fd (record ^ "\n") 0;
+                    fsync_retry fd
+                  with exn ->
+                    (try Unix.ftruncate fd base with Unix.Unix_error _ -> ());
+                    raise exn)
+            with
+            | () -> fsync_dir (Filename.dirname path)
+            | exception Unix.Unix_error (e, _, _) -> Error (render path e)
+            | exception Sys_error message -> Error message))
+
+let require_private path =
+  match Unix.stat path with
+  | exception Unix.Unix_error (e, _, _) -> Error (render path e)
+  | stat ->
+      if stat.Unix.st_perm land 0o077 = 0 then Ok ()
+      else
+        Error
+          (Printf.sprintf
+             "%s: mode %03o grants group or world access; make it private \
+              (chmod go-rwx)"
+             path stat.Unix.st_perm)
+
 (* In-process serialization: one [Eio.Mutex] per lock path, keyed through a
    registry the store's [Handle] pattern uses. The registry itself is guarded by
    a stdlib mutex so the find-or-create is atomic. *)

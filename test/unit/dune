@@ -376,6 +376,36 @@
  (modules test_user_dirs user_dirs)
  (libraries windtrap mentat_digest unix))
 
+; The executable-side filesystem primitives live in bin/boot; the ledger
+; append and the permission gate are plain Unix code, so the source is copied
+; in and the suite runs without linking the boot library. (The Eio-fiber
+; [with_lock] is compiled but not exercised here.)
+
+(copy_files
+ (files ../../bin/boot/fs.{ml,mli}))
+
+(test
+ (name test_fs)
+ (modules test_fs fs)
+ (libraries windtrap eio eio.unix unix))
+
+; The shared notification hook lives in bin/boot; it strips event strings
+; through [Output], so both sources are copied in. The charter-store suite
+; needs [Fs] and [User_dirs] too, whose copies are already owned by the
+; stanzas above, so it lives in the charter_store/ subdirectory with its own
+; copies.
+
+(copy_files
+ (files ../../bin/boot/notify.{ml,mli}))
+
+(copy_files
+ (files ../../bin/boot/output.{ml,mli}))
+
+(test
+ (name test_notify)
+ (modules test_notify notify output)
+ (libraries windtrap eio eio.unix eio_main unix jsont jsont.bytesrw))
+
 (test
  (name test_github_api)
  (modules test_github_api)
