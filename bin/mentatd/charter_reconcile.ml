@@ -64,6 +64,19 @@ let pending_runs receipts =
 
 let say env fmt = Printf.ksprintf env.Charter_fire.say fmt
 
+(* One charter's pass narrates under the charter's name — the fold's own
+   refusals and every line the fire pipeline speaks through the same
+   environment — exactly as the node's delivery path prefixes: one resident
+   process speaks for many charters, so the prefix is the line's
+   provenance. *)
+let charter_env env name =
+  {
+    env with
+    Charter_fire.say =
+      (fun line ->
+        env.Charter_fire.say (Printf.sprintf "charter %s: %s" name line));
+  }
+
 let probe_fence env session : fence =
   match
     Mentat_store.Run_lock.holder env.Charter_fire.store
@@ -75,7 +88,6 @@ let probe_fence env session : fence =
 
 let settle env (loaded : Charter_store.Loaded.t) (pending : Pending.t) =
   let { Pending.identity; digest; session; spawned_at } = pending in
-  let name = loaded.Charter_store.Loaded.name in
   let fence () = probe_fence env session in
   let overdue () =
     let budget = loaded.Charter_store.Loaded.charter.Charter.budget in
@@ -85,30 +97,29 @@ let settle env (loaded : Charter_store.Loaded.t) (pending : Pending.t) =
   | `Leave -> ()
   | `Overdue ->
       say env
-        "charter %s: run %s outlives its wall clock; its fence holder is left \
-         to finish"
-        name session
-  | `Skip message ->
-      say env "charter %s: run %s fence unprobeable: %s" name session message
+        "run %s outlives its wall clock; its fence holder is left to finish"
+        session
+  | `Skip message -> say env "run %s fence unprobeable: %s" session message
   | `Settle -> (
       match
         Charter_fire.settle_recovered env loaded ~identity ~digest ~session
       with
       | Ok () -> ()
-      | Error e -> say env "charter %s: recover %s: %s" name session e)
+      | Error e -> say env "recover %s: %s" session e)
 
 let reconcile env ~repo_for (loaded : Charter_store.Loaded.t) =
   let name = loaded.Charter_store.Loaded.name in
+  let env = charter_env env name in
   (match Charter_store.read_receipts env.Charter_fire.dirs ~name with
-  | Error e -> say env "charter %s: %s" name (Charter_store.Error.message e)
+  | Error e -> say env "%s" (Charter_store.Error.message e)
   | Ok receipts -> List.iter (settle env loaded) (pending_runs receipts));
   if loaded.Charter_store.Loaded.charter.Charter.enabled then
     match repo_for loaded with
-    | Error e -> say env "charter %s: %s" name e
+    | Error e -> say env "%s" e
     | Ok repo -> (
         match Charter_fire.fire_sweep env ~repo loaded with
         | Ok _ -> ()
-        | Error e -> say env "charter %s: sweep: %s" name e)
+        | Error e -> say env "sweep: %s" e)
 
 let pass env ~repo_for =
   match Charter_store.roster env.Charter_fire.dirs with

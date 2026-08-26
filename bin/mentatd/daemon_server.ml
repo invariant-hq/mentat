@@ -646,18 +646,36 @@ let max_idle_seconds environment =
     (List.assoc_opt "MENTAT_DAEMON_MAX_IDLE" environment)
     float_of_string_opt
 
-let idle_watchdog clock ~max_idle registry stop =
+(* An enabled webhook charter is a standing commission: its node must stay
+   resident to answer deliveries, and an idle-stop would be a clean exit —
+   which the service manager never restarts — so every later webhook would
+   bounce until the owner intervened. Ingress traffic deliberately does not
+   refresh the idle clock: a quiet repository is exactly when the commission
+   still stands. Consulted only at the stop threshold, so the roster fold
+   costs one read per idle window; a charterless daemon keeps the
+   backstop. *)
+let charter_resident dirs () =
+  match Charter_store.ingress_index dirs with
+  | Error _ -> false
+  | Ok (bindings, _failures) ->
+      List.exists
+        (fun (b : Charter_store.Binding.t) -> b.Charter_store.Binding.enabled)
+        bindings
+
+let idle_watchdog clock ~max_idle ~resident registry stop =
   let idle_since = ref (Eio.Time.now clock) in
   let rec loop () =
     Eio.Time.sleep clock 0.5;
     if Atomic.get registry.active > 0 then idle_since := Eio.Time.now clock
     else if Eio.Time.now clock -. !idle_since >= max_idle then
-      Stop_signal.request stop;
+      if resident () then idle_since := Eio.Time.now clock
+      else Stop_signal.request stop;
     if Stop_signal.requested stop then () else loop ()
   in
   loop ()
 
-let serve ~socket_override ~spawned ~web ~web_port =
+let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
+    ~github_base_url ~charter_git_url =
   Eio_main.run @@ fun stdenv ->
   Eio.Switch.run @@ fun sw ->
   match Composition.stage_shared ~stdenv ~sw () with
@@ -686,129 +704,228 @@ let serve ~socket_override ~spawned ~web ~web_port =
               in
               let broker = Child_broker.create ~sw shared in
               let registry = make_registry ~shared ~parent_sw:sw ~broker in
-              (* The per-daemon bootstrap token: the wire has none for a unix bind
-                 (filesystem auth), but the browser edge needs one, regenerated on
-                 every start. The web branch is computed before the discovery
-                 write so its URL is recorded in daemon.json, which is where every
-                 client reads it from. *)
-              let web_branch, web_url =
-                if web then (
-                  let token = Server.Token.generate () in
-                  match start_web registry ~sw ~net ~clock ~web_port ~token with
-                  | Ok (branch, url) ->
-                      (* Only a foreground daemon has a reader. A spawned one's
-                         stdout is daemon.log, which is never rotated and which a
-                         user may hand over with a bug report — so printing a URL
-                         carrying a live token there would persist a credential
-                         for no one's benefit. *)
-                      if not spawned then
-                        Printf.printf "mentat web: open %s\n%!" url;
-                      (Some branch, Some url)
-                  | Error message ->
-                      Printf.eprintf "mentat web: could not start: %s\n%!"
-                        message;
-                      (None, None))
-                else (None, None)
-              in
-              let record =
-                {
-                  Discovery.socket = Server.Bind.socket_path ~dir:socket_dir_abs;
-                  pid = Unix.getpid ();
-                  protocol = protocol_version;
-                  binary = Daemon.binary_version;
-                  config_home = User_dirs.config_home dirs;
-                  started_at = int_of_float (Unix.gettimeofday () *. 1000.);
-                  web_url;
-                }
-              in
-              (match Discovery.write ~dir:ddir record with
-              | Ok () -> ()
-              | Error message ->
-                  Eio.traceln "mentatd: writing discovery failed: %s"
-                    message);
-              (* Consume-and-rotate: each exchange invalidates the presented
-                 token and mints a successor, and republishing the successor's
-                 URL keeps [web_url] a live entry point for the daemon's whole
-                 life — re-entry after cookie loss is reading daemon.json (the
-                 0600 trust root), while a browser history only ever holds
-                 consumed tokens. *)
-              let republish_web_url url =
+              (* The stop seam is created before the branches so the resident
+                 charter node can thread it into its pipeline; the signal
+                 handlers are installed further down, around the serve
+                 races. *)
+              let stop = Stop_signal.create () in
+              (* The charter node is always assembled — charters register by
+                 file, so one installed while the daemon runs is in force at
+                 its next delivery without a restart, and an empty roster
+                 costs nothing (the resolver and the reconcile passes re-read
+                 it per event). A daemon that cannot resolve its [mentat]
+                 sibling serves without the node — loudly, since installed
+                 charters will not run — unless the webhook ingress was
+                 explicitly requested, which it could never honor. *)
+              let node =
                 match
-                  Discovery.write ~dir:ddir
-                    { record with Discovery.web_url = Some url }
+                  Node.create shared ~stop ?github_base_url
+                    ?git_url:charter_git_url ()
                 with
+                | Ok node -> Ok (Some node)
+                | Error message when Option.is_some ingress_port ->
+                    Error
+                      (Printf.sprintf
+                         "cannot serve the webhook ingress: %s" message)
+                | Error message ->
+                    Eio.traceln "mentatd: charters will not run: %s" message;
+                    Ok None
+              in
+              match node with
+              | Error message -> Exit_status.runtime message
+              | Ok node ->
+                let ingress = Option.map Node.ingress node in
+                (* The tunnel-facing ingress bind: loopback only — the owner
+                   points whatever tunnel they already trust at it, and every
+                   delivery is authenticated end-to-end by its body HMAC, so
+                   the tunnel is untrusted transport by construction. The
+                   listener carries the pre-auth ingress family and nothing
+                   else: its bearer token is generated and never disclosed, and
+                   its handshake refuses every workspace, so a whole-port
+                   tunnel exposes delivery custody, never the wire. The bound
+                   port is printed for the owner (and the test harness) — an
+                   ingress URL's capability is its path id, never the port. *)
+                let ingress_listener =
+                  match (ingress, ingress_port) with
+                  | Some _, Some port ->
+                      let token = Server.Token.generate () in
+                      let bind =
+                        Server.Bind.loopback
+                          ~port:(if port = 0 then None else Some port)
+                          ~token
+                      in
+                      let ingress_listener = Server.listen ~sw ~net bind in
+                      let bound =
+                        Option.value (Server.port ingress_listener) ~default:port
+                      in
+                      Printf.printf "mentatd ingress: 127.0.0.1:%d\n%!" bound;
+                      Some ingress_listener
+                  | _ -> None
+                in
+                (* The per-daemon bootstrap token: the wire has none for a unix bind
+                   (filesystem auth), but the browser edge needs one, regenerated on
+                   every start. The web branch is computed before the discovery
+                   write so its URL is recorded in daemon.json, which is where every
+                   client reads it from. *)
+                let web_branch, web_url =
+                  if web then (
+                    let token = Server.Token.generate () in
+                    match start_web registry ~sw ~net ~clock ~web_port ~token with
+                    | Ok (branch, url) ->
+                        (* Only a foreground daemon has a reader. A spawned one's
+                           stdout is daemon.log, which is never rotated and which a
+                           user may hand over with a bug report — so printing a URL
+                           carrying a live token there would persist a credential
+                           for no one's benefit. *)
+                        if not spawned then
+                          Printf.printf "mentat web: open %s\n%!" url;
+                        (Some branch, Some url)
+                    | Error message ->
+                        Printf.eprintf "mentat web: could not start: %s\n%!"
+                          message;
+                        (None, None))
+                  else (None, None)
+                in
+                let record =
+                  {
+                    Discovery.socket = Server.Bind.socket_path ~dir:socket_dir_abs;
+                    pid = Unix.getpid ();
+                    protocol = protocol_version;
+                    binary = Daemon.binary_version;
+                    config_home = User_dirs.config_home dirs;
+                    started_at = int_of_float (Unix.gettimeofday () *. 1000.);
+                    web_url;
+                  }
+                in
+                (match Discovery.write ~dir:ddir record with
                 | Ok () -> ()
                 | Error message ->
-                    Eio.traceln "mentatd: rewriting discovery failed: %s"
-                      message
-              in
-              (* D7 escalation (F3): the shared stop seam — a first
-                 SIGTERM/SIGINT requests a graceful stop, a second while a
-                 wedged teardown holds forces immediate exit and the OS
-                 releases every fence. *)
-              let stop = Stop_signal.create () in
-              Stop_signal.with_signals stop (fun () ->
-                  (* Re-adopt what a previous node life left running or
-                     unfinished, before the first connection is served: the
-                     broker enumerates orphaned children and adopts their
-                     parents through the ordinary get-or-boot, whose recovery
-                     re-drives each edge into the broker's own materialize. *)
-                  Child_broker.rediscover broker
-                    ~instance_for:(fun ~root ->
-                      match get_or_boot registry ~root () with
-                      | Error status -> Error (exit_message status)
-                      | Ok entry -> Ok entry.instance)
-                    ~release:(fun instance ->
-                      let root =
-                        Lpath.Abs.to_string (Composition.root instance)
-                      in
+                    Eio.traceln "mentatd: writing discovery failed: %s"
+                      message);
+                (* Consume-and-rotate: each exchange invalidates the presented
+                   token and mints a successor, and republishing the successor's
+                   URL keeps [web_url] a live entry point for the daemon's whole
+                   life — re-entry after cookie loss is reading daemon.json (the
+                   0600 trust root), while a browser history only ever holds
+                   consumed tokens. *)
+                let republish_web_url url =
+                  match
+                    Discovery.write ~dir:ddir
+                      { record with Discovery.web_url = Some url }
+                  with
+                  | Ok () -> ()
+                  | Error message ->
+                      Eio.traceln "mentatd: rewriting discovery failed: %s"
+                        message
+                in
+                (* D7 escalation (F3): the shared stop seam — a first
+                   SIGTERM/SIGINT requests a graceful stop, a second while a
+                   wedged teardown holds forces immediate exit and the OS
+                   releases every fence. *)
+                Stop_signal.with_signals stop (fun () ->
+                    (* Re-adopt what a previous node life left running or
+                       unfinished, before the first connection is served: the
+                       broker enumerates orphaned children and adopts their
+                       parents through the ordinary get-or-boot, whose recovery
+                       re-drives each edge into the broker's own materialize. *)
+                    Child_broker.rediscover broker
+                      ~instance_for:(fun ~root ->
+                        match get_or_boot registry ~root () with
+                        | Error status -> Error (exit_message status)
+                        | Ok entry -> Ok entry.instance)
+                      ~release:(fun instance ->
+                        let root =
+                          Lpath.Abs.to_string (Composition.root instance)
+                        in
+                        Eio.Mutex.use_rw ~protect:true registry.mutex (fun () ->
+                            match Hashtbl.find_opt registry.entries root with
+                            | Some entry -> entry.lease <- entry.lease - 1
+                            | None -> ());
+                        sweep registry);
+                    (* The boot reconcile: settle whatever record a previous
+                       life left open, before the first delivery is admitted.
+                       The periodic loop's own first pass re-reads the settled
+                       record for free (the fold is idempotent), and the two
+                       run in sequence, never concurrently. *)
+                    (match node with
+                    | Some node ->
+                        Charter_reconcile.pass (Node.reconcile_env node)
+                          ~repo_for:(Node.repo node)
+                    | None -> ());
+                    let branches =
+                      [
+                        (fun () ->
+                          Server.serve ~sw ~clock ?ingress
+                            ~driver_for:(driver_for registry) listener);
+                        (fun () -> Stop_signal.wait ~clock stop);
+                      ]
+                    in
+                    (* The node's two fibers: the pump drives admitted
+                       deliveries to their dispositions, and the reconcile beat
+                       keeps every charter's record converging. Both are
+                       cancellable at any instant — anything caught between
+                       receipt and disposition is the next boot pass's to
+                       finish. *)
+                    let branches =
+                      match node with
+                      | Some node ->
+                          (fun () -> Node.pump node)
+                          :: (fun () ->
+                               Charter_reconcile.loop (Node.reconcile_env node)
+                                 ~repo_for:(Node.repo node))
+                          :: branches
+                      | None -> branches
+                    in
+                    let branches =
+                      match (ingress, ingress_listener) with
+                      | Some ingress, Some ingress_listener ->
+                          (fun () ->
+                            Server.serve ~sw ~clock ~ingress
+                              ~driver_for:(fun ~workspace:_ ~environment:_ ->
+                                Error
+                                  (Mentat_protocol.Error.unavailable
+                                     "this listener serves the webhook ingress \
+                                      only"))
+                              ingress_listener)
+                          :: branches
+                      | _ -> branches
+                    in
+                    let branches =
+                      match max_idle_seconds shared.Composition.environment with
+                      | Some max_idle ->
+                          (fun () ->
+                            idle_watchdog clock ~max_idle
+                              ~resident:(charter_resident dirs) registry stop)
+                          :: branches
+                      | None -> branches
+                    in
+                    let branches =
+                      match web_branch with
+                      | Some branch ->
+                          branch ~on_url:republish_web_url :: branches
+                      | None -> branches
+                    in
+                    Eio.Fiber.any branches;
+                    (* D7: stop accepting, clear discovery, settle every instance
+                       durable-first before the claim releases. Shutdown has one
+                       implementation — the boot fiber's, behind [release] (the
+                       path eviction takes) — so teardown resolves each release
+                       and awaits the fiber's [settled]; calling
+                       [Composition.shutdown] here directly would leave the boot
+                       fiber parked on its release promise forever, wedging the
+                       switch (the first-SIGINT hang a live web pin exposed). *)
+                    Discovery.clear ~dir:ddir ~pid:(Unix.getpid ());
+                    (* Stop the broker's fibers before the instances settle: the
+                       children themselves keep running detached, and a
+                       successor's rediscovery re-adopts them. *)
+                    Child_broker.stop broker;
+                    let settling =
                       Eio.Mutex.use_rw ~protect:true registry.mutex (fun () ->
-                          match Hashtbl.find_opt registry.entries root with
-                          | Some entry -> entry.lease <- entry.lease - 1
-                          | None -> ());
-                      sweep registry);
-                  let branches =
-                    [
-                      (fun () ->
-                        Server.serve ~sw ~clock
-                          ~driver_for:(driver_for registry) listener);
-                      (fun () -> Stop_signal.wait ~clock stop);
-                    ]
-                  in
-                  let branches =
-                    match max_idle_seconds shared.Composition.environment with
-                    | Some max_idle ->
-                        (fun () -> idle_watchdog clock ~max_idle registry stop)
-                        :: branches
-                    | None -> branches
-                  in
-                  let branches =
-                    match web_branch with
-                    | Some branch ->
-                        branch ~on_url:republish_web_url :: branches
-                    | None -> branches
-                  in
-                  Eio.Fiber.any branches;
-                  (* D7: stop accepting, clear discovery, settle every instance
-                     durable-first before the claim releases. Shutdown has one
-                     implementation — the boot fiber's, behind [release] (the
-                     path eviction takes) — so teardown resolves each release
-                     and awaits the fiber's [settled]; calling
-                     [Composition.shutdown] here directly would leave the boot
-                     fiber parked on its release promise forever, wedging the
-                     switch (the first-SIGINT hang a live web pin exposed). *)
-                  Discovery.clear ~dir:ddir ~pid:(Unix.getpid ());
-                  (* Stop the broker's fibers before the instances settle: the
-                     children themselves keep running detached, and a
-                     successor's rediscovery re-adopts them. *)
-                  Child_broker.stop broker;
-                  let settling =
-                    Eio.Mutex.use_rw ~protect:true registry.mutex (fun () ->
-                        Hashtbl.fold
-                          (fun _ entry acc ->
-                            entry.release ();
-                            entry.settled :: acc)
-                          registry.entries [])
-                  in
-                  List.iter Eio.Promise.await settling);
-              Exit_status.Success))
+                          Hashtbl.fold
+                            (fun _ entry acc ->
+                              entry.release ();
+                              entry.settled :: acc)
+                            registry.entries [])
+                    in
+                    List.iter Eio.Promise.await settling);
+                Exit_status.Success))

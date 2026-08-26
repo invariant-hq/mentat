@@ -89,6 +89,8 @@ let env t ~name =
       (fun line -> say t (Printf.sprintf "charter %s: %s" name line));
   }
 
+let reconcile_env t = t.env
+
 let repo t (loaded : Charter_store.Loaded.t) =
   let watched = loaded.Charter_store.Loaded.charter.Charter.repo in
   match Charter_store.read_secret loaded ~file:"read-token" with

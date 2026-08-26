@@ -116,7 +116,10 @@ val pending_runs : Mentat_charter.Receipt.t list -> Pending.t list
     The thin interpreters over the tables. All of them narrate refusals and
     failures through the environment's line sink and never raise: a broken
     charter or an unreachable remote must not stop the resident, and the
-    next beat retries for free. Passes must not run concurrently with one
+    next beat retries for free. Every line one charter's pass speaks — the
+    fold's own and the fire pipeline's — is prefixed with that charter's
+    name: one pass speaks for many charters, so the prefix is the line's
+    provenance. Passes must not run concurrently with one
     another — the honest settle itself is serialized under the charter's
     fire lock, so a concurrent pass costs duplicate narration at worst, but
     the caller keeps one pass in flight at a time. *)

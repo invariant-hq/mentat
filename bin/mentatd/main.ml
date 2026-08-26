@@ -5,9 +5,12 @@
 
 open! Cmdliner
 
-let serve socket stop spawned web web_port =
+let serve socket stop spawned web web_port ingress_port github_base_url
+    charter_git_url =
   if stop then Daemon.stop ()
-  else Daemon_server.serve ~socket_override:socket ~spawned ~web ~web_port
+  else
+    Daemon_server.serve ~socket_override:socket ~spawned ~web ~web_port
+      ~ingress_port ~github_base_url ~charter_git_url
 
 let socket_opt =
   Arg.(
@@ -58,6 +61,48 @@ let web_port_opt =
           "Bind the browser frontend to $(docv) instead of an ephemeral port. \
            Has no effect without $(b,--web).")
 
+let ingress_port_opt =
+  Arg.(
+    value
+    & opt (some int) None
+    & info [ "ingress-port" ] ~docv:"PORT"
+        ~doc:
+          "Also bind the webhook ingress on $(b,127.0.0.1:)$(docv) ($(b,0) \
+           takes an ephemeral port; the bound address is printed to standard \
+           output). The listener answers only the pre-auth \
+           $(b,POST /ingress/github/…) family — every delivery is \
+           authenticated end-to-end by its HMAC signature, so any tunnel the \
+           owner already trusts can point at it. Without this flag the \
+           ingress family still rides the daemon's unix wire socket, and the \
+           reconcile sweep keeps webhook charters converging with no ingress \
+           at all.")
+
+let github_base_url_opt =
+  Arg.(
+    value
+    & opt (some string) None
+    & info [ "github-base-url" ] ~docv:"URL"
+        ~doc:
+          "The GitHub API base for the charter node's reads and its \
+           publication children — for GitHub Enterprise hosts and offline \
+           test servers. Deliberately a flag, never the ambient \
+           $(b,MENTAT_GITHUB_BASE_URL): an environment-writable API base \
+           would redirect Bearer-token requests, so the daemon scrubs the \
+           variable from every child it spawns and substitutes this value \
+           when given.")
+
+let charter_git_url_opt =
+  Arg.(
+    value
+    & opt (some string) None
+    & info [ "charter-git-url" ] ~docv:"URL"
+        ~doc:
+          "Override the git remote a charter run's checkout fetches from \
+           (derived from the charter's repository by default) — for GitHub \
+           Enterprise hosts and offline test fixtures. A flag for the same \
+           reason as $(b,--github-base-url): the node takes its remotes from \
+           validated configuration, never from the environment.")
+
 let man =
   [
     `S "DESCRIPTION";
@@ -78,6 +123,26 @@ let man =
       "A first SIGTERM or SIGINT stops the daemon gracefully (it settles every \
        instance durable-first). Send the signal a second time to force an \
        immediate exit if a graceful teardown wedges.";
+    `S "CHARTERS";
+    `P
+      "The daemon is also the resident charter node: it serves the webhook \
+       ingress for every charter installed by $(b,mentat charter add), drives \
+       admitted deliveries through the charter fire pipeline (each run is a \
+       spawned $(b,mentat) child, never in-process), and reconciles every \
+       charter's durable record — at boot, and on a periodic beat — so an \
+       interrupted run is settled honestly and an interrupted publication is \
+       finished without a fresh run. Charters register by file: one installed \
+       or edited while the daemon runs is in force at its next event, with no \
+       restart.";
+    `P
+      "$(b,--ingress-port) binds the loopback listener a webhook tunnel \
+       points at; $(b,--github-base-url) and $(b,--charter-git-url) override \
+       the GitHub API base and the checkout remote. All three are flags on \
+       this daemon's own surface, deliberately never read from the \
+       environment. A daemon holding at least one enabled webhook charter \
+       never stops itself as idle — the charter is a standing commission, and \
+       the service manager restarts failures only, so a clean idle-stop would \
+       leave later deliveries bouncing.";
     `S "ENVIRONMENT";
     `P
       "$(b,MENTAT_DAEMON_SOCKET) and $(b,MENTATD_BIN) are read by the \
@@ -202,7 +267,8 @@ let root =
       (Exit_status.term
          Term.(
            const serve $ socket_opt $ stop_flag $ spawned_flag $ web_flag
-           $ web_port_opt))
+           $ web_port_opt $ ingress_port_opt $ github_base_url_opt
+           $ charter_git_url_opt))
     info [ stop_cmd; install_cmd; uninstall_cmd ]
 
 let () = Entry.run ~version:Daemon.binary_version root

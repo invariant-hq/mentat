@@ -75,6 +75,12 @@ val env : t -> name:string -> Charter_fire.env
     [charter <name>: ] — one resident process speaks for many charters, so
     the prefix is the line's provenance. *)
 
+val reconcile_env : t -> Charter_fire.env
+(** [reconcile_env t] is the pipeline environment for the reconcile fold's
+    drivers: the node's process-scoped effects with narration un-prefixed —
+    the fold speaks for many charters in one pass and prefixes each line
+    with the charter it concerns itself, exactly as {!val-env} would. *)
+
 val repo : t -> Charter_store.Loaded.t -> (Charter_fire.Repo.t, string) result
 (** [repo t loaded] is the per-fire connection to [loaded]'s repository:
     the injected GitHub reads over a client holding the charter's read

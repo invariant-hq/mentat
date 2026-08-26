@@ -17,8 +17,12 @@ val serve :
   spawned:bool ->
   web:bool ->
   web_port:int option ->
+  ingress_port:int option ->
+  github_base_url:string option ->
+  charter_git_url:string option ->
   Exit_status.t
-(** [serve ~socket_override ~spawned ~web ~web_port] runs the foreground daemon
+(** [serve ~socket_override ~spawned ~web ~web_port ~ingress_port
+    ~github_base_url ~charter_git_url] runs the foreground daemon
     and blocks until a signal stops it. It stages the shared per-user state,
     takes the [daemon.lock] claim (returning a {!Exit_status.Runtime_error}
     "already running" when it is held — the serialisation that collapses racing
@@ -32,6 +36,27 @@ val serve :
     connection lives only as long as the caller's own — and every other
     session reaches its owning instance, with idle instances evicted by the
     three-zeros rule.
+
+    The daemon is also the resident charter node ({!Node}): assembled at every
+    boot — charters register by file, so one installed while the daemon runs is
+    in force at its next event — with its ingress mounted on the wire listener,
+    its pump and the reconcile beat ({!Charter_reconcile.loop}) racing beside
+    the serve loop, and a boot reconcile pass run before the first delivery is
+    admitted, beside the child broker's rediscovery. A daemon that cannot
+    resolve its [mentat] sibling serves without the node, narrating that
+    charters will not run — unless [ingress_port] was given, which it could
+    never honor: a loud refusal to start. [github_base_url] and
+    [charter_git_url] are the node's validated configuration seams (the
+    [--github-base-url] and [--charter-git-url] flags), threaded to
+    {!Node.create}; the ambient [MENTAT_GITHUB_BASE_URL] is deliberately never
+    read.
+
+    [ingress_port] additionally binds a loopback listener carrying only the
+    pre-auth webhook ingress family ([0] takes an ephemeral port; the bound
+    address is printed to stdout) — the bind a webhook tunnel points at. Its
+    bearer token is generated and never disclosed and its handshake refuses
+    every workspace, so the listener exposes signature-verified delivery
+    custody and nothing else.
 
     [web] additionally binds a loopback listener serving the [mentat.web]
     browser frontend behind [Mentat_server.Web]'s shared edge (the cookie
@@ -48,4 +73,8 @@ val serve :
 
     The test-only environment variable [MENTAT_DAEMON_MAX_IDLE] (seconds) stops
     the daemon after that many continuous seconds with zero bound connections,
-    so a background daemon a blackbox test spawns cannot outlive the test. *)
+    so a background daemon a blackbox test spawns cannot outlive the test —
+    unless at least one enabled webhook charter is installed: the charter is a
+    standing commission, an idle-stop is a clean exit the service manager never
+    restarts, and a stopped node would bounce every later delivery, so such a
+    daemon never stops itself as idle. *)

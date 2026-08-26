@@ -330,9 +330,9 @@ let orphan_settles () =
   | receipts ->
       failf "expected spawned+reaped+alert, got %d receipts"
         (List.length receipts));
-  equal bool ~msg:"the settle is narrated" true
+  equal bool ~msg:"the settle is narrated under the charter's name" true
     (List.exists
-       (fun line -> String.length line >= 9 && String.sub line 0 9 = "recovered")
+       (String.starts_with ~prefix:"charter pr-review: recovered")
        !said);
   Charter_reconcile.reconcile env ~repo_for loaded;
   equal int ~msg:"a second pass finds nothing owed" 3
