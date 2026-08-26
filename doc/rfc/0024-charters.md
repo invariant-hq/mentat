@@ -792,6 +792,11 @@ a function of the run journals and the receipts.
   handshake contract — and adds its own transport auth outside the
   signature. The node verifies GitHub's HMAC itself, end-to-end; relay
   outage degrades to the sweep: latency lost, correctness kept.
+- **The node's GitHub base URL comes from validated configuration, never
+  ambient environment**: an env-writable API base redirects Bearer-token
+  requests, so the CLI publisher's `MENTAT_GITHUB_BASE_URL` seam (a test
+  and GHES override for an owner-run command) must not be inherited by
+  mentatd.
 
 ## 11. Amendments ledger
 
@@ -987,6 +992,7 @@ dogfood ≈ 5,700–8,400 LOC.**
 | TUI-private notify firing (§8) | ≈ −40 (one shared module; prevents a divergent second copy) | rung 1 |
 | Roadmap ladder rungs 3–5 → one design; goal doc surface | ≈ −50 prose; two future design campaigns collapsed into charter trigger arms | on landing |
 | Avoided outright | the ~300-LOC headless-band re-hosting (the node spawns `run start`); an in-node scheduler; a delivery/intent store; a second structured parser | by construction |
+| The `In_process` delegation arm (deletion candidate, amends 0018's compatibility clause) | the seam's second backend and its cross-backend golden upkeep; deleting it makes every subagent an OS process and delegation one story | after the broker lands and soaks: `In_process` re-justifies against its true rents (unit-tier delegation tests; the one-shot CLI's teardown policy) or goes |
 
 **The honest net:** the tree grows in the slice — ≈ **+1,700 to +3,600
 impl** (4,500–6,400 built against ≈2,800 deleted: goals −2,700,

@@ -18,10 +18,17 @@
   Method rule 2 no persisted derived state), `lib/store/run_lock.mli`,
   `otherlibs/subprocess`, and the code seams cited inline
 - Compatibility: additive. The in-process delegation path is byte-unchanged
-  and remains the single-process CLI default forever. Process children are
-  a composition-root backend choice behind one injected seam; a golden
-  spawn→wait→integrate journey must be identical across backends after
-  normalization of timing-dependent fields (§10).
+  and remains the single-process CLI default through the process backend's
+  landing. Process children are a composition-root backend choice behind
+  one injected seam; a golden spawn→wait→integrate journey must be
+  identical across backends after normalization of timing-dependent fields
+  (§10). (Amended by RFC 0024: "forever" was a compatibility promise, not
+  a derived design — once the brokered backend has landed and the golden
+  has proven it identical in real use, the in-process arm must re-justify
+  its existence against its true rents — deterministic unit-tier
+  delegation tests, and the one-shot CLI's unrepresentable-orphan teardown
+  — or be deleted, collapsing delegation to a single materialization
+  story. RFC 0024 §13 carries the trigger.)
 
 ## Summary
 
