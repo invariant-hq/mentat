@@ -186,15 +186,13 @@ let execute api (request : Publication.Request.t) =
   let path = request.Publication.Request.path in
   let body = request.Publication.Request.body in
   let line ?error status =
-    let fields =
-      [
-        ("label", Output.Json.string_or_null request.Publication.Request.label);
-        ("status", Output.Json.int status);
-      ]
-      @ match error with None -> [] | Some e -> [ ("error", Output.Json.string e) ]
-    in
     Output.stdout_printf "%s\n"
-      (Output.Json.to_string (Output.Json.envelope ~type_:"github.publish" fields))
+      (Output.Json.to_string
+         (Publication.Outcome.to_json
+            { Publication.Outcome.label = request.Publication.Request.label;
+              status;
+              error;
+            }))
   in
   let result =
     match request.Publication.Request.method_ with
@@ -210,7 +208,7 @@ let execute api (request : Publication.Request.t) =
       | Github_api.Error.Response { status; body } ->
           line ~error:body status;
           Ok false
-      | Github_api.Error.Transport _ | Github_api.Error.Unresolved_host _ ->
+      | Github_api.Error.Transport _ ->
           Error
             (Exit_status.runtime
                (Printf.sprintf "publish %s: %s" (request_name request)

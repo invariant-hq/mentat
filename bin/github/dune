@@ -1,6 +1,6 @@
 (library
  (name mentat_github)
- (modules github_api)
+ (modules github_api github_reads)
  (libraries
   cohttp
   cohttp-eio
@@ -9,4 +9,6 @@
   eio
   jsont
   jsont.bytesrw
+  mentat_connector
+  mentat_json
   mentat_llm_http))

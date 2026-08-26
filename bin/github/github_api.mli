@@ -8,10 +8,10 @@
     A thin, retry-free wrapper over the in-tree HTTPS stack: every request
     carries the caller's token as a [Bearer] authorization, the GitHub JSON
     accept header, and the pinned {!api_version}; every response body is read
-    under {!max_body_bytes} and refused past it. Non-[2xx] answers, transit
-    failures, and hosts the resolver rejects outright are the three error
-    classes ({!Error.type-kind}); there is no retry policy — a caller that
-    wants convergence re-observes and re-issues.
+    under {!max_body_bytes} and refused past it. Non-[2xx] answers and
+    failures to obtain a reply are the two error classes
+    ({!Error.type-kind}); there is no retry policy — a caller that wants
+    convergence re-observes and re-issues.
 
     The HTTP effect is one injected closure ({!type-http}): {!make} builds
     the production requester over the system trust store with per-request
@@ -33,14 +33,12 @@ module Error : sig
             every byte outside printable ASCII replaced by a space, so it is
             a single display- and JSON-safe line. *)
     | Transport of string
-        (** The request or its response failed in transit; the string is a
-            display-safe reason. Also covers a response body over
-            {!max_body_bytes} and a [2xx] body that is not JSON. *)
-    | Unresolved_host of string
-        (** The host name has no address. Distinguished from {!Transport}
-            because a retry reaches the same answer: the resolver rejected
-            the name itself, rather than failing in a way a later attempt
-            could survive. *)
+        (** No reply was obtained; the string is a display-safe reason.
+            Covers transit failures, a host the resolver rejects, a
+            response body over {!max_body_bytes}, and a [2xx] body that is
+            not JSON. An unresolvable-host arm would earn its place back
+            the day a retry policy wants to skip retrying it; no consumer
+            retries today. *)
 
   type t
   (** The type for client errors. *)
@@ -57,9 +55,6 @@ module Error : sig
   val transport : string -> t
   (** [transport reason] is a {!Transport} error — the constructor a
       {!type-http} closure reports transit failures with. *)
-
-  val unresolved_host : string -> t
-  (** [unresolved_host reason] is an {!Unresolved_host} error. *)
 end
 
 (** {1:clients Clients} *)
@@ -83,9 +78,8 @@ type http =
   (reply, Error.t) result
 (** An HTTP requester. It sends one request and returns the raw reply for
     whatever status the server answered; only a failure to obtain a reply is
-    an error, reported through {!Error.transport} or
-    {!Error.unresolved_host}. Status interpretation, the body bound, and
-    pagination all sit above the closure. *)
+    an error, reported through {!Error.transport}. Status interpretation,
+    the body bound, and pagination all sit above the closure. *)
 
 type t
 (** The type for GitHub clients. A client holds its requester, token, and API

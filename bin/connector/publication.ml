@@ -3,7 +3,7 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-module Error = Decode.Error
+module Error = Mentat_json.Error
 
 module Diff = struct
   (* Per new-side file: the hunks as inclusive new-side intervals, in diff
@@ -239,10 +239,18 @@ module Marker = struct
     Printf.sprintf "<!-- mentat-finding:%s origin=%s -->"
       (Review_finding.Fingerprint.to_hex fingerprint)
       origin
-end
 
-module Posted = struct
-  type t = { fingerprints : string list; summary_id : int option }
+  (* Uppercase folds down, every other byte outside the grammar to '-'.
+     ':' is deliberately not preserved: it is the composer's separator,
+     never the folded name's. *)
+  let origin_of_name name =
+    String.map
+      (fun c ->
+        if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || Char.equal c '-'
+        then c
+        else if c >= 'A' && c <= 'Z' then Char.lowercase_ascii c
+        else '-')
+      name
 
   let finding_opener = "<!-- mentat-finding:"
   let summary_opener = "<!-- mentat-review"
@@ -309,6 +317,13 @@ module Posted = struct
     in
     scan 0
 
+  let marks body =
+    (not (List.is_empty (body_fingerprints body))) || has_summary_marker body
+end
+
+module Posted = struct
+  type t = { fingerprints : string list; summary_id : int option }
+
   let ( let* ) = Result.bind
   let error ~context reason = Error (Error.make ~context reason)
 
@@ -319,7 +334,7 @@ module Posted = struct
         let* id =
           match Jsont.Json.find_mem "id" mems with
           | Some (_, json) ->
-              Decode.positive_int ~context:(context ^ ".id") json
+              Mentat_json.positive_int ~context:(context ^ ".id") json
           | None -> error ~context {|missing member "id"|}
         in
         let* body =
@@ -346,12 +361,12 @@ module Posted = struct
         in
         let entries = List.rev entries in
         let fingerprints =
-          List.concat_map (fun (_, body) -> body_fingerprints body) entries
+          List.concat_map (fun (_, body) -> Marker.body_fingerprints body) entries
         in
         let summary_id =
           List.find_map
             (fun (id, body) ->
-              if has_summary_marker body then Some id else None)
+              if Marker.has_summary_marker body then Some id else None)
             entries
         in
         Ok { fingerprints; summary_id }
@@ -521,6 +536,66 @@ module Envelope = struct
         in
         Ok { threads; summary; threads_safe })
     | Ok _ -> error ~context:"envelope" "must be a JSON object"
+end
+
+(* The poster's per-request outcome line. Emit and fold live together on the
+   type, like [Envelope]'s two ends, so the pipeline reading a poster child's
+   output can never drift from what the poster wrote. *)
+module Outcome = struct
+  type t = { label : string option; status : int; error : string option }
+
+  let type_ = "github.publish"
+
+  let to_json t =
+    let mem name value = Jsont.Json.mem (Jsont.Json.name name) value in
+    Jsont.Json.object'
+      ([
+         mem "schema_version" (Jsont.Json.int 1);
+         mem "type" (Jsont.Json.string type_);
+         mem "label"
+           (match t.label with
+           | Some label -> Jsont.Json.string label
+           | None -> Jsont.Json.null ());
+         mem "status" (Jsont.Json.int t.status);
+       ]
+      @
+      match t.error with
+      | None -> []
+      | Some error -> [ mem "error" (Jsont.Json.string error) ])
+
+  (* The outcome lines of a poster's output: any line that is not one — a
+     stray diagnostic, a torn tail — is passed over, since the folds answer
+     what landed, not whether the log is tidy. *)
+  let lines bytes =
+    List.filter_map
+      (fun line ->
+        match Mentat_json.Lenient.decode line with
+        | Some json
+          when Option.bind (Mentat_json.Lenient.mem "type" json)
+                 Mentat_json.Lenient.string
+               = Some type_ ->
+            Some json
+        | Some _ | None -> None)
+      (String.split_on_char '\n' bytes)
+
+  let two_xx json =
+    match
+      Option.bind (Mentat_json.Lenient.mem "status" json)
+        Mentat_json.Lenient.number
+    with
+    | Some v -> v >= 200.0 && v < 300.0
+    | None -> false
+
+  let labeled json =
+    match Mentat_json.Lenient.mem "label" json with
+    | Some (Jsont.Null _) | None -> false
+    | Some _ -> true
+
+  let threads_posted bytes =
+    List.length (List.filter (fun j -> labeled j && two_xx j) (lines bytes))
+
+  let summary_ok bytes =
+    List.exists (fun j -> (not (labeled j)) && two_xx j) (lines bytes)
 end
 
 (* Model-authored text reaches a rendered comment only through [neutral], so

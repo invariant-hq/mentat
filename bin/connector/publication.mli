@@ -138,6 +138,21 @@ module Marker : sig
   (** [finding ~origin fp] tags a finding thread with the fingerprint [fp],
       rendered as its 16 hexadecimal characters, and the publishing [origin]
       (same token grammar and raise as {!summary}). *)
+
+  val origin_of_name : string -> string
+  (** [origin_of_name name] folds an arbitrary name onto the origin token
+      grammar: uppercase letters fold down, and every other byte outside
+      lowercase letters, digits, and [-] becomes [-] — [:] included, since
+      it is a composer's separator, never the folded name's. The result is
+      empty exactly when [name] is; a composer prefixing its own non-empty
+      token (["charter:" ^ ...]) always builds a valid origin. *)
+
+  val marks : string -> bool
+  (** [marks body] is [true] iff [body] carries a marker of this grammar —
+      a finding marker or a summary marker, bare or origin-bearing. Comment
+      listings are filtered on it (with an author check: marker presence
+      alone is forgeable), so the filter can never drift from the grammar
+      the markers are written in. *)
 end
 
 (** The publisher's comments already on the pull request. *)
@@ -218,6 +233,37 @@ module Envelope : sig
       foreign [type], a malformed member, or a request that fails
       {!Request.of_json} is an [Error] naming the offending part; unknown
       members are ignored. *)
+end
+
+(** The poster's per-request outcome line — the one wire format between
+    [github publish]'s output and whatever reaps it. Emit and fold live
+    together here so the pipe's two ends cannot drift. *)
+module Outcome : sig
+  type t = {
+    label : string option;
+        (** The posted finding's fingerprint in hexadecimal; [None] for the
+            summary request. *)
+    status : int;  (** The HTTP status the request was answered with. *)
+    error : string option;
+        (** A short excerpt of a non-[2xx] answer's body, when one was
+            kept. *)
+  }
+  (** The type for outcome lines. *)
+
+  val to_json : t -> Jsont.json
+  (** [to_json t] is the outcome line's wire object: [schema_version]
+      (always [1]), [type] (always ["github.publish"]), [label] (string or
+      null), [status], and [error] when present, in that order. *)
+
+  val threads_posted : string -> int
+  (** [threads_posted bytes] counts the thread requests the poster output
+      [bytes] reports answered [2xx] — the labeled lines; the summary line
+      carries a null label and is not a thread. Lines that are not outcome
+      lines are passed over. *)
+
+  val summary_ok : string -> bool
+  (** [summary_ok bytes] is [true] iff the poster output [bytes] reports
+      the summary request — the null-labeled line — answered [2xx]. *)
 end
 
 type t

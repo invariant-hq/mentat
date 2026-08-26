@@ -860,6 +860,65 @@ let envelope_refuses_hostile_paths () =
 
 (* Suite. *)
 
+(* The poster's outcome line: the emitted wire shape and the folds a reaper
+   reads it back with, one custody. *)
+let outcome_lines_and_folds () =
+  let encode outcome =
+    match
+      Jsont_bytesrw.encode_string Jsont.json
+        (Publication.Outcome.to_json outcome)
+    with
+    | Ok line -> line
+    | Error reason -> failf "outcome failed to encode: %s" reason
+  in
+  equal string ~msg:"a labeled 2xx line"
+    {|{"schema_version":1,"type":"github.publish","label":"aa11","status":201}|}
+    (encode { Publication.Outcome.label = Some "aa11"; status = 201; error = None });
+  equal string ~msg:"a refused summary line carries its excerpt"
+    {|{"schema_version":1,"type":"github.publish","label":null,"status":422,"error":"refused"}|}
+    (encode
+       { Publication.Outcome.label = None; status = 422; error = Some "refused" });
+  let log =
+    String.concat "\n"
+      [
+        encode { Publication.Outcome.label = Some "aa11"; status = 201; error = None };
+        encode
+          {
+            Publication.Outcome.label = Some "bb22";
+            status = 422;
+            error = Some "refused";
+          };
+        encode { Publication.Outcome.label = None; status = 200; error = None };
+        "not an outcome line";
+      ]
+  in
+  equal int ~msg:"one thread answered 2xx" 1
+    (Publication.Outcome.threads_posted log);
+  is_true ~msg:"the summary landed" (Publication.Outcome.summary_ok log);
+  is_false ~msg:"a refused summary is not ok"
+    (Publication.Outcome.summary_ok
+       (encode { Publication.Outcome.label = None; status = 502; error = None }));
+  equal int ~msg:"an empty log posted nothing" 0
+    (Publication.Outcome.threads_posted "")
+
+let marker_predicates () =
+  let fp =
+    Review_finding.Fingerprint.of_finding ~path:"a.ml" ~anchor:"x" ~title:"t"
+  in
+  is_true ~msg:"a finding marker marks"
+    (Publication.Marker.marks
+       ("before " ^ Publication.Marker.finding ~origin:"ci" fp ^ " after"));
+  is_true ~msg:"a summary marker marks"
+    (Publication.Marker.marks (Publication.Marker.summary ~origin:"charter:x"));
+  is_false ~msg:"plain prose does not mark"
+    (Publication.Marker.marks "an ordinary comment, <!-- but not ours -->");
+  equal string ~msg:"origin folding lowercases and dashes foreign bytes"
+    "my-review--v2" (Publication.Marker.origin_of_name "My_Review!.v2");
+  equal string ~msg:"a folded name composes into a valid origin"
+    "<!-- mentat-review origin=charter:pr-review -->"
+    (Publication.Marker.summary
+       ~origin:("charter:" ^ Publication.Marker.origin_of_name "PR-Review"))
+
 let () =
   run "mentat.publication"
     [
@@ -903,4 +962,7 @@ let () =
         envelope_round_trips;
       test "envelope decode refuses paths that could escape the repository"
         envelope_refuses_hostile_paths;
+      test "outcome lines emit and fold with one custody"
+        outcome_lines_and_folds;
+      test "marker predicates recognize and fold origins" marker_predicates;
     ]

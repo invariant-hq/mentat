@@ -20,10 +20,7 @@ let excerpt body =
   String.map (fun c -> if c >= ' ' && c <= '~' then c else ' ') body
 
 module Error = struct
-  type kind =
-    | Response of { status : int; body : string }
-    | Transport of string
-    | Unresolved_host of string
+  type kind = Response of { status : int; body : string } | Transport of string
 
   type t = kind
 
@@ -35,11 +32,9 @@ module Error = struct
           Printf.sprintf "GitHub API responded %d" status
         else Printf.sprintf "GitHub API responded %d: %s" status body
     | Transport reason -> reason
-    | Unresolved_host reason -> reason
 
   let pp ppf t = Format.pp_print_string ppf (message t)
   let transport reason = Transport reason
-  let unresolved_host reason = Unresolved_host reason
 end
 
 type reply = { status : int; headers : (string * string) list; body : string }
@@ -204,9 +199,9 @@ let requester client : http =
   | Eio.Cancel.Cancelled _ as exn -> raise exn
   | exn -> (
       match Mentat_llm_http.error_of_exn exn with
-      | Mentat_llm_http.Unresolved_host reason ->
-          Error (Error.unresolved_host reason)
-      | Mentat_llm_http.Transport reason -> Error (Error.transport reason)
+      | Mentat_llm_http.Unresolved_host reason
+      | Mentat_llm_http.Transport reason ->
+          Error (Error.transport reason)
       (* [error_of_exn] never mints [Response]; the arm keeps the match
          total. *)
       | Mentat_llm_http.Response _ ->

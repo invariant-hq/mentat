@@ -58,7 +58,6 @@ let kind_name error =
   match Github_api.Error.kind error with
   | Github_api.Error.Response { status; _ } -> Printf.sprintf "response %d" status
   | Github_api.Error.Transport _ -> "transport"
-  | Github_api.Error.Unresolved_host _ -> "unresolved-host"
 
 let get_builds_the_request () =
   let calls, http = scripted [ reply 200 {|{"ok":true}|} ] in
@@ -265,11 +264,7 @@ let transport_errors_pass_through () =
   | _ -> failf "expected a transport error, got %s" (kind_name error));
   equal string ~msg:"transport messages pass through verbatim"
     "connection refused"
-    (Github_api.Error.message error);
-  let unresolved = Github_api.Error.unresolved_host "no address" in
-  match Github_api.Error.kind unresolved with
-  | Github_api.Error.Unresolved_host reason -> equal string "no address" reason
-  | _ -> fail "expected an unresolved-host error"
+    (Github_api.Error.message error)
 
 (* Suite. *)
 
