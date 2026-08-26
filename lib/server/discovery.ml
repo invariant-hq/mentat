@@ -141,7 +141,11 @@ let clear ~dir ~pid =
    ([Unix.create_process] spawn, a socket handshake probe, a clock sleep). *)
 
 type 'conn outcome =
-  [ `Attached of 'conn | `Mismatch of t | `Foreign_held | `Timeout ]
+  [ `Attached of 'conn
+  | `Mismatch of t
+  | `Foreign_held
+  | `Spawn_refused of string
+  | `Timeout ]
 
 let locate ~read ~claim_free ~probe ~identity_ok ~spawn ~sleep ~poll_budget =
   (* After a spawn (or while a starting daemon has not yet written its socket),
@@ -165,6 +169,14 @@ let locate ~read ~claim_free ~probe ~identity_ok ~spawn ~sleep ~poll_budget =
           sleep ();
           poll (n - 1)
   in
+  (* A spawn that reports it could not launch anything settles the attempt
+     immediately: no poll is spent waiting for a daemon that was never
+     started, and the refusal reaches the caller verbatim. *)
+  let spawn_then_poll () =
+    match spawn () with
+    | Ok () -> poll poll_budget
+    | Error reason -> `Spawn_refused reason
+  in
   let attempt () =
     match read () with
     | `Found record -> (
@@ -176,30 +188,25 @@ let locate ~read ~claim_free ~probe ~identity_ok ~spawn ~sleep ~poll_budget =
             (* Not answering: a free claim means the recorded daemon is dead —
                a stale file, reclaimed by spawning the current binary; a
                held claim means it is still starting, so poll. *)
-            if claim_free () then (
-              spawn ();
-              poll poll_budget)
-            else poll poll_budget)
-    | `Absent ->
-        spawn ();
-        poll poll_budget
+            if claim_free () then spawn_then_poll () else poll poll_budget)
+    | `Absent -> spawn_then_poll ()
     | `Foreign _ ->
         (* An unknown-version or undecodable file: reclaim it only when its
            claim is free (a dead daemon left it); a held claim is a live daemon
            we cannot speak to — refuse, never clobber. *)
-        if claim_free () then (
-          spawn ();
-          poll poll_budget)
-        else `Foreign_held
+        if claim_free () then spawn_then_poll () else `Foreign_held
   in
   match attempt () with
-  | (`Attached _ | `Mismatch _ | `Foreign_held) as settled -> settled
+  | (`Attached _ | `Mismatch _ | `Foreign_held | `Spawn_refused _) as settled ->
+      settled
   | `Timeout -> (
       (* D4 step 4: one full retry covers a winner that died between taking the
          claim and writing the file — its lock died with it, so the next
          read/claim reflects the vacancy. *)
       match attempt () with
-      | (`Attached _ | `Mismatch _ | `Foreign_held) as settled -> settled
+      | (`Attached _ | `Mismatch _ | `Foreign_held | `Spawn_refused _) as
+        settled ->
+          settled
       | `Timeout -> `Timeout)
 
 (* [MENTAT_DAEMON_SOCKET] beats discovery entirely (dune's [DUNE_RPC]

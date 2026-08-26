@@ -2634,7 +2634,9 @@ let find_or_spawn_group =
               ~claim_free:(fun () -> false)
               ~probe:(fun _ -> Some "driver")
               ~identity_ok:(fun _ -> true)
-              ~spawn:(fun () -> incr spawned)
+              ~spawn:(fun () ->
+                incr spawned;
+                Ok ())
               ~sleep:(fun () -> ())
               ~poll_budget:10
           with
@@ -2655,7 +2657,9 @@ let find_or_spawn_group =
               ~probe:(fun _ -> fail "the discovery probe must not run")
               ~identity_ok:(fun _ ->
                 fail "no identity check beyond the handshake")
-              ~spawn:(fun () -> incr spawned)
+              ~spawn:(fun () ->
+                incr spawned;
+                Ok ())
               ~sleep:(fun () -> ())
               ~poll_budget:10
           with
@@ -2677,7 +2681,9 @@ let find_or_spawn_group =
               ~claim_free:(fun () -> fail "the claim must not be consulted")
               ~probe:(fun _ -> fail "the discovery probe must not run")
               ~identity_ok:(fun _ -> fail "no identity check")
-              ~spawn:(fun () -> incr spawned)
+              ~spawn:(fun () ->
+                incr spawned;
+                Ok ())
               ~sleep:(fun () -> ())
               ~poll_budget:10
           with
@@ -2696,7 +2702,8 @@ let find_or_spawn_group =
               ~identity_ok:(fun _ -> true)
               ~spawn:(fun () ->
                 incr spawned;
-                up := true)
+                up := true;
+                Ok ())
               ~sleep:(fun () -> ())
               ~poll_budget:10
           with
@@ -2716,7 +2723,9 @@ let find_or_spawn_group =
                 incr probes;
                 if !probes >= 3 then Some "driver" else None)
               ~identity_ok:(fun _ -> true)
-              ~spawn:(fun () -> incr spawned)
+              ~spawn:(fun () ->
+                incr spawned;
+                Ok ())
               ~sleep:(fun () -> ())
               ~poll_budget:10
           with
@@ -2736,7 +2745,8 @@ let find_or_spawn_group =
               ~identity_ok:(fun _ -> true)
               ~spawn:(fun () ->
                 incr spawned;
-                up := true)
+                up := true;
+                Ok ())
               ~sleep:(fun () -> ())
               ~poll_budget:10
           with
@@ -2752,7 +2762,9 @@ let find_or_spawn_group =
               ~claim_free:(fun () -> false)
               ~probe:(fun _ -> Some "driver")
               ~identity_ok:(fun _ -> false)
-              ~spawn:(fun () -> incr spawned)
+              ~spawn:(fun () ->
+                incr spawned;
+                Ok ())
               ~sleep:(fun () -> ())
               ~poll_budget:10
           with
@@ -2768,7 +2780,9 @@ let find_or_spawn_group =
               ~claim_free:(fun () -> false)
               ~probe:(fun _ -> Some "driver")
               ~identity_ok:(fun _ -> true)
-              ~spawn:(fun () -> incr spawned)
+              ~spawn:(fun () ->
+                incr spawned;
+                Ok ())
               ~sleep:(fun () -> ())
               ~poll_budget:10
           with
@@ -2792,7 +2806,8 @@ let find_or_spawn_group =
               ~identity_ok:(fun _ -> false)
               ~spawn:(fun () ->
                 incr spawned;
-                up := true)
+                up := true;
+                Ok ())
               ~sleep:(fun () -> ())
               ~poll_budget:10
           with
@@ -2816,7 +2831,9 @@ let find_or_spawn_group =
                 incr probes;
                 if !probes > 3 then Some "driver" else None)
               ~identity_ok:(fun _ -> true)
-              ~spawn:(fun () -> incr spawned)
+              ~spawn:(fun () ->
+                incr spawned;
+                Ok ())
               ~sleep:(fun () -> ())
               ~poll_budget:2
           with
@@ -2832,13 +2849,34 @@ let find_or_spawn_group =
               ~claim_free:(fun () -> true)
               ~probe:(fun _ -> None)
               ~identity_ok:(fun _ -> true)
-              ~spawn:(fun () -> incr spawned)
+              ~spawn:(fun () ->
+                incr spawned;
+                Ok ())
               ~sleep:(fun () -> ())
               ~poll_budget:3
           with
           | `Timeout ->
               equal int ~msg:"both attempts spawned before giving up" 2 !spawned
           | _ -> fail "an unreachable spawned daemon must time out");
+      test
+        "a spawn that cannot resolve its binary settles at once, with no poll"
+        (fun () ->
+          let reads = ref 0 in
+          match
+            Server.Discovery.locate
+              ~read:(fun () ->
+                incr reads;
+                `Absent)
+              ~claim_free:(fun () -> true)
+              ~probe:(fun _ -> fail "nothing was spawned, nothing to probe")
+              ~identity_ok:(fun _ -> true)
+              ~spawn:(fun () -> Error "the mentatd binary is missing")
+              ~sleep:(fun () -> fail "no poll pacing after a refused spawn")
+              ~poll_budget:10
+          with
+          | `Spawn_refused "the mentatd binary is missing" ->
+              equal int ~msg:"one read, no retry of the whole attempt" 1 !reads
+          | _ -> fail "a refused spawn must settle as Spawn_refused");
     ]
 
 let web_edge_group =
@@ -3073,11 +3111,13 @@ let signed_headers ?(secret = ingress_secret) body =
     ("X-Hub-Signature-256", signature_of ~secret body);
   ]
 
-(* A scripted ingress: every id resolves to the one charter (or [Unknown]),
-   recording the resolved ids; [deliver] records what it was handed custody of
-   before answering [outcome]. *)
+(* A scripted ingress: every id resolves to the one configuration (or
+   [Unknown]), recording the resolved ids; [deliver] records what it was
+   handed custody of before answering [outcome]. [on_headers] observes the
+   two GitHub identity headers each delivery carried; [on_rejected] is the
+   401 observer, absent by default. *)
 let scripted_ingress ?(known = true) ?(enabled = true) ?(outcome = `Accepted)
-    ~secret () =
+    ?on_headers ?on_rejected ~secret () =
   let resolved = ref [] in
   let deliveries = ref [] in
   let ingress =
@@ -3085,12 +3125,16 @@ let scripted_ingress ?(known = true) ?(enabled = true) ?(outcome = `Accepted)
       Server.Ingress.resolve =
         (fun ~ingress_id ->
           resolved := ingress_id :: !resolved;
-          if known then Server.Ingress.Charter { secret; enabled }
+          if known then Server.Ingress.Resolved { secret; enabled }
           else Server.Ingress.Unknown);
       deliver =
-        (fun ~ingress_id ~enabled ~body ->
+        (fun ~ingress_id ~enabled ~event ~delivery_id ~body ->
           deliveries := (ingress_id, enabled, body) :: !deliveries;
+          (match on_headers with
+          | None -> ()
+          | Some observe -> observe ~event ~delivery_id);
           outcome);
+      rejected = on_rejected;
     }
   in
   (ingress, resolved, deliveries)
@@ -3379,6 +3423,125 @@ let ingress_group =
               equal string ~msg:"the 500 is content-free" "" rbody;
               equal int ~msg:"the delivery reached the callback once" 1
                 (List.length !deliveries)));
+      test "the GitHub identity headers ride through to deliver, unverified"
+        (fun () ->
+          let seen = ref [] in
+          let ingress, _, deliveries =
+            scripted_ingress
+              ~on_headers:(fun ~event ~delivery_id ->
+                seen := (event, delivery_id) :: !seen)
+              ~secret:ingress_secret ()
+          in
+          with_ingress_server ~ingress (fun ~net ~sw ~dir ->
+              (* The HMAC covers the body only, so the headers verify nothing
+                 and ride through as received. *)
+              let status, _ =
+                ingress_post ~net ~dir ~sw
+                  ~headers:
+                    (("X-GitHub-Event", "ping")
+                    :: ("X-GitHub-Delivery", "72d3162e-cc78-11e3")
+                    :: signed_headers "{}")
+                  ingress_path "{}"
+              in
+              equal int ~msg:"delivered" 202 status;
+              let status, _ =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers "{}")
+                  ingress_path "{}"
+              in
+              equal int ~msg:"headerless is still a delivery" 202 status;
+              equal int ~msg:"two deliveries" 2 (List.length !deliveries);
+              match List.rev !seen with
+              | [ (event, delivery_id); (none_event, none_delivery) ] ->
+                  equal (option string) ~msg:"the event header rode through"
+                    (Some "ping") event;
+                  equal (option string) ~msg:"the delivery id rode through"
+                    (Some "72d3162e-cc78-11e3") delivery_id;
+                  equal (option string) ~msg:"an absent event header is None"
+                    None none_event;
+                  equal (option string)
+                    ~msg:"an absent delivery header is None" None none_delivery
+              | l -> failf "expected two header records, saw %d" (List.length l)));
+      test "the rejection hook fires on the 401 path only" (fun () ->
+          let rejections = ref [] in
+          let on_rejected ~ingress_id = rejections := ingress_id :: !rejections in
+          let ingress, _, _ =
+            scripted_ingress ~on_rejected ~secret:ingress_secret ()
+          in
+          with_ingress_server ~ingress (fun ~net ~sw ~dir ->
+              (* A forged signature on a resolved id: exactly one firing. *)
+              let status, _ =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers "other bytes")
+                  ingress_path "{}"
+              in
+              equal int ~msg:"forged is 401" 401 status;
+              equal (list string) ~msg:"the hook saw the refused id"
+                [ "charter-1" ] !rejections;
+              (* An oversized body is a 413, never a rejection. *)
+              let over = String.make ((1024 * 1024) + 1) 'x' in
+              let status, _ =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers over)
+                  ingress_path over
+              in
+              equal int ~msg:"oversized is 413" 413 status;
+              (* A verified delivery is never a rejection. *)
+              let status, _ =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers "{}")
+                  ingress_path "{}"
+              in
+              equal int ~msg:"verified is 202" 202 status;
+              equal (list string) ~msg:"the 413 and the 202 fired nothing"
+                [ "charter-1" ] !rejections);
+          (* An unknown id is a 404, never a rejection. *)
+          let ingress, _, _ =
+            scripted_ingress ~known:false ~on_rejected ~secret:ingress_secret
+              ()
+          in
+          rejections := [];
+          with_ingress_server ~ingress (fun ~net ~sw ~dir ->
+              let status, _ =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers "other bytes")
+                  ingress_path "{}"
+              in
+              equal int ~msg:"unknown is 404" 404 status;
+              equal (list string) ~msg:"the 404 fired nothing" [] !rejections));
+      test "a raising deliver is caught into a content-free 500" (fun () ->
+          let calls = ref 0 in
+          let ingress =
+            {
+              Server.Ingress.resolve =
+                (fun ~ingress_id:_ ->
+                  Server.Ingress.Resolved
+                    { secret = ingress_secret; enabled = true });
+              deliver =
+                (fun ~ingress_id:_ ~enabled:_ ~event:_ ~delivery_id:_ ~body:_ ->
+                  incr calls;
+                  failwith "receipts.jsonl: disk gone");
+              rejected = None;
+            }
+          in
+          with_ingress_server ~ingress (fun ~net ~sw ~dir ->
+              let status, rbody =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers "{}")
+                  ingress_path "{}"
+              in
+              equal int ~msg:"the raise is answered as 500, not torn" 500
+                status;
+              equal string ~msg:"the 500 is content-free" "" rbody;
+              equal int ~msg:"deliver ran once" 1 !calls;
+              (* The connection machinery survives: a second request is
+                 answered normally. *)
+              let status, _ =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers "{}")
+                  ingress_path "{}"
+              in
+              equal int ~msg:"the server still answers" 500 status));
       test "everything else under the prefix is a content-free 404" (fun () ->
           let ingress, _, deliveries =
             scripted_ingress ~secret:ingress_secret ()

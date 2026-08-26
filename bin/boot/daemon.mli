@@ -56,7 +56,7 @@ val find_or_spawn :
     workspace, spawning the daemon if none is reachable. It reads [daemon.json];
     a {b live} daemon (its socket answers a handshake) whose recorded binary or
     config home differs from [t]'s is a loud {!Exit_status.Runtime_error} naming
-    [mentatd --stop] (never auto-killed); a matching live daemon is attached. A
+    [mentatd stop] (never auto-killed); a matching live daemon is attached. A
     stale file (free claim, dead socket) or an absent file spawns
     [mentatd --spawned] detached — stdio to [daemon.log], the current
     environment inherited so the daemon opens the same store — then polls

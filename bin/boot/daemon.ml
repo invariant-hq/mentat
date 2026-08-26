@@ -67,9 +67,17 @@ let rotate_daemon_log dirs log =
 let resolve_mentatd () =
   (* [Sys.file_exists] alone would accept a directory — which a build tree has
      at exactly this path ([bin/mentatd/] holding the executable) — and an
-     exec of a directory fails only in the forked child, invisibly. *)
+     exec of a directory fails only in the forked child, invisibly. So would a
+     present-but-non-executable file: [Unix.create_process] reports its exec
+     failure only in the child too, so execute permission must be checked
+     here, loudly, rather than surface as a spawn that never converges. *)
   let is_program path =
-    Sys.file_exists path && not (Sys.is_directory path)
+    Sys.file_exists path
+    && (not (Sys.is_directory path))
+    &&
+    match Unix.access path [ Unix.X_OK ] with
+    | () -> true
+    | exception Unix.Unix_error _ -> false
   in
   match Sys.getenv_opt "MENTATD_BIN" with
   | Some bin when not (String.equal bin "") ->
@@ -162,20 +170,14 @@ let find_or_spawn t =
     String.equal record.Discovery.binary binary_version
     && String.equal record.Discovery.config_home (User_dirs.config_home dirs)
   in
-  (* A spawn that cannot resolve the daemon binary records its refusal instead
-     of launching anything; [sleep] then stops pacing so the poll budget burns
-     through at once and the [`Timeout] below surfaces the refusal — a loud,
-     immediate error, never a full poll cycle waiting for a daemon that was
-     never started. *)
-  let spawn_refusal = ref None in
   let spawn () =
     match resolve_mentatd () with
-    | Ok bin -> spawn dirs ~bin
-    | Error message -> spawn_refusal := Some message
+    | Ok bin ->
+        spawn dirs ~bin;
+        Ok ()
+    | Error message -> Error message
   in
-  let sleep () =
-    if Option.is_none !spawn_refusal then Eio.Time.sleep clock 0.05
-  in
+  let sleep () = Eio.Time.sleep clock 0.05 in
   (* MENTAT_DAEMON_SOCKET beats discovery: connect straight to the named socket
      (its [mentat.sock] path), no daemon.json read and no spawn. A named socket
      that does not answer is a definite failure, not a fallback that spawns. *)
@@ -196,27 +198,25 @@ let find_or_spawn t =
       Error
         (Exit_status.runtime
            "the running mentat daemon was built from a different binary or \
-            config home; run `mentatd --stop` to replace it")
+            config home; run `mentatd stop` to replace it")
   | `Foreign_held ->
       Error
         (Exit_status.runtime
            "an unrecognized mentat daemon file is present and its claim is \
-            held; run `mentatd --stop`")
+            held; run `mentatd stop`")
+  | `Spawn_refused message -> Error (Exit_status.runtime message)
   | `Timeout ->
       Error
         (Exit_status.runtime
-           (match !spawn_refusal with
-           | Some message -> message
-           | None -> (
-               match Sys.getenv_opt "MENTAT_DAEMON_SOCKET" with
-               | Some socket when not (String.equal socket "") ->
-                   Printf.sprintf
-                     "the mentat daemon named by MENTAT_DAEMON_SOCKET (%s) \
-                      did not answer"
-                     socket
-               | _ ->
-                   Printf.sprintf "the mentat daemon did not come up; see %s"
-                     (daemon_log_path dirs))))
+           (match Sys.getenv_opt "MENTAT_DAEMON_SOCKET" with
+           | Some socket when not (String.equal socket "") ->
+               Printf.sprintf
+                 "the mentat daemon named by MENTAT_DAEMON_SOCKET (%s) did \
+                  not answer"
+                 socket
+           | _ ->
+               Printf.sprintf "the mentat daemon did not come up; see %s"
+                 (daemon_log_path dirs)))
 
 (* ---- Stop ---- *)
 

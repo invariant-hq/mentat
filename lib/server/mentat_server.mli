@@ -145,46 +145,63 @@ val port : listener -> int option
 
 module Ingress : sig
   type resolution =
-    | Charter of { secret : string; enabled : bool }
-        (** The charter answering to an ingress id: the webhook secret its
-            deliveries are verified against, and whether it is enabled. A
-            disabled charter {b still verifies} against the retained secret —
-            disabling is owner intent, not hook failure, and an unverified
-            delivery must not be able to observe even that much — and [enabled]
-            is passed through to {!t.deliver} unread, so interpreting it (a
-            skipped-disabled receipt, say) stays with the callback. *)
+    | Resolved of { secret : string; enabled : bool }
+        (** The configuration answering to an ingress id: the webhook secret
+            its deliveries are verified against, and whether it is enabled. A
+            disabled configuration {b still verifies} against the retained
+            secret — disabling is owner intent, not hook failure, and an
+            unverified delivery must not be able to observe even that much —
+            and [enabled] is passed through to {!t.deliver} unread, so
+            interpreting it (a skipped-disabled receipt, say) stays with the
+            callback. *)
     | Unknown
-        (** No charter answers to the id (never minted, or removed): a
+        (** Nothing answers to the id (never minted, or removed): a
             content-free [404]. *)
-  (** The type for the resolver's answer: one consistent charter snapshot —
-      secret and enabled state read together — that both the verification and
-      the delivery of a single request use. *)
+  (** The type for the resolver's answer: one consistent snapshot — secret and
+      enabled state read together — that both the verification and the
+      delivery of a single request use. *)
 
   type t = {
     resolve : ingress_id:string -> resolution;
-        (** Resolve an ingress id to its charter snapshot. Called once per
+        (** Resolve an ingress id to its snapshot. Called once per
             syntactically well-formed request, before the body is read. *)
     deliver :
       ingress_id:string ->
       enabled:bool ->
+      event:string option ->
+      delivery_id:string option ->
       body:string ->
       [ `Accepted | `Refused of string ];
         (** Take custody of one {b verified} delivery: [body] is the exact raw
             bytes the signature was checked over, [enabled] the snapshot
             {!resolve} answered (so the decision is made on the state the
-            signature was verified under, without a second resolve).
+            signature was verified under, without a second resolve). [event]
+            and [delivery_id] are the [X-GitHub-Event] and [X-GitHub-Delivery]
+            header values as received, [None] when absent; {b headers are not
+            covered by the body HMAC}, so both ride through unverified —
+            useful identity for receipts (a [ping] versus a [pull_request], a
+            delivery GUID before any payload decodes), never trusted input.
             [`Accepted] means custody is durable — answered as [202]
             immediately, before any interpretation work. [`Refused reason]
             means it is not (a receipt that cannot be written): answered as a
             content-free [500] so the sender retries or its log shows the
             failure; [reason] is logged, never sent. Report failure as
-            [`Refused], never by raising: a raise tears down the connection
-            with no response at all. *)
+            [`Refused], never by raising — though a raise is caught into a
+            content-free [500] with the exception logged, so it can never
+            tear the connection down responseless. *)
+    rejected : (ingress_id:string -> unit) option;
+        (** Observe one delivery refused as a [401] — an absent, undecodable,
+            or mismatched signature on a resolved id. [None] ignores
+            refusals; the family still answers the [401] either way. The hook
+            fires on the [401] path only — never for an [Unknown] id ([404])
+            or an oversized body ([413]) — so a counter behind it meters
+            exactly the forged-delivery pressure on a minted id. A raise is
+            caught and logged; the [401] is answered regardless. *)
   }
-  (** The type for the ingress configuration: the two callbacks the family
-      routes through. Both run on the serving fiber; keep them prompt (resolve
-      a handful of charters, append one receipt), never blocking on gate or
-      run work. *)
+  (** The type for the ingress configuration: the callbacks the family routes
+      through. All run on the serving fiber; keep them prompt (resolve a
+      handful of ids, append one receipt), never blocking on gate or run
+      work. *)
 end
 
 (** {1:serve Serving a driver over the wire} *)

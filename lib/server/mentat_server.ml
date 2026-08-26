@@ -191,20 +191,24 @@ let port listener =
   | Some (`Unix _) | None -> None
 
 (* The webhook ingress configuration: the resolver answering an ingress id with
-   one consistent charter snapshot (secret and enabled state read together, so
-   verification and delivery of a single request see the same charter), and the
-   delivery callback taking custody of verified bytes. The family built on it
-   lives beside [handle]; the semantics are the .mli's. *)
+   one consistent snapshot (secret and enabled state read together, so
+   verification and delivery of a single request see the same configuration),
+   the delivery callback taking custody of verified bytes with the two GitHub
+   identity headers, and the optional observer of 401 refusals. The family
+   built on it lives beside [handle]; the semantics are the .mli's. *)
 module Ingress = struct
-  type resolution = Charter of { secret : string; enabled : bool } | Unknown
+  type resolution = Resolved of { secret : string; enabled : bool } | Unknown
 
   type t = {
     resolve : ingress_id:string -> resolution;
     deliver :
       ingress_id:string ->
       enabled:bool ->
+      event:string option ->
+      delivery_id:string option ->
       body:string ->
       [ `Accepted | `Refused of string ];
+    rejected : (ingress_id:string -> unit) option;
   }
 end
 
@@ -651,6 +655,9 @@ let ingress_route path =
   | [ ""; "ingress"; "github"; id ] when not (String.equal id "") -> Some id
   | _ -> None
 
+(* Hand-rolled on purpose: Digestif's [consistent_of_hex] accepts whitespace
+   separators inside and after the hex, and this authentication surface wants
+   the byte-strict grammar — exactly 2n hex digits, nothing else. *)
 let hex_digit = function
   | '0' .. '9' as c -> Some (Char.code c - Char.code '0')
   | 'a' .. 'f' as c -> Some (Char.code c - Char.code 'a' + 10)
@@ -702,23 +709,37 @@ let read_ingress_body body =
 
 (* One delivery, per the .mli's response contract: resolve the path id (unknown
    ⇒ 404), read the capped raw body (over ⇒ 413), verify the HMAC-SHA256 over
-   those exact bytes against the charter's retained secret (absent, malformed,
-   or mismatched ⇒ one 401 — a disabled charter still verifies, so an
-   unverified sender cannot observe even the disablement), and only then hand
-   custody to the callback: [`Accepted] ⇒ 202, [`Refused] ⇒ 500 with the
-   reason logged, never sent. Refusals are answered, never raised, and never
-   per-event news. *)
+   those exact bytes against the retained secret (absent, malformed, or
+   mismatched ⇒ one 401, the rejection observer told — a disabled
+   configuration still verifies, so an unverified sender cannot observe even
+   the disablement), and only then hand custody to the callback: [`Accepted] ⇒
+   202, [`Refused] ⇒ 500 with the reason logged, never sent. Refusals are
+   answered, never raised, and never per-event news. The callbacks are foreign
+   code, so each runs under a guard: a raise (cancellation excepted) is
+   logged, never allowed to tear the connection down responseless. *)
 let handle_ingress ~(ingress : Ingress.t) meth path request body =
+  let guarded ~what f =
+    match f () with
+    | value -> Ok value
+    | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
+    | exception exn ->
+        Eio.traceln "mentat_server: ingress %s raised: %s" what
+          (Printexc.to_string exn);
+        Error ()
+  in
   match (meth, ingress_route path) with
   | `POST, Some ingress_id -> (
-      match ingress.Ingress.resolve ~ingress_id with
-      | Ingress.Unknown -> content_free `Not_found
-      | Ingress.Charter { secret; enabled } -> (
+      match
+        guarded ~what:"resolve" (fun () -> ingress.Ingress.resolve ~ingress_id)
+      with
+      | Error () -> content_free `Internal_server_error
+      | Ok Ingress.Unknown -> content_free `Not_found
+      | Ok (Ingress.Resolved { secret; enabled }) -> (
           let headers = Cohttp.Request.headers request in
           let presented = ingress_presented_mac headers in
           match read_ingress_body body with
           | Error `Too_large -> content_free (`Code 413)
-          | Ok raw -> (
+          | Ok raw ->
               let verified =
                 match presented with
                 | None -> false
@@ -727,16 +748,32 @@ let handle_ingress ~(ingress : Ingress.t) meth path request body =
                       (Digestif.SHA256.to_raw_string
                          (Digestif.SHA256.hmac_string ~key:secret raw))
               in
-              if not verified then content_free `Unauthorized
+              if not verified then (
+                (* The observer is bookkeeping; the sender-visible refusal
+                   stays the 401 whatever the observer does. *)
+                (match ingress.Ingress.rejected with
+                | None -> ()
+                | Some rejected ->
+                    ignore
+                      (guarded ~what:"rejected" (fun () ->
+                           rejected ~ingress_id)));
+                content_free `Unauthorized)
               else
+                let event = Cohttp.Header.get headers "x-github-event" in
+                let delivery_id =
+                  Cohttp.Header.get headers "x-github-delivery"
+                in
                 match
-                  ingress.Ingress.deliver ~ingress_id ~enabled ~body:raw
+                  guarded ~what:"deliver" (fun () ->
+                      ingress.Ingress.deliver ~ingress_id ~enabled ~event
+                        ~delivery_id ~body:raw)
                 with
-                | `Accepted -> content_free `Accepted
-                | `Refused reason ->
+                | Error () -> content_free `Internal_server_error
+                | Ok `Accepted -> content_free `Accepted
+                | Ok (`Refused reason) ->
                     Eio.traceln "mentat_server: ingress delivery refused: %s"
                       reason;
-                    content_free `Internal_server_error)))
+                    content_free `Internal_server_error))
   | _, _ -> content_free `Not_found
 
 let handle ~clock ~heartbeat ~driver_for ~bindings ~bind ~ledger ~ingress conn
@@ -1342,7 +1379,7 @@ let client_handshake ~base ~token ~workspace ~environment client ~sw =
         | Error _ when status = 400 ->
             Printf.sprintf
               "daemon rejected the handshake (%s); a running daemon older than \
-               this client cannot read it — restart it with `mentatd --stop`"
+               this client cannot read it — restart it with `mentatd stop`"
               (String.trim text)
         | Error _ -> String.trim text
       in

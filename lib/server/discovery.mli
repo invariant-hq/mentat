@@ -94,6 +94,10 @@ type 'conn outcome =
   | `Foreign_held
     (** An unrecognized discovery file whose claim is held — a live daemon the
         caller cannot speak to; refuse, never clobber. *)
+  | `Spawn_refused of string
+    (** [spawn] reported it could not launch anything, for the carried
+        reason — settled immediately, with no poll spent waiting for a
+        daemon that was never started. *)
   | `Timeout  (** The daemon did not answer within the poll budget. *) ]
 (** The result of {!locate}, polymorphic in the probe's connection type so this
     module stays free of the client vocabulary. *)
@@ -103,7 +107,7 @@ val locate :
   claim_free:(unit -> bool) ->
   probe:(t -> 'conn option) ->
   identity_ok:(t -> bool) ->
-  spawn:(unit -> unit) ->
+  spawn:(unit -> (unit, string) result) ->
   sleep:(unit -> unit) ->
   poll_budget:int ->
   'conn outcome
@@ -118,11 +122,14 @@ val locate :
     does not answer is dead when [claim_free] (a stale file — reclaim by
     [spawn]) and starting when the claim is held (poll); an absent file spawns;
     a foreign file is reclaimed only with a free claim, else [`Foreign_held].
-    After a spawn, [poll] re-reads and re-[probe]s on [sleep]'s cadence up to
-    [poll_budget] steps; a whole exhausted attempt is retried once (a winner
-    that died between claiming and writing the file). [spawn]/[sleep] and the
-    real [probe] are the daemon binary's ([Unix.create_process], a socket
-    handshake, a clock sleep). *)
+    A [spawn] answering [Error reason] — the daemon binary cannot be resolved
+    at all — settles the whole call as [`Spawn_refused reason] at once: no
+    poll rounds, no whole-attempt retry. After a successful spawn, [poll]
+    re-reads and re-[probe]s on [sleep]'s cadence up to [poll_budget] steps; a
+    whole exhausted attempt is retried once (a winner that died between
+    claiming and writing the file). [spawn]/[sleep] and the real [probe] are
+    the daemon binary's ([Unix.create_process], a socket handshake, a clock
+    sleep). *)
 
 val locate_with_override :
   socket_override:(unit -> [ `Reached of 'conn | `Set_unreachable | `Unset ]) ->
@@ -130,7 +137,7 @@ val locate_with_override :
   claim_free:(unit -> bool) ->
   probe:(t -> 'conn option) ->
   identity_ok:(t -> bool) ->
-  spawn:(unit -> unit) ->
+  spawn:(unit -> (unit, string) result) ->
   sleep:(unit -> unit) ->
   poll_budget:int ->
   'conn outcome
