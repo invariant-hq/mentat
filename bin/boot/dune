@@ -2,15 +2,20 @@
  (name mentat_boot)
  (libraries
   cmdliner
+  cohttp
+  cohttp-eio
   dune-build-info
   eio
   eio.unix
   eio_main
+  oauth2_eio
   unix
+  uri
   jsont
   jsont.bytesrw
   logs
   logs.threaded
+  mentat_llm_http
   mentat_diagnostic
   mentat_digest
   lpath

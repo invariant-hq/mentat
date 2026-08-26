@@ -181,6 +181,184 @@ let review pr at diff posted base_label origin =
    Ok Exit_status.Success)
   |> Exit_status.of_result
 
+(* The review envelope, decoded back from the bytes [github review] emits:
+   thread requests, the summary request, and the threads-safe flag. The
+   member shapes are pinned by [request_json]; anything else is a broken
+   pipe, refused before any request is sent. *)
+let decode_request ~context json =
+  let error member reason =
+    Error (Printf.sprintf "%s.%s: %s" context member reason)
+  in
+  let member name mems = Option.map snd (Jsont.Json.find_mem name mems) in
+  match json with
+  | Jsont.Object (mems, _) ->
+      let* label =
+        match member "label" mems with
+        | Some (Jsont.String (label, _)) -> Ok (Some label)
+        | Some (Jsont.Null _) -> Ok None
+        | Some _ -> error "label" "must be a string or null"
+        | None -> error "label" "missing"
+      in
+      let* method_ =
+        match member "method" mems with
+        | Some (Jsont.String ("POST", _)) -> Ok `POST
+        | Some (Jsont.String ("PATCH", _)) -> Ok `PATCH
+        | Some _ -> error "method" "must be POST or PATCH"
+        | None -> error "method" "missing"
+      in
+      let* path =
+        match member "path" mems with
+        | Some (Jsont.String (path, _))
+          when String.length path > 0 && path.[0] = '/' ->
+            Ok path
+        | Some _ -> error "path" "must be a /-leading string"
+        | None -> error "path" "missing"
+      in
+      let* body =
+        match member "body" mems with
+        | Some body -> Ok body
+        | None -> error "body" "missing"
+      in
+      Ok { Publication.Request.label; method_; path; body }
+  | _ -> Error (context ^ ": must be an object")
+
+let decode_envelope bytes =
+  let error context reason = Error (context ^ ": " ^ reason) in
+  let member name mems = Option.map snd (Jsont.Json.find_mem name mems) in
+  match Jsont_bytesrw.decode_string Jsont.json bytes with
+  | Error reason -> error "envelope" reason
+  | Ok (Jsont.Object (mems, _)) ->
+      let* () =
+        match member "type" mems with
+        | Some (Jsont.String ("github.review", _)) -> Ok ()
+        | Some (Jsont.String (other, _)) ->
+            error "envelope.type"
+              (Printf.sprintf "expected github.review, got %s" other)
+        | Some _ -> error "envelope.type" "must be a string"
+        | None -> error "envelope" {|missing member "type"|}
+      in
+      let* threads =
+        match member "review" mems with
+        | Some (Jsont.Array (items, _)) ->
+            let* _, threads =
+              List.fold_left
+                (fun acc item ->
+                  let* index, threads = acc in
+                  let context = Printf.sprintf "envelope.review[%d]" index in
+                  let* request = decode_request ~context item in
+                  Ok (index + 1, request :: threads))
+                (Ok (0, []))
+                items
+            in
+            Ok (List.rev threads)
+        | Some _ -> error "envelope.review" "must be an array"
+        | None -> error "envelope" {|missing member "review"|}
+      in
+      let* summary =
+        match member "summary" mems with
+        | Some json -> decode_request ~context:"envelope.summary" json
+        | None -> error "envelope" {|missing member "summary"|}
+      in
+      let* threads_safe =
+        match member "threads_safe" mems with
+        | Some (Jsont.Bool (safe, _)) -> Ok safe
+        | Some _ -> error "envelope.threads_safe" "must be a boolean"
+        | None -> error "envelope" {|missing member "threads_safe"|}
+      in
+      Ok (threads, summary, threads_safe)
+  | Ok _ -> error "envelope" "must be a JSON object"
+
+let request_name (request : Publication.Request.t) =
+  Option.value request.Publication.Request.label ~default:"summary"
+
+(* One request, one JSONL outcome line. A reply from GitHub — 2xx or not — is
+   a per-line outcome and the run continues, so one refused thread cannot
+   withhold the rest of the publication; only a failure to obtain any reply
+   aborts, upstream. *)
+let execute api (request : Publication.Request.t) =
+  let path = request.Publication.Request.path in
+  let body = request.Publication.Request.body in
+  let line ?error status =
+    let fields =
+      [
+        ("label", Output.Json.string_or_null request.Publication.Request.label);
+        ("status", Output.Json.int status);
+      ]
+      @ match error with None -> [] | Some e -> [ ("error", Output.Json.string e) ]
+    in
+    Output.stdout_printf "%s\n"
+      (Output.Json.to_string (Output.Json.envelope ~type_:"github.publish" fields))
+  in
+  let result =
+    match request.Publication.Request.method_ with
+    | `POST -> Github_api.post api ~path ~body
+    | `PATCH -> Github_api.patch api ~path ~body
+  in
+  match result with
+  | Ok (status, _) ->
+      line status;
+      Ok true
+  | Error e -> (
+      match Github_api.Error.kind e with
+      | Github_api.Error.Response { status; body } ->
+          line ~error:body status;
+          Ok false
+      | Github_api.Error.Transport _ | Github_api.Error.Unresolved_host _ ->
+          Error
+            (Exit_status.runtime
+               (Printf.sprintf "publish %s: %s" (request_name request)
+                  (Github_api.Error.message e))))
+
+let publish pr =
+  (let* pr_raw = require "--pr" pr in
+   let* owner_repo, _number = parse_pr pr_raw in
+   let* token =
+     match Sys.getenv_opt "GITHUB_TOKEN" with
+     | Some token when String.length token > 0 -> Ok token
+     | Some _ | None ->
+         Error
+           (Exit_status.runtime
+              "GITHUB_TOKEN is not set; the publisher takes its token from \
+               the environment, never from the command line")
+   in
+   let* stdin_bytes = read_stdin_capped () in
+   let* threads, summary, threads_safe =
+     Result.map_error Exit_status.runtime (decode_envelope stdin_bytes)
+   in
+   let requests = (if threads_safe then threads else []) @ [ summary ] in
+   let* () =
+     let prefix = Printf.sprintf "/repos/%s/" owner_repo in
+     match
+       List.find_opt
+         (fun (request : Publication.Request.t) ->
+           not
+             (String.starts_with ~prefix request.Publication.Request.path))
+         requests
+     with
+     | None -> Ok ()
+     | Some request ->
+         Error
+           (Exit_status.runtime
+              (Printf.sprintf "request %s targets %s, outside %s"
+                 (request_name request) request.Publication.Request.path
+                 pr_raw))
+   in
+   Eio_main.run @@ fun env ->
+   let base_url = Sys.getenv_opt "MENTAT_GITHUB_BASE_URL" in
+   match Github_api.make ?base_url ~token (Eio.Stdenv.net env) with
+   | Error e -> Error (Exit_status.runtime (Github_api.Error.message e))
+   | Ok api ->
+       let* all_ok =
+         List.fold_left
+           (fun acc request ->
+             let* all_ok = acc in
+             let* ok = execute api request in
+             Ok (all_ok && ok))
+           (Ok true) requests
+       in
+       if all_ok then Ok Exit_status.Success else Ok Exit_status.Failed)
+  |> Exit_status.of_result
+
 let pr_opt =
   Arg.(
     value
@@ -267,8 +445,46 @@ let review_cmd =
          const review $ pr_opt $ at_opt $ diff_opt $ posted_opt
          $ base_label_opt $ origin_opt))
 
+let publish_cmd =
+  let doc = "Send a rendered review envelope to the GitHub API." in
+  let envs =
+    [
+      Cmd.Env.info "GITHUB_TOKEN"
+        ~doc:
+          "The API token authorizing the requests, sent as a Bearer \
+           authorization header. Required; it is read from the environment \
+           only, never from the command line.";
+      Cmd.Env.info "MENTAT_GITHUB_BASE_URL"
+        ~doc:
+          "Overrides the API base, $(b,https://api.github.com) — for GitHub \
+           Enterprise hosts and offline test servers.";
+    ]
+  in
+  let man =
+    [
+      `S Manpage.s_description;
+      `P
+        "Reads the envelope $(b,mentat github review) prints on standard \
+         input and sends its requests to the GitHub API: each thread \
+         request in order, then the summary request. When the envelope \
+         carries $(b,threads_safe) false only the summary is sent. Every \
+         request must target the repository named by $(b,--pr); an envelope \
+         reaching outside it is refused before any request is sent.";
+      `P
+        "One JSON line per request is printed on standard output — \
+         $(b,label), the HTTP $(b,status), and on a non-2xx answer an \
+         $(b,error) excerpt. A non-2xx answer is recorded and the run \
+         continues, so one refused thread cannot withhold the rest; a \
+         transport failure aborts. The exit code is 0 only when every \
+         request was answered 2xx.";
+    ]
+  in
+  Cmd.v
+    (Cmd.info "publish" ~doc ~docs ~envs ~man ~exits:Cli_common.exits)
+    (Exit_status.term Term.(const publish $ pr_opt))
+
 let cmd =
   let doc = "Publish agent results to GitHub." in
   Cmd.group
     (Cmd.info "github" ~doc ~docs ~exits:Cli_common.exits)
-    [ review_cmd ]
+    [ review_cmd; publish_cmd ]
