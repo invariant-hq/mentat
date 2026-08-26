@@ -109,10 +109,11 @@ module Budget : sig
             leaves spend unmetered. *)
     runs_per_hour : int option;
         (** Spawns admitted over the trailing hour; [None] falls back to
-            the firing arm's default, applied inside admission
-            ({!Fence.admit}): 6 for a webhook arm — a remote service must
-            never be an unmetered spender — and none for the cli arm,
-            whose invoker is the owner's own scheduler. *)
+            the delivery kind's default, applied inside admission
+            ({!Fence.admit}): 6 for a webhook-shaped delivery — replayed
+            and swept deliveries included, since their rate is set by
+            whoever opens pull requests — and none for a bare cli fire,
+            whose rate is the owner's own scheduler. *)
   }
   (** The type for budgets. *)
 end
@@ -152,12 +153,13 @@ type t = {
       (** [true] when the document sets [suppress.clean_run] to
           ["silent"]: a run that finds nothing publishes no fresh comment
           (an existing summary still converges). *)
-  keep_failed_worktrees : int option;
-      (** How many failed runs' worktrees to retain; [None] leaves the
-          reaper's default. Retention governs worktrees only — receipts
-          are never reaped. *)
 }
 (** The type for charters. *)
+
+val webhook_arm : t -> Trigger.Webhook.t option
+(** [webhook_arm t] is [t]'s webhook trigger arm, when one exists — the
+    arm webhook deliveries, replays, and sweeps run under. At most one
+    exists: {!decode} refuses duplicate trigger kinds. *)
 
 (** Decode errors. *)
 module Error : sig
@@ -190,7 +192,9 @@ val decode : string -> (t, Error.t) result
     The trigger kinds [schedule], [agent_message], and [self_schedule] are
     recognized vocabulary: each parses but is refused as unimplemented,
     distinctly from an unknown kind, so a document from a future build
-    fails with its real diagnosis. *)
+    fails with its real diagnosis. [retention.keep_failed_worktrees] is
+    refused the same way — no reaper exists to honor it, and an accepted
+    no-op grant would be worse than the refusal. *)
 
 val policy_digest :
   charter_json:string -> prompt:string -> output_schema:string -> string

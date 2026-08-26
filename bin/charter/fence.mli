@@ -28,19 +28,29 @@ type verdict =
 val admit :
   digest:string ->
   budget:Charter.Budget.t ->
-  trigger:Charter.Trigger.t ->
+  trigger:[ `Cli | `Webhook ] ->
   now:float ->
   Receipt.t list ->
   verdict
 (** [admit ~digest ~budget ~trigger ~now receipts] is the admission verdict
-    under [budget] for an event fired by [trigger]. Spend is checked first:
-    when [budget.usd_per_day] is a limit and the window's spend has reached
-    it, the verdict is [Fenced Usd_per_day]. Then rate: when the trailing
-    hour already holds as many spawns as the rate limit, the verdict is
-    [Fenced Runs_per_hour]. The rate limit is [budget.runs_per_hour] when
-    set, else the firing arm's default — 6 for a webhook arm, so a remote
-    service can never be an unmetered spender by omission, and none for
-    the cli arm. An absent limit meters nothing. *)
+    under [budget] for an event of the [trigger] kind — the {e delivery}'s
+    trigger arm, never the invoking transport: an owner replaying or
+    sweeping webhook-shaped deliveries admits them as [`Webhook], because
+    their rate is set by whoever opens pull requests. Spend is checked
+    first: when [budget.usd_per_day] is a limit and the window's spend has
+    reached it, the verdict is [Fenced Usd_per_day]. Then rate: when the
+    trailing hour already holds as many spawns as the rate limit, the
+    verdict is [Fenced Runs_per_hour]. The rate limit is
+    {!effective_runs_per_hour}; an absent limit meters nothing. *)
+
+val effective_runs_per_hour :
+  budget:Charter.Budget.t -> trigger:[ `Cli | `Webhook ] -> int option
+(** [effective_runs_per_hour ~budget ~trigger] is the rate limit {!admit}
+    applies: [budget.runs_per_hour] when set, else the delivery kind's
+    default — 6 for [`Webhook], so a remote service can never be an
+    unmetered spender by omission, and none for [`Cli]. Status surfaces
+    render this same judgment, so what is displayed is what admission
+    applies. *)
 
 val spend_in_window : digest:string -> now:float -> Receipt.t list -> float
 (** [spend_in_window ~digest ~now receipts] is the summed cost of reaped

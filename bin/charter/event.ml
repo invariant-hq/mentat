@@ -14,10 +14,10 @@ module Pull_request = struct
     repo : string;
   }
 
-  module Error = Decode.Error
+  module Error = Mentat_json.Error
 
   let ( let* ) = Result.bind
-  let error ~context reason = Error (Decode.Error.make ~context reason)
+  let error ~context reason = Error (Mentat_json.Error.make ~context reason)
 
   (* Narrow member access: take the named member, ignore its siblings. *)
   let member ~context name mems =
@@ -31,15 +31,15 @@ module Pull_request = struct
 
   let member_string ~context name mems =
     let* json = member ~context name mems in
-    Decode.as_string ~context:(path ~context name) json
+    Mentat_json.as_string ~context:(path ~context name) json
 
   let member_bool ~context name mems =
     let* json = member ~context name mems in
-    Decode.as_bool ~context:(path ~context name) json
+    Mentat_json.as_bool ~context:(path ~context name) json
 
   let member_int ~context name mems =
     let* json = member ~context name mems in
-    Decode.positive_int ~context:(path ~context name) json
+    Mentat_json.positive_int ~context:(path ~context name) json
 
   let member_object ~context name mems =
     let* json = member ~context name mems in
@@ -61,10 +61,75 @@ module Pull_request = struct
          (fun c -> (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))
          s
 
+  (* The base ref reaches a git fetch refspec, so it gets the ref-name
+     discipline the head hash and repository name already get: no byte git's
+     own ref grammar refuses, no leading '-', no '..', no leading or
+     trailing '/'. *)
+  let ref_name s =
+    let n = String.length s in
+    let byte c =
+      Char.code c > 32
+      && Char.code c <> 127
+      && not
+           (Char.equal c '~' || Char.equal c '^' || Char.equal c ':'
+          || Char.equal c '?' || Char.equal c '*' || Char.equal c '['
+          || Char.equal c '\\')
+    in
+    n > 0
+    && (not (Char.equal s.[0] '-'))
+    && (not (Char.equal s.[0] '/'))
+    && (not (Char.equal s.[n - 1] '/'))
+    && String.for_all byte s
+    &&
+    let rec no_dotdot i =
+      i + 2 > n
+      || ((not (Char.equal s.[i] '.' && Char.equal s.[i + 1] '.'))
+         && no_dotdot (i + 1))
+    in
+    no_dotdot 0
+
+  (* The decoder recurses per nesting level, so depth is bounded before it
+     runs: a delivery needs a handful of levels, and a hostile megabyte of
+     brackets must be a decode error, never a stack fault. The scan is
+     string-aware — a bracket inside a string literal nests nothing. *)
+  let max_depth = 64
+
+  let nesting_depth bytes =
+    let n = String.length bytes in
+    let rec go i depth deepest in_string escaped =
+      if i >= n || deepest > max_depth then deepest
+      else
+        let c = bytes.[i] in
+        if in_string then
+          if escaped then go (i + 1) depth deepest true false
+          else if Char.equal c '\\' then go (i + 1) depth deepest true true
+          else if Char.equal c '"' then go (i + 1) depth deepest false false
+          else go (i + 1) depth deepest true false
+        else
+          match c with
+          | '{' | '[' ->
+              go (i + 1) (depth + 1) (Stdlib.max (depth + 1) deepest) false
+                false
+          | '}' | ']' -> go (i + 1) (depth - 1) deepest false false
+          | '"' -> go (i + 1) depth deepest true false
+          | _ -> go (i + 1) depth deepest false false
+    in
+    go 0 0 0 false false
+
   let decode bytes =
-    match Jsont_bytesrw.decode_string Jsont.json bytes with
-    | Error reason -> error ~context:"" reason
-    | Ok (Jsont.Object (mems, _)) ->
+    if nesting_depth bytes > max_depth then
+      error ~context:""
+        (Printf.sprintf "nesting exceeds %d levels" max_depth)
+    else
+      match
+        (* The depth bound above keeps the recursive decoder inside the
+           stack; a residual fault must still be a decode error, never a
+           crash. *)
+        try Jsont_bytesrw.decode_string Jsont.json bytes
+        with Stack_overflow -> Error "nesting overflows the decoder"
+      with
+      | Error reason -> error ~context:"" reason
+      | Ok (Jsont.Object (mems, _)) ->
         let* action = member_string ~context:"" "action" mems in
         let* action =
           if action_token action then Ok action
@@ -75,7 +140,7 @@ module Pull_request = struct
         let* repository = member_object ~context:"" "repository" mems in
         let* repo =
           let* name = member_string ~context:"repository" "full_name" repository in
-          Decode.repo_full_name ~context:"repository.full_name" name
+          Mentat_json.repo_full_name ~context:"repository.full_name" name
         in
         let* pull_request = member_object ~context:"" "pull_request" mems in
         let in_pr = "pull_request" in
@@ -103,11 +168,13 @@ module Pull_request = struct
           let* value =
             member_string ~context:"pull_request.base" "ref" base
           in
-          if String.length value > 0 then Ok value
-          else error ~context:"pull_request.base.ref" "must be non-empty"
+          if ref_name value then Ok value
+          else
+            error ~context:"pull_request.base.ref"
+              "must be a git branch name"
         in
         Ok { action; number; head_sha; base_ref; draft; author_association; repo }
-    | Ok _ -> error ~context:"" "payload must be a JSON object"
+      | Ok _ -> error ~context:"" "payload must be a JSON object"
 end
 
 module Identity = struct
@@ -117,9 +184,11 @@ module Identity = struct
      class: the head commit already separates pushes, so a second delivery
      about the same head — reopened after opened, ready after draft — is the
      same event, not a fresh spend. *)
-  let action_class = function
-    | "opened" | "reopened" | "ready_for_review" | "synchronize" -> "head"
-    | other -> other
+  let review_class = function
+    | "opened" | "reopened" | "ready_for_review" | "synchronize" -> true
+    | _ -> false
+
+  let action_class action = if review_class action then "head" else action
 
   let of_pull_request (pr : Pull_request.t) =
     let { Pull_request.action; number; head_sha; repo; _ } = pr in

@@ -21,7 +21,11 @@ module Pull_request : sig
     number : int;  (** The pull request number, at least 1. *)
     head_sha : string;
         (** The head commit, 40 or 64 lowercase hexadecimal characters. *)
-    base_ref : string;  (** The base branch name; non-empty. *)
+    base_ref : string;
+        (** The base branch name. Validated as a git ref name — no byte
+            git's own ref grammar refuses, no leading ['-'], no [..], no
+            leading or trailing ['/'] — because it reaches a fetch
+            refspec. *)
     draft : bool;  (** Whether the pull request is a draft. *)
     author_association : string;
         (** The author's association with the repository, an uppercase
@@ -50,7 +54,10 @@ module Pull_request : sig
       [pull_request.author_association], [pull_request.head.sha], and
       [pull_request.base.ref], validating each member's shape, and ignores
       every other member at every level. A missing or wrongly-shaped needed
-      member is an [Error] naming it by path. *)
+      member is an [Error] naming it by path. Nesting deeper than the
+      payload could ever need is an [Error] before parsing begins — the
+      parser recurses per level, and a hostile megabyte of brackets must be
+      a decode error, never a stack fault. *)
 end
 
 (** Event identities — what deduplication and the run-id mint key on. *)
@@ -60,13 +67,21 @@ module Identity : sig
       about, never how it was delivered: a webhook redelivery carries the
       identity of its first delivery. *)
 
+  val review_class : string -> bool
+  (** [review_class action] is [true] iff [action] is one of the actions
+      that say "this head wants review": [opened], [reopened],
+      [ready_for_review], and [synchronize]. This predicate and
+      {!of_pull_request}'s class fold are one definition — a consumer
+      selecting review-class actions (the sweep's synthesis) and the
+      identity mint can never disagree on the set, which the dedup and the
+      derived session id both key on. *)
+
   val of_pull_request : Pull_request.t -> t
   (** [of_pull_request pr] is the identity of [pr]'s event: the repository,
       the pull request number, the head commit, and the action's class. The
-      actions [opened], [reopened], [ready_for_review], and [synchronize]
-      share one class — each says this head wants review, so one head is one
-      event no matter which of them delivered it; any other action is its
-      own class. *)
+      {!review_class} actions share one class — each says this head wants
+      review, so one head is one event no matter which of them delivered
+      it; any other action is its own class. *)
 
   val cli : digest:string -> key:string -> t
   (** [cli ~digest ~key] is the identity of an owner-invoked fire: the

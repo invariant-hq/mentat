@@ -32,6 +32,9 @@ module Transition : sig
 
   val to_string : t -> string
   (** [to_string t] is ["failed"], ["parked"], or ["fenced"]. *)
+
+  val equal : t -> t -> bool
+  (** [equal a b] is [true] iff [a] and [b] are the same transition. *)
 end
 
 (** Budget meters — the per-charter admission fences. *)
@@ -62,12 +65,9 @@ module Head : sig
     | Unsettled  (** Unsettled, no pending decision. *)
     | Missing  (** The child left no session journal. *)
 
-  val of_string : string -> t option
-  (** [of_string s] is the outcome named [s] (["settled"], ["interrupted"],
-      ["parked"], ["unsettled"], or ["missing"]), or [None]. *)
-
   val to_string : t -> string
-  (** [to_string t] is the outcome's name. *)
+  (** [to_string t] is the outcome's name: ["settled"], ["interrupted"],
+      ["parked"], ["unsettled"], or ["missing"]. *)
 
   val equal : t -> t -> bool
   (** [equal a b] is [true] iff [a] and [b] are the same outcome. *)
@@ -78,17 +78,16 @@ module Cause : sig
   type t =
     | Exited  (** The child exited on its own. *)
     | Wall_clock  (** The per-run wall-clock deadline expired. *)
+    | Interrupted
+        (** A stop request forced the reap before the child settled. *)
     | Park_expired  (** The park TTL expired on a pending decision. *)
     | Recovered
         (** The child was found dead and its head settled honestly by a
             successor. *)
 
-  val of_string : string -> t option
-  (** [of_string s] is the cause named [s] (["exited"], ["wall_clock"],
-      ["park_expired"], or ["recovered"]), or [None]. *)
-
   val to_string : t -> string
-  (** [to_string t] is the cause's name. *)
+  (** [to_string t] is the cause's name: ["exited"], ["wall_clock"],
+      ["interrupted"], ["park_expired"], or ["recovered"]. *)
 
   val equal : t -> t -> bool
   (** [equal a b] is [true] iff [a] and [b] are the same cause. *)
@@ -122,6 +121,13 @@ module Disposition : sig
                 lane, which degrades the charter to its run-count fence. *)
         cause : Cause.t;  (** Why the child was reaped. *)
       }  (** The run ended and its spend was stamped. *)
+
+  val name : t -> string
+  (** [name t] is [t]'s wire token — the [disposition] member {!val:encode}
+      writes and {!val:decode} routes on: ["spawned"], ["skipped"], ["dup"],
+      ["fenced"], ["already_exists"], ["superseded"], ["refused"], or
+      ["reaped"]. Status projections build their labels on it, so a label
+      can never drift from the log's own vocabulary. *)
 end
 
 (** Receipt kinds — the closed sum of facts a receipt line may state. *)
@@ -201,13 +207,26 @@ val decode : string -> (t, Error.t) result
     that key on the record itself rather than on a trailing time window
     (those live in {!Fence}). *)
 
-val delivery_recorded : digest:string -> identity:string -> t list -> bool
-(** [delivery_recorded ~digest ~identity receipts] is [true] iff [receipts]
-    carries a delivery receipt for [identity] stamped [digest]. This is the
-    torn-claim discriminator: a claim marker without a matching delivery
-    line belongs to a claimer that died between creating the marker and
-    recording the delivery, so a later claimer reading a duplicate marker
-    consults this fold to tell a real duplicate from an abandoned claim. *)
+val spawn_recorded : digest:string -> identity:string -> t list -> bool
+(** [spawn_recorded ~digest ~identity receipts] is [true] iff [receipts]
+    carries a spawned disposition for [identity] stamped [digest]. This is
+    the torn-claim discriminator: a run-claim marker without a matching
+    spawned line belongs to a claimer that died — or refused — between
+    committing the claim and spawning the run, so a later pass finding the
+    marker held consults this fold to tell a completed commitment from an
+    abandoned one it may adopt. *)
+
+val settled_session : digest:string -> identity:string -> t list -> string option
+(** [settled_session ~digest ~identity receipts] is the session of the last
+    reaped disposition for [identity] under [digest] whose child exited 0
+    with a settled head — the one run whose findings are publishable — or
+    [None] when no such reap exists. *)
+
+val egress_recorded : digest:string -> identity:string -> t list -> bool
+(** [egress_recorded ~digest ~identity receipts] is [true] iff [receipts]
+    carries an egress receipt for [identity] stamped [digest] — the
+    publisher concluded, whichever way. A settled run with findings and no
+    egress line is the one state a reconcile pass re-publishes. *)
 
 val alerted : digest:string -> identity:string -> transition:Transition.t -> t list -> bool
 (** [alerted ~digest ~identity ~transition receipts] is [true] iff

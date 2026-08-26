@@ -16,6 +16,11 @@ module Transition = struct
     | Failed -> "failed"
     | Parked -> "parked"
     | Fenced -> "fenced"
+
+  let equal a b =
+    match (a, b) with
+    | Failed, Failed | Parked, Parked | Fenced, Fenced -> true
+    | (Failed | Parked | Fenced), _ -> false
 end
 
 module Meter = struct
@@ -68,11 +73,12 @@ module Head = struct
 end
 
 module Cause = struct
-  type t = Exited | Wall_clock | Park_expired | Recovered
+  type t = Exited | Wall_clock | Interrupted | Park_expired | Recovered
 
   let of_string = function
     | "exited" -> Some Exited
     | "wall_clock" -> Some Wall_clock
+    | "interrupted" -> Some Interrupted
     | "park_expired" -> Some Park_expired
     | "recovered" -> Some Recovered
     | _ -> None
@@ -80,6 +86,7 @@ module Cause = struct
   let to_string = function
     | Exited -> "exited"
     | Wall_clock -> "wall_clock"
+    | Interrupted -> "interrupted"
     | Park_expired -> "park_expired"
     | Recovered -> "recovered"
 
@@ -87,10 +94,12 @@ module Cause = struct
     match (a, b) with
     | Exited, Exited
     | Wall_clock, Wall_clock
+    | Interrupted, Interrupted
     | Park_expired, Park_expired
     | Recovered, Recovered ->
         true
-    | (Exited | Wall_clock | Park_expired | Recovered), _ -> false
+    | (Exited | Wall_clock | Interrupted | Park_expired | Recovered), _ ->
+        false
 end
 
 module Disposition = struct
@@ -110,6 +119,16 @@ module Disposition = struct
         usd : float option;
         cause : Cause.t;
       }
+
+  let name = function
+    | Spawned _ -> "spawned"
+    | Skipped _ -> "skipped"
+    | Dup -> "dup"
+    | Fenced _ -> "fenced"
+    | Already_exists -> "already_exists"
+    | Superseded -> "superseded"
+    | Refused _ -> "refused"
+    | Reaped _ -> "reaped"
 end
 
 module Kind = struct
@@ -128,34 +147,28 @@ end
 
 type t = { at : float; identity : string; digest : string; kind : Kind.t }
 
-module Error = Decode.Error
+module Error = Mentat_json.Error
 
 let ( let* ) = Result.bind
-let error ~context reason = Error (Decode.Error.make ~context reason)
+let error ~context reason = Error (Mentat_json.Error.make ~context reason)
 
 (* Encoding. *)
 
 let mem name value = Jsont.Json.mem (Jsont.Json.name name) value
 let str s = Jsont.Json.string s
 
-let disposition_mems = function
-  | Disposition.Spawned { session } ->
-      [ mem "disposition" (str "spawned"); mem "session" (str session) ]
-  | Disposition.Skipped reason ->
-      [ mem "disposition" (str "skipped"); mem "reason" (str reason) ]
-  | Disposition.Dup -> [ mem "disposition" (str "dup") ]
-  | Disposition.Fenced meter ->
-      [
-        mem "disposition" (str "fenced");
-        mem "meter" (str (Meter.to_string meter));
-      ]
-  | Disposition.Already_exists -> [ mem "disposition" (str "already_exists") ]
-  | Disposition.Superseded -> [ mem "disposition" (str "superseded") ]
-  | Disposition.Refused reason ->
-      [ mem "disposition" (str "refused"); mem "reason" (str reason) ]
+let disposition_mems disposition =
+  mem "disposition" (str (Disposition.name disposition))
+  ::
+  (match disposition with
+  | Disposition.Spawned { session } -> [ mem "session" (str session) ]
+  | Disposition.Skipped reason | Disposition.Refused reason ->
+      [ mem "reason" (str reason) ]
+  | Disposition.Dup | Disposition.Already_exists | Disposition.Superseded ->
+      []
+  | Disposition.Fenced meter -> [ mem "meter" (str (Meter.to_string meter)) ]
   | Disposition.Reaped { session; exit; head; usage; usd; cause } ->
       [
-        mem "disposition" (str "reaped");
         mem "session" (str session);
         mem "exit" (Jsont.Json.int exit);
         mem "head" (str (Head.to_string head));
@@ -164,7 +177,7 @@ let disposition_mems = function
       @ (match usd with
         | None -> []
         | Some usd -> [ mem "usd" (Jsont.Json.number usd) ])
-      @ [ mem "cause" (str (Cause.to_string cause)) ]
+      @ [ mem "cause" (str (Cause.to_string cause)) ])
 
 let kind_mems = function
   | Kind.Delivery -> (str "delivery", [])
@@ -249,15 +262,15 @@ let decode line =
             (fun name -> (name, ref None))
             ([ "kind"; "at"; "identity"; "digest" ] @ extra)
         in
-        let* () = Decode.route_members ~context:"" ~slots mems in
+        let* () = Mentat_json.route_members ~context:"" ~slots mems in
         Ok slots
       in
       let value slots name =
-        Decode.require ~context:"" name (List.assoc name slots)
+        Mentat_json.require ~context:"" name (List.assoc name slots)
       in
       let string_value slots name =
         let* json = value slots name in
-        Decode.as_string ~context:name json
+        Mentat_json.as_string ~context:name json
       in
       let finish slots kind =
         let* at =
@@ -266,7 +279,7 @@ let decode line =
         in
         let* identity =
           let* json = value slots "identity" in
-          Decode.as_non_empty_string ~context:"identity" json
+          Mentat_json.as_non_empty_string ~context:"identity" json
         in
         let* digest =
           let* digest = string_value slots "digest" in
@@ -278,13 +291,13 @@ let decode line =
       let reason_disposition slots wrap =
         let* reason =
           let* json = value slots "reason" in
-          Decode.as_non_empty_string ~context:"reason" json
+          Mentat_json.as_non_empty_string ~context:"reason" json
         in
         finish slots (Kind.Disposition (wrap reason))
       in
       let session_value slots =
         let* json = value slots "session" in
-        Decode.as_non_empty_string ~context:"session" json
+        Mentat_json.as_non_empty_string ~context:"session" json
       in
       let* kind_word = peek_string "kind" mems in
       (match kind_word with
@@ -333,7 +346,7 @@ let decode line =
               let* session = session_value slots in
               let* exit =
                 let* json = value slots "exit" in
-                let* exit = Decode.non_negative_int ~context:"exit" json in
+                let* exit = Mentat_json.non_negative_int ~context:"exit" json in
                 if exit <= 255 then Ok exit
                 else error ~context:"exit" "must be at most 255"
               in
@@ -385,7 +398,7 @@ let decode line =
           in
           let* threads =
             let* json = value slots "threads" in
-            Decode.non_negative_int ~context:"threads" json
+            Mentat_json.non_negative_int ~context:"threads" json
           in
           finish slots (Kind.Egress { summary; threads })
       | "alert" ->
@@ -452,14 +465,12 @@ let diagnostic t =
           Printf.sprintf "%s spawned %s: session %s" stamp t.identity session
       | Disposition.Skipped reason ->
           Printf.sprintf "%s skipped %s: %s" stamp t.identity reason
-      | Disposition.Dup -> Printf.sprintf "%s dup %s" stamp t.identity
+      | (Disposition.Dup | Disposition.Already_exists | Disposition.Superseded)
+        as bare ->
+          Printf.sprintf "%s %s %s" stamp (Disposition.name bare) t.identity
       | Disposition.Fenced meter ->
           Printf.sprintf "%s fenced %s: %s" stamp t.identity
             (Meter.to_string meter)
-      | Disposition.Already_exists ->
-          Printf.sprintf "%s already-exists %s" stamp t.identity
-      | Disposition.Superseded ->
-          Printf.sprintf "%s superseded %s" stamp t.identity
       | Disposition.Refused reason ->
           Printf.sprintf "%s refused %s: %s" stamp t.identity reason
       | Disposition.Reaped { session; exit; head; usd; cause; usage = _ } ->
@@ -486,13 +497,36 @@ let diagnostic t =
 
 (* Log queries. *)
 
-let delivery_recorded ~digest ~identity receipts =
+let spawn_recorded ~digest ~identity receipts =
   List.exists
     (fun t ->
       match t.kind with
-      | Kind.Delivery ->
+      | Kind.Disposition (Disposition.Spawned _) ->
           String.equal t.digest digest && String.equal t.identity identity
-      | Kind.Disposition _ | Kind.Egress _ | Kind.Alert _ -> false)
+      | Kind.Disposition _ | Kind.Delivery | Kind.Egress _ | Kind.Alert _ ->
+          false)
+    receipts
+
+let settled_session ~digest ~identity receipts =
+  List.fold_left
+    (fun acc t ->
+      match t.kind with
+      | Kind.Disposition
+          (Disposition.Reaped { session; exit = 0; head = Head.Settled; _ })
+        when String.equal t.digest digest && String.equal t.identity identity
+        ->
+          Some session
+      | Kind.Disposition _ | Kind.Delivery | Kind.Egress _ | Kind.Alert _ ->
+          acc)
+    None receipts
+
+let egress_recorded ~digest ~identity receipts =
+  List.exists
+    (fun t ->
+      match t.kind with
+      | Kind.Egress _ ->
+          String.equal t.digest digest && String.equal t.identity identity
+      | Kind.Delivery | Kind.Disposition _ | Kind.Alert _ -> false)
     receipts
 
 let alerted ~digest ~identity ~transition receipts =

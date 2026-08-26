@@ -114,8 +114,11 @@ let charter_decodes () =
             notify.Charter.Notify.command
       | None -> fail "expected a notify contract");
       is_true ~msg:"suppress.clean_run" c.Charter.suppress_clean_run;
-      equal (option int) ~msg:"keep_failed_worktrees" None
-        c.Charter.keep_failed_worktrees;
+      (match Charter.webhook_arm c with
+      | Some arm ->
+          equal int ~msg:"webhook_arm is the webhook trigger" 4
+            (List.length arm.Charter.Trigger.Webhook.events)
+      | None -> fail "expected a webhook arm");
       match c.Charter.permission_unattended with
       | None -> ()
       | Some _ -> fail "expected no unattended override")
@@ -375,6 +378,13 @@ let charter_trigger_kinds () =
           (Printf.sprintf "%S parses but is refused as unimplemented" kind)
         (with_arm (Printf.sprintf {|{ "kind": %S }|} kind)))
     [ "schedule"; "agent_message"; "self_schedule" ];
+  rejects ~msg:"retention knob parses and is refused until a reaper exists"
+    ~expect:
+      "retention.keep_failed_worktrees: parses but is refused as unimplemented"
+    (amended ~old_string:{|"suppress": { "clean_run": "silent" }|}
+       ~new_string:
+         {|  "suppress": { "clean_run": "silent" },
+  "retention": { "keep_failed_worktrees": 3 }|});
   rejects ~msg:"duplicate kind" ~expect:{|duplicate trigger kind "cli"|}
     (amended ~old_string:{|{ "kind": "cli" }|}
        ~new_string:{|    { "kind": "cli" }, { "kind": "cli" }|});
@@ -466,6 +476,16 @@ let all_kinds =
            usage = usage_json;
            usd = None;
            cause = Receipt.Cause.Wall_clock;
+         });
+    Receipt.Kind.Disposition
+      (Receipt.Disposition.Reaped
+         {
+           session = sample_session;
+           exit = 137;
+           head = Receipt.Head.Unsettled;
+           usage = usage_json;
+           usd = Some 0.5;
+           cause = Receipt.Cause.Interrupted;
          });
     Receipt.Kind.Egress { summary = `Created; threads = 3 };
     Receipt.Kind.Egress { summary = `None_needed; threads = 0 };
@@ -626,6 +646,10 @@ let receipt_diagnostics () =
   equal string ~msg:"delivery line"
     (Printf.sprintf "1970-01-02T01:01:01Z delivery %s" sample_identity)
     (Receipt.diagnostic (receipt Receipt.Kind.Delivery));
+  equal string ~msg:"bare dispositions render their wire token"
+    (Printf.sprintf "1970-01-02T01:01:01Z already_exists %s" sample_identity)
+    (Receipt.diagnostic
+       (receipt (Receipt.Kind.Disposition Receipt.Disposition.Already_exists)));
   equal string ~msg:"fenced line"
     (Printf.sprintf "1970-01-02T01:01:01Z fenced %s: usd_per_day"
        sample_identity)
@@ -671,10 +695,23 @@ let receipt_diagnostics () =
 
 let receipt_log_queries () =
   let other_digest = "feedfacefeedface" in
+  let reaped ?(exit = 0) ?(head = Receipt.Head.Settled) session =
+    receipt
+      (Receipt.Kind.Disposition
+         (Receipt.Disposition.Reaped
+            {
+              session;
+              exit;
+              head;
+              usage = Jsont.Json.object' [];
+              usd = None;
+              cause = Receipt.Cause.Exited;
+            }))
+  in
   let log =
     [
       receipt Receipt.Kind.Delivery;
-      receipt (Receipt.Kind.Disposition Receipt.Disposition.Dup);
+      receipt (Receipt.Kind.Disposition (Receipt.Disposition.Spawned { session = "c-1" }));
       receipt
         (Receipt.Kind.Alert
            { transition = Receipt.Transition.Failed; window = `Identity });
@@ -686,18 +723,34 @@ let receipt_log_queries () =
            });
     ]
   in
-  is_true ~msg:"the delivery is recorded"
-    (Receipt.delivery_recorded ~digest:sample_digest
-       ~identity:sample_identity log);
-  is_false ~msg:"another digest's marker has no delivery line"
-    (Receipt.delivery_recorded ~digest:other_digest ~identity:sample_identity
-       log);
-  is_false ~msg:"another identity has no delivery line"
-    (Receipt.delivery_recorded ~digest:sample_digest
+  is_true ~msg:"the spawn is recorded"
+    (Receipt.spawn_recorded ~digest:sample_digest ~identity:sample_identity log);
+  is_false ~msg:"another digest's marker has no spawned line"
+    (Receipt.spawn_recorded ~digest:other_digest ~identity:sample_identity log);
+  is_false ~msg:"another identity has no spawned line"
+    (Receipt.spawn_recorded ~digest:sample_digest
        ~identity:"cli:0123456789abcdef:k" log);
-  is_false ~msg:"a disposition is not a delivery"
-    (Receipt.delivery_recorded ~digest:sample_digest ~identity:sample_identity
-       [ receipt (Receipt.Kind.Disposition Receipt.Disposition.Dup) ]);
+  is_false ~msg:"a delivery is not a spawn"
+    (Receipt.spawn_recorded ~digest:sample_digest ~identity:sample_identity
+       [ receipt Receipt.Kind.Delivery ]);
+  equal (option string) ~msg:"the last clean settled reap names its session"
+    (Some "c-2")
+    (Receipt.settled_session ~digest:sample_digest ~identity:sample_identity
+       [ reaped "c-1"; reaped "c-2" ]);
+  equal (option string) ~msg:"a failed exit is not a settled session" None
+    (Receipt.settled_session ~digest:sample_digest ~identity:sample_identity
+       [ reaped ~exit:1 "c-1" ]);
+  equal (option string) ~msg:"an unsettled head is not a settled session" None
+    (Receipt.settled_session ~digest:sample_digest ~identity:sample_identity
+       [ reaped ~head:Receipt.Head.Interrupted "c-1" ]);
+  equal (option string) ~msg:"another digest's reap does not answer" None
+    (Receipt.settled_session ~digest:other_digest ~identity:sample_identity
+       [ reaped "c-1" ]);
+  is_true ~msg:"an egress decides the identity"
+    (Receipt.egress_recorded ~digest:sample_digest ~identity:sample_identity
+       [ receipt (Receipt.Kind.Egress { summary = `Skipped_no_token; threads = 0 }) ]);
+  is_false ~msg:"no egress line, nothing decided"
+    (Receipt.egress_recorded ~digest:sample_digest ~identity:sample_identity log);
   is_true ~msg:"the identity-window failed alert is recorded"
     (Receipt.alerted ~digest:sample_digest ~identity:sample_identity
        ~transition:Receipt.Transition.Failed log);
@@ -785,7 +838,39 @@ let event_decode_is_narrow () =
     ~expect:"pull_request.author_association"
     (pull_request_payload ~association:"owner" ());
   event_rejects ~msg:"empty base ref" ~expect:"pull_request.base.ref"
-    (pull_request_payload ~base:"" ())
+    (pull_request_payload ~base:"" ());
+  (* The base ref reaches a git fetch refspec; the ref-name grammar refuses
+     what git's own would. *)
+  List.iter
+    (fun base ->
+      event_rejects
+        ~msg:(Printf.sprintf "base ref %S is not a ref name" base)
+        ~expect:"pull_request.base.ref"
+        (pull_request_payload ~base ()))
+    [ "-flag"; "a..b"; "with space"; "tab\there"; "a~b"; "a^b"; "a:b";
+      "a?b"; "a*b"; "a[b"; "back\\slash"; "/leading"; "trailing/" ];
+  (match
+     Event.Pull_request.decode
+       (pull_request_payload ~base:"release/2026-08.x_1" ())
+   with
+  | Ok pr ->
+      equal string ~msg:"an ordinary hierarchical branch passes"
+        "release/2026-08.x_1" pr.Event.Pull_request.base_ref
+  | Error e -> failf "decode: %s" (Event.Pull_request.Error.message e));
+  (* The decoder recurses per nesting level; a hostile bracket tower is a
+     decode error before parsing, never a stack fault. *)
+  event_rejects ~msg:"a bracket tower is refused by depth" ~expect:"nesting"
+    (String.make 3000 '[' ^ String.make 3000 ']');
+  match
+    Event.Pull_request.decode
+      ({|{"ignored":{"a":{"b":[[[1]]]}},|}
+      ^ String.sub (pull_request_payload ()) 1
+          (String.length (pull_request_payload ()) - 1))
+  with
+  | Ok _ -> ()
+  | Error e ->
+      failf "shallow nesting must decode: %s"
+        (Event.Pull_request.Error.message e)
 
 let event_identity () =
   let decode payload =
@@ -815,6 +900,15 @@ let event_identity () =
     (Event.Identity.equal opened
        (Event.Identity.of_pull_request
           (decode (pull_request_payload ~action:"labeled" ()))));
+  (* The predicate and the class fold are one definition: the set here is
+     exactly the set whose identities collapse above. *)
+  List.iter
+    (fun action ->
+      is_true ~msg:(action ^ " is review-class")
+        (Event.Identity.review_class action))
+    [ "opened"; "reopened"; "ready_for_review"; "synchronize" ];
+  is_false ~msg:"closed is not review-class"
+    (Event.Identity.review_class "closed");
   let cli = Event.Identity.cli ~digest:sample_digest ~key:"nightly@1" in
   equal string ~msg:"cli identity string"
     (Printf.sprintf "cli:%s:nightly@1" sample_digest)
@@ -966,9 +1060,7 @@ let fence_windows () =
   let budget ?usd_per_day ?runs_per_hour () =
     { Charter.Budget.wall_clock = 900.0; usd_per_day; runs_per_hour }
   in
-  let webhook = Charter.Trigger.Github_webhook webhook_arm in
-  let admit ?usd_per_day ?runs_per_hour ?(trigger = Charter.Trigger.Cli)
-      receipts =
+  let admit ?usd_per_day ?runs_per_hour ?(trigger = `Cli) receipts =
     Fence.admit ~digest:sample_digest
       ~budget:(budget ?usd_per_day ?runs_per_hour ())
       ~trigger ~now receipts
@@ -983,7 +1075,7 @@ let fence_windows () =
   | Fence.Pass -> ()
   | _ -> fail "a receipt exactly a day old has left the window");
   (match
-     admit ~runs_per_hour:2 ~trigger:webhook
+     admit ~runs_per_hour:2 ~trigger:`Webhook
        [ spawned_at (now -. 10.0); spawned_at (now -. 20.0) ]
    with
   | Fence.Fenced Receipt.Meter.Runs_per_hour -> ()
@@ -1008,10 +1100,10 @@ let fence_windows () =
   let six_spawns =
     List.init 6 (fun i -> spawned_at (now -. 10.0 -. float_of_int i))
   in
-  (match admit ~trigger:webhook six_spawns with
+  (match admit ~trigger:`Webhook six_spawns with
   | Fence.Fenced Receipt.Meter.Runs_per_hour -> ()
   | _ -> fail "an unfenced webhook charter defaults to 6 runs per hour");
-  (match admit ~trigger:webhook (List.tl six_spawns) with
+  (match admit ~trigger:`Webhook (List.tl six_spawns) with
   | Fence.Pass -> ()
   | _ -> fail "five spawns pass the webhook default");
   (match admit six_spawns with

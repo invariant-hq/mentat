@@ -34,10 +34,11 @@ let spawns_in_window ~digest ~now receipts =
       | _ -> count)
     0 receipts
 
-(* The webhook arm's rate fallback lives here, in admission itself, so an
-   unfenced webhook charter can never exist by a caller forgetting to apply
-   it: a remote service must never be an unmetered spender. The cli arm's
-   invoker is the owner's own scheduler, so it imposes no default. *)
+(* The webhook default lives here, in admission itself, so an unfenced
+   webhook charter can never exist by a caller forgetting to apply it: a
+   delivery whose rate is set by whoever opens pull requests must never be
+   an unmetered spender. A bare cli fire's rate is set by the owner's own
+   scheduler, so it imposes no default. *)
 let webhook_default_runs_per_hour = 6
 
 let effective_runs_per_hour ~(budget : Charter.Budget.t) ~trigger =
@@ -45,8 +46,8 @@ let effective_runs_per_hour ~(budget : Charter.Budget.t) ~trigger =
   | Some limit -> Some limit
   | None -> (
       match trigger with
-      | Charter.Trigger.Github_webhook _ -> Some webhook_default_runs_per_hour
-      | Charter.Trigger.Cli -> None)
+      | `Webhook -> Some webhook_default_runs_per_hour
+      | `Cli -> None)
 
 let admit ~digest ~(budget : Charter.Budget.t) ~trigger ~now receipts =
   let spend_tripped =
