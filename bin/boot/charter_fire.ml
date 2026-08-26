@@ -897,8 +897,9 @@ let commit env ~(repo : Repo.t) (loaded : Charter_store.Loaded.t)
                              })))
             | Error e -> Error (Mentat_store.Session.Error.message e)))
 
-let dispose env ~(repo : Repo.t) (loaded : Charter_store.Loaded.t)
-    ~(event : Event.Pull_request.t) ~check_head =
+let dispose env ~(repo : Repo.t) ?(on_reap = fun () -> ())
+    (loaded : Charter_store.Loaded.t) ~(event : Event.Pull_request.t)
+    ~check_head =
   let name = loaded.Charter_store.Loaded.name in
   let digest = loaded.Charter_store.Loaded.digest in
   let charter = loaded.Charter_store.Loaded.charter in
@@ -995,6 +996,7 @@ let dispose env ~(repo : Repo.t) (loaded : Charter_store.Loaded.t)
                            (Receipt.Disposition.Reaped
                               { session; exit = exit_code; head; usage; usd; cause }))
                     in
+                    on_reap ();
                     env.say
                       (Printf.sprintf "reaped %s: exit %d, head %s, %s" session
                          exit_code

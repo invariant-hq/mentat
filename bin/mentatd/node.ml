@@ -273,6 +273,10 @@ let ingress t =
 
 (* The pump. *)
 
+(* [drive] is whether the dispose reaped a run child: the pump owes the
+   after-reap re-entry then, and the durable receipt — not the pipeline's
+   return, which a failed publication turns into [Error] after the money
+   is already spent — is what the signal rides. *)
 let drive t (loaded : Charter_store.Loaded.t) event =
   let name = loaded.Charter_store.Loaded.name in
   let env = env t ~name in
@@ -290,13 +294,20 @@ let drive t (loaded : Charter_store.Loaded.t) event =
       (match Charter_store.append_receipt (dirs t) ~name receipt with
       | Ok () -> ()
       | Error e -> env.Charter_fire.say (Charter_store.Error.message e));
-      env.Charter_fire.say (Printf.sprintf "refused %s: %s" identity reason)
-  | Ok repo -> (
-      match Charter_fire.dispose env ~repo loaded ~event ~check_head:true with
+      env.Charter_fire.say (Printf.sprintf "refused %s: %s" identity reason);
+      false
+  | Ok repo ->
+      let reaped = ref false in
+      (match
+         Charter_fire.dispose env ~repo
+           ~on_reap:(fun () -> reaped := true)
+           loaded ~event ~check_head:true
+       with
       | Ok Charter_fire.Disposed | Ok Charter_fire.Interrupted -> ()
-      | Error message -> env.Charter_fire.say message)
+      | Error message -> env.Charter_fire.say message);
+      !reaped
 
-let pump t =
+let pump t ~after_reap =
   let rec loop () =
     let loaded, event = Eio.Stream.take t.queue in
     let name = loaded.Charter_store.Loaded.name in
@@ -307,7 +318,10 @@ let pump t =
             name
             (Event.Identity.to_string (Event.Identity.of_pull_request event)))
      else
-       try drive t loaded event with
+       try
+         if drive t loaded event && not (Stop_signal.requested t.stop) then
+           after_reap loaded
+       with
        | Eio.Cancel.Cancelled _ as e -> raise e
        | e ->
            say t

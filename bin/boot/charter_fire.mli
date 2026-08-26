@@ -185,6 +185,7 @@ val admit_delivery :
 val dispose :
   env ->
   repo:Repo.t ->
+  ?on_reap:(unit -> unit) ->
   Charter_store.Loaded.t ->
   event:Mentat_charter.Event.Pull_request.t ->
   check_head:bool ->
@@ -194,10 +195,16 @@ val dispose :
     the fixed step order. [check_head] is [true] for a delivered event (the
     current-head read refuses a stale delivery before it can claim) and
     [false] for a sweep-synthesized one, whose listing was the head read.
-    [Error message] is a machinery failure: the pipeline itself could not
-    do its job (an unwritable receipt, an unreachable remote, a failed
-    spawn) — receipted as [refused] wherever an identity exists to receipt
-    against, and distinct from every run outcome, which is [Disposed]. *)
+    [on_reap], when given, is called once, immediately after a run child's
+    reaped disposition receipt is durable and before publication — the
+    signal a resident caller turns into a prompt reconcile re-entry, since
+    everything after the reap (the findings read, the publication, the
+    egress) can fail while the money is already spent. An event disposed
+    without a run never calls it. [Error message] is a machinery failure:
+    the pipeline itself could not do its job (an unwritable receipt, an
+    unreachable remote, a failed spawn) — receipted as [refused] wherever
+    an identity exists to receipt against, and distinct from every run
+    outcome, which is [Disposed]. *)
 
 val fire_event :
   env ->

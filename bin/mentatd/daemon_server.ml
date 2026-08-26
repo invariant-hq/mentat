@@ -861,15 +861,23 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                       ]
                     in
                     (* The node's two fibers: the pump drives admitted
-                       deliveries to their dispositions, and the reconcile beat
-                       keeps every charter's record converging. Both are
-                       cancellable at any instant — anything caught between
-                       receipt and disposition is the next boot pass's to
-                       finish. *)
+                       deliveries to their dispositions — re-entering the
+                       reaped charter's reconcile so a failed publication or
+                       a queue-refused head converges now, not on the beat —
+                       and the reconcile beat keeps every charter's record
+                       converging; the two serialize under the fold's own
+                       one-pass gate. Both are cancellable at any instant —
+                       anything caught between receipt and disposition is
+                       the next boot pass's to finish. *)
                     let branches =
                       match node with
                       | Some node ->
-                          (fun () -> Node.pump node)
+                          (fun () ->
+                            Node.pump node
+                              ~after_reap:
+                                (Charter_reconcile.reconcile
+                                   (Node.reconcile_env node)
+                                   ~repo_for:(Node.repo node)))
                           :: (fun () ->
                                Charter_reconcile.loop (Node.reconcile_env node)
                                  ~repo_for:(Node.repo node))

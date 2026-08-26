@@ -106,20 +106,27 @@ val ingress : t -> Mentat_server.Ingress.t
     skipped-disabled without reaching the queue. Deliveries rejected at the
     wire over their signature are counted and noted in the trace log. *)
 
-val pump : t -> unit
-(** [pump t] consumes the queue and drives each admitted event to its
-    disposition: the repository connection is rebuilt, then the pipeline's
-    decision half runs with the current-head check on — one event at a
-    time, in admission order, under the policy closure that admitted it,
-    so a delivery's receipt, claim, and run carry one digest even when the
-    owner edits the charter while the event waits. A machinery failure is
-    receipted refused and narrated; it never stops the pump. [pump]
-    returns only by cancellation — run it as a racing branch beside the
-    serve loop. Cancellation at any instant is safe: every receipt written
-    before the cancel is durable, and an event caught between receipt and
-    disposition is the boot reconcile's to finish. Once a stop is
-    requested, remaining entries are drained without starting new work,
-    each noted for a later pass. *)
+val pump : t -> after_reap:(Charter_store.Loaded.t -> unit) -> unit
+(** [pump t ~after_reap] consumes the queue and drives each admitted event
+    to its disposition: the repository connection is rebuilt, then the
+    pipeline's decision half runs with the current-head check on — one
+    event at a time, in admission order, under the policy closure that
+    admitted it, so a delivery's receipt, claim, and run carry one digest
+    even when the owner edits the charter while the event waits. A
+    machinery failure is receipted refused and narrated; it never stops
+    the pump. [after_reap loaded] runs on the pump's own fiber after any
+    event whose dispose reaped a run child, unless a stop was requested
+    meanwhile — the caller wires it to the charter's reconcile re-entry,
+    so a publication that failed after the money was spent, or a delivery
+    the full intake queue refused while the run held the pump, converges
+    now rather than on the periodic beat. Its exceptions are caught and
+    narrated like the pipeline's own. [pump] returns only by
+    cancellation — run it as a racing branch beside the serve loop.
+    Cancellation at any instant is safe: every receipt written before the
+    cancel is durable, and an event caught between receipt and disposition
+    is the boot reconcile's to finish. Once a stop is requested, remaining
+    entries are drained without starting new work, each noted for a later
+    pass. *)
 
 (** {1:folds Pure pieces}
 

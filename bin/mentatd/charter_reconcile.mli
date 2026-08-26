@@ -119,10 +119,12 @@ val pending_runs : Mentat_charter.Receipt.t list -> Pending.t list
     next beat retries for free. Every line one charter's pass speaks — the
     fold's own and the fire pipeline's — is prefixed with that charter's
     name: one pass speaks for many charters, so the prefix is the line's
-    provenance. Passes must not run concurrently with one
-    another — the honest settle itself is serialized under the charter's
-    fire lock, so a concurrent pass costs duplicate narration at worst, but
-    the caller keeps one pass in flight at a time. *)
+    provenance. Passes never run concurrently: {!reconcile} and {!pass}
+    serialize under one module-level gate — one node runs per process, and
+    a pass arriving while another is in flight waits its turn rather than
+    doubling the GitHub listings and racing the publisher re-entry into
+    its upsert. The gate makes every caller — the boot pass, the periodic
+    beat, the after-reap re-entry — correct by construction. *)
 
 val reconcile :
   Charter_fire.env ->
@@ -139,8 +141,11 @@ val reconcile :
     in force at the next beat — and [Charter_fire.fire_sweep] drives the
     sweep half of the fold. A disabled charter still settles its pending
     runs — the money is already spent and the record is owed — but sweeps
-    nothing and publishes nothing. This is also the re-entry a caller runs
-    for one charter after reaping one of its runs. *)
+    nothing and publishes nothing. This is the re-entry a caller runs for
+    one charter after reaping one of its runs: a publication that failed
+    after the reap is finished here promptly instead of waiting out the
+    periodic beat, and heads whose deliveries were refused at a full
+    intake queue re-enter as soon as the pump frees. *)
 
 val pass :
   Charter_fire.env ->

@@ -107,7 +107,20 @@ let settle env (loaded : Charter_store.Loaded.t) (pending : Pending.t) =
       | Ok () -> ()
       | Error e -> say env "recover %s: %s" session e)
 
-let reconcile env ~repo_for (loaded : Charter_store.Loaded.t) =
+(* The one-pass gate. Passes must not run concurrently: the honest settle
+   is serialized under the charter's fire lock, but two interleaved sweeps
+   would double every GitHub listing and race the publisher re-entry into
+   its upsert. One node runs per process, so the gate is module state — the
+   periodic beat and the after-reap re-entry queue here instead of
+   overlapping. Held across effects, never poisoned: the drivers never
+   raise, and a cancellation mid-pass releases it on the way out. *)
+let gate = Eio.Mutex.create ()
+
+let with_gate f =
+  Eio.Mutex.lock gate;
+  Fun.protect ~finally:(fun () -> Eio.Mutex.unlock gate) f
+
+let reconcile_charter env ~repo_for (loaded : Charter_store.Loaded.t) =
   let name = loaded.Charter_store.Loaded.name in
   let env = charter_env env name in
   (match Charter_store.read_receipts env.Charter_fire.dirs ~name with
@@ -121,7 +134,11 @@ let reconcile env ~repo_for (loaded : Charter_store.Loaded.t) =
         | Ok _ -> ()
         | Error e -> say env "sweep: %s" e)
 
+let reconcile env ~repo_for loaded =
+  with_gate (fun () -> reconcile_charter env ~repo_for loaded)
+
 let pass env ~repo_for =
+  with_gate @@ fun () ->
   match Charter_store.roster env.Charter_fire.dirs with
   | Error e -> say env "charters: %s" (Charter_store.Error.message e)
   | Ok entries ->
@@ -130,7 +147,7 @@ let pass env ~repo_for =
           match entry with
           | Error e ->
               say env "charter %s: %s" name (Charter_store.Error.message e)
-          | Ok loaded -> reconcile env ~repo_for loaded)
+          | Ok loaded -> reconcile_charter env ~repo_for loaded)
         entries
 
 (* The reconcile beat. Ten minutes: long enough that a beat's open-PR

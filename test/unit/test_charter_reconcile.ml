@@ -366,6 +366,40 @@ let sweep_failure_is_narrated () =
          | None -> false)
        !said)
 
+(* The one-pass gate: a pass that arrives while another is in flight waits
+   its turn. The first pass parks inside its own [repo_for] on a promise a
+   third fiber resolves; without the gate the second pass would interleave
+   between the first's enter and leave. *)
+let passes_serialize () =
+  with_estate "gate" @@ fun ~env ~dirs ~said:_ ->
+  let loaded = loaded_of dirs ~name:"pr-review" ~enabled:true in
+  let order = ref [] in
+  let note tag = order := tag :: !order in
+  let release, resolve = Eio.Promise.create () in
+  Eio.Fiber.all
+    [
+      (fun () ->
+        Charter_reconcile.reconcile env
+          ~repo_for:(fun _ ->
+            note "first enters";
+            Eio.Promise.await release;
+            note "first leaves";
+            Error "no read token")
+          loaded);
+      (fun () ->
+        Charter_reconcile.reconcile env
+          ~repo_for:(fun _ ->
+            note "second enters";
+            Error "no read token")
+          loaded);
+      (fun () -> Eio.Promise.resolve resolve ());
+    ];
+  equal
+    (Testable.list Testable.string)
+    ~msg:"a pass in flight is never interleaved; the next waits its turn"
+    [ "first enters"; "first leaves"; "second enters" ]
+    (List.rev !order)
+
 let () =
   run "mentat.charter_reconcile"
     [
@@ -374,4 +408,5 @@ let () =
       test "the pending fold" pending_fold;
       test "an orphaned run settles honestly" orphan_settles;
       test "a repo failure narrates and never raises" sweep_failure_is_narrated;
+      test "passes serialize under the one-pass gate" passes_serialize;
     ]
