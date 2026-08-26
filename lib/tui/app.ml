@@ -457,16 +457,17 @@ type t = {
       (* The most recent whole-response provider usage on the active feed. Its
          lane sum is the context-occupancy proxy the pane shows against the
          model's window — distinct from the cumulative session metrics. *)
-  glance : (Textdiff.stats option * Mentat_workspace.Health.t) option;
-      (* The last ambient workspace-status observation: the git worktree diff
-         against the review base and the tooling build-health verdict. Polled at
-         session start and each turn settle and held as a last observation, never
-         persisted derived state — the workspace owns both facts. [None] until
-         the first poll returns. *)
+  glance : Textdiff.stats option option;
+      (* The last worktree observation: the git diff summary against the
+         review base ([None] inside for a non-repository). Polled at session
+         start and each turn settle and held as a last observation, never
+         persisted derived state — the workspace owns the fact. Outer [None]
+         until the first poll returns. *)
   glance_request : request option;
   dune_status : Mentat_workspace.Health.t option;
-      (* The freshest watch-status observation, written by both the glance and
-         the status tick; the side pane's dune row reads this alone. *)
+      (* The freshest watch-status observation — the dune query at the event
+         moments, the tick, and the /dune verbs all write it; the side pane's
+         dune row reads this alone. *)
   dune_request : request option;
   running : Mentat_protocol.Process.View.t list;
       (* The active session's live background processes (the [shell] tool's
@@ -647,10 +648,7 @@ type msg =
   | Review_crs_loaded of
       request * (Mentat_review.Cr.View.t list, Protocol.Error.t) result
   | Workspace_glance_loaded of
-      request
-      * ( Textdiff.stats option * Mentat_workspace.Health.t,
-          Protocol.Error.t )
-        result
+      request * (Textdiff.stats option, Protocol.Error.t) result
   | Workspace_dune_loaded of
       request * (Mentat_workspace.Health.t, Protocol.Error.t) result
   | Workspace_dune_tick
@@ -5547,12 +5545,11 @@ let workspace_spent t =
       Option.bind model (fun model -> Mentat_provider.Model.cost model usage)
   | _, None | None, _ | Some _, Some _ -> None
 
-(* The last polled workspace glance, split into its two independent signals. The
-   worktree diff is absent until the first poll returns; the tooling status
-   defaults to [Off Disabled] (no row) until then, honoring the fail-honest
-   law. *)
+(* The two independent poll signals. The worktree diff is absent until the
+   first glance returns; the tooling status defaults to [Off Disabled] (no
+   row) until the first dune query returns, honoring the fail-honest law. *)
 let workspace_worktree t =
-  match t.glance with Some (worktree, _) -> worktree | None -> None
+  match t.glance with Some worktree -> worktree | None -> None
 
 let workspace_tooling t =
   match t.dune_status with

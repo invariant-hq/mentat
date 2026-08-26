@@ -1817,11 +1817,13 @@ let review_cone t capability ~base_spec : Client.Driver.Review.t =
   }
 
 (* The workspace status-glance cone: the ambient side-pane pull the frontend
-   polls at session start and turn settle. Both signals are re-read per call —
-   the cone caches no verdict, honoring the derived-on-demand law; the frontend
-   holds the answer as a last observation. Git errors and a non-repository both
-   degrade to [None] worktree stats rather than a loud failure, so an absent
-   glance is honest, never an error dialog. *)
+   polls at session start and turn settle. Each fact has exactly one wire
+   carrier — the glance is the worktree summary, the dune query is the row —
+   and both are re-read per call: the cone caches no verdict, honoring the
+   derived-on-demand law; the frontend holds the answers as last
+   observations. Git errors and a non-repository both degrade to [None]
+   worktree stats rather than a loud failure, so an absent glance is honest,
+   never an error dialog. *)
 let workspace_cone t capability ~base_spec : Client.Driver.Workspace.t =
   let clock = Eio.Stdenv.mono_clock t.shared.stdenv in
   let worktree_stats () =
@@ -1833,10 +1835,10 @@ let workspace_cone t capability ~base_spec : Client.Driver.Workspace.t =
         | Ok stats -> Some stats
         | Error _ -> None)
   in
-  (* The glance's dune half is a memory read, never IO and never a drain: the
+  (* The status query is a memory read, never IO and never a drain: the
      transition notices are the notice producer's business, and a read that
      consumed them would eat the model's observations. Once the first drain
-     engages the supervisor, its machine speaks — until then the glance
+     engages the supervisor, its machine speaks — until then the query
      reports the attach observer's view alone, so a frontend opened before
      any turn spawns nothing. A tooling-disabled, untrusted, or watch-off
      workspace reports [Off Disabled], which the frontend renders as an
@@ -1857,8 +1859,7 @@ let workspace_cone t capability ~base_spec : Client.Driver.Workspace.t =
                   (Mentat_ocaml_dune_rpc.Instance.snapshot instance)))
   in
   {
-    Client.Driver.Workspace.glance =
-      (fun () -> Ok (worktree_stats (), tooling_health ()));
+    Client.Driver.Workspace.glance = (fun () -> Ok (worktree_stats ()));
     dune = (fun () -> Ok (tooling_health ()));
     (* The user's verb over the supervised watch. Before the first drain
        nothing is engaged yet, but the verb must still stick — a stop

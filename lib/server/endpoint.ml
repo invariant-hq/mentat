@@ -466,7 +466,7 @@ let review_compose : (Mentat_review.Cr.Edit.t, unit) t =
 
 (* Workspace cone. *)
 
-let glance : (unit, Textdiff.stats option * Mentat_workspace.Health.t) t =
+let glance : (unit, Textdiff.stats option) t =
   {
     name = "workspace.glance";
     idempotency = By_value;

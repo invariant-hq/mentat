@@ -156,10 +156,7 @@ end
 module Workspace = struct
   type t = {
     glance :
-      unit ->
-      ( Textdiff.stats option * Mentat_workspace.Health.t,
-        Mentat_protocol.Error.t )
-      result;
+      unit -> (Textdiff.stats option, Mentat_protocol.Error.t) result;
     dune : unit -> (Mentat_workspace.Health.t, Mentat_protocol.Error.t) result;
     dune_control :
       op:[ `Restart | `Stop ] ->

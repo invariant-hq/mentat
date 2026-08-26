@@ -355,10 +355,7 @@ let sessions_result :
        ~enc:snd
   |> Jsont.Object.finish
 
-let glance_result : (Textdiff.stats option * Mentat_workspace.Health.t) Jsont.t
-    =
-  Jsont.Object.map ~kind:"workspace glance" (fun stats health ->
-      (stats, health))
-  |> Jsont.Object.mem "stats" (Jsont.option Textdiff.Stats.jsont) ~enc:fst
-  |> Jsont.Object.mem "health" Mentat_workspace.Health.jsont ~enc:snd
+let glance_result : Textdiff.stats option Jsont.t =
+  Jsont.Object.map ~kind:"workspace glance" Fun.id
+  |> Jsont.Object.mem "stats" (Jsont.option Textdiff.Stats.jsont) ~enc:Fun.id
   |> Jsont.Object.finish
