@@ -420,6 +420,29 @@ let convergence_skips_posted_fingerprints () =
   is_true ~msg:"the summary still counts every finding"
     (str_contains "2 findings · 1 thread posted" (summary_body_of p))
 
+let convergence_survives_anchor_padding () =
+  let diff = diff_of multi_file_diff in
+  let padded =
+    finding ~severity:Severity.P0 ~path:"lib/a.ml" ~line:2
+      ~anchor:"  let b = 3  " ~title:"Padded" ()
+  in
+  (* The posted thread carries the fingerprint of the trimmed quote; a later
+     run re-reporting the line with padded whitespace must converge on it, not
+     post a duplicate thread. *)
+  let posted =
+    posted_of
+      (Printf.sprintf {|[{"id": 21, "body": "**P0** Padded\n\n%s"}]|}
+         (Publication.Marker.finding ~origin:"ci"
+            (Review_finding.Fingerprint.of_finding ~path:"lib/a.ml"
+               ~anchor:"let b = 3" ~title:"Padded")))
+  in
+  let p = publish diff ~posted ~findings:[ padded ] in
+  equal (list string) ~msg:"the padded re-report threads nothing" []
+    (thread_hexes p);
+  equal (list string) ~msg:"nor does it become a summary row" [] (row_titles p);
+  is_true ~msg:"the posted blocking fingerprint keeps the run safe"
+    (Publication.threads_safe p)
+
 let duplicate_findings_post_one_thread () =
   let diff = diff_of multi_file_diff in
   let one =
@@ -938,6 +961,8 @@ let () =
       test "policies derive badges and blocking" policy_badges_and_blocks;
       test "convergence posts only unposted fingerprints"
         convergence_skips_posted_fingerprints;
+      test "convergence survives anchor padding"
+        convergence_survives_anchor_padding;
       test "duplicate findings in one document post one thread"
         duplicate_findings_post_one_thread;
       test "threads_safe follows the two-way rule" threads_safe_two_way_rule;

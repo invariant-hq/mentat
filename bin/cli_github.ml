@@ -16,15 +16,26 @@ let ( let* ) = Result.bind
 let input_cap = 64 * 1024 * 1024
 
 (* The pull-request coordinate, parsed strictly from OWNER/REPO#N: both names
-   non-empty, the repository name free of further slashes, the number a
-   positive decimal. Anything else is a usage error — this command is workflow
-   plumbing, and a sloppy coordinate means the workflow is wrong. *)
+   in GitHub's name alphabet — the owner alphanumeric with hyphens, the
+   repository additionally admitting [.] and [_], neither a dot segment — and
+   the number a positive decimal. The names splice into request paths, so the
+   closed alphabet refuses query, fragment, space, and separator bytes here,
+   at usage time, instead of surfacing later as a publish refusal. Anything
+   else is a usage error — this command is workflow plumbing, and a sloppy
+   coordinate means the workflow is wrong. *)
 let parse_pr raw =
   let malformed () =
     Error
       (Exit_status.usage
          (Printf.sprintf "invalid --pr value %s: expected OWNER/REPO#N" raw))
   in
+  let owner_byte c =
+    (c >= 'A' && c <= 'Z')
+    || (c >= 'a' && c <= 'z')
+    || (c >= '0' && c <= '9')
+    || Char.equal c '-'
+  in
+  let repo_byte c = owner_byte c || Char.equal c '.' || Char.equal c '_' in
   match String.index_opt raw '#' with
   | None -> malformed ()
   | Some hash -> (
@@ -47,7 +58,9 @@ let parse_pr raw =
           if
             String.length owner = 0
             || String.length repo = 0
-            || String.contains repo '/'
+            || not (String.for_all owner_byte owner)
+            || not (String.for_all repo_byte repo)
+            || String.equal repo "." || String.equal repo ".."
             || not digits
           then malformed ()
           else

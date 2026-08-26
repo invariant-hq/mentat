@@ -174,11 +174,22 @@ A malformed origin token is usage (exit 2).
   mentat: invalid --origin value Actions!: expected lowercase letters, digits, '-', or ':'
   [2]
 
-A malformed pull-request coordinate or head SHA is usage (exit 2).
+A malformed pull-request coordinate or head SHA is usage (exit 2). The names
+are held to GitHub's own alphabet, so a coordinate smuggling URL metachars
+(query cuts, dot segments) refuses here instead of surfacing later as a
+publish refusal.
 
   $ mentat github review --pr acme-widgets-7 --at "$SHA" \
   >   --diff review.diff --posted posted-empty.json < findings.json
   mentat: invalid --pr value acme-widgets-7: expected OWNER/REPO#N
+  [2]
+  $ mentat github review --pr 'acme/widgets?per_page=1#7' --at "$SHA" \
+  >   --diff review.diff --posted posted-empty.json < findings.json
+  mentat: invalid --pr value acme/widgets?per_page=1#7: expected OWNER/REPO#N
+  [2]
+  $ mentat github review --pr 'acme/..#7' --at "$SHA" \
+  >   --diff review.diff --posted posted-empty.json < findings.json
+  mentat: invalid --pr value acme/..#7: expected OWNER/REPO#N
   [2]
   $ mentat github review --pr acme/widgets#7 --at deadbeef \
   >   --diff review.diff --posted posted-empty.json < findings.json

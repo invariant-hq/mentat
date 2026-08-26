@@ -71,10 +71,13 @@ module Fingerprint = struct
 
   (* [Mentat_digest.key] length-frames the domain and every part, so the input
      is injective over arbitrary member strings: no separator byte lives
-     in-band for a crafted member to shift across a boundary. *)
+     in-band for a crafted member to shift across a boundary. The anchor is
+     trimmed first — anchoring matches on the trimmed quote, and hashing the
+     same normal form keeps a re-padded quote from re-threading a posted
+     finding. *)
   let of_finding ~path ~anchor ~title =
     Mentat_digest.key ~length:16 ~domain:"mentat.github.finding.v1"
-      [ path; anchor; title ]
+      [ path; String.trim anchor; title ]
 
   let to_hex t = t
   let equal = String.equal

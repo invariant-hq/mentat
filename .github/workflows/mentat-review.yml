@@ -208,12 +208,28 @@ jobs:
                        and (.body | test("<!-- mentat-(review|finding:)"))))' \
             > posted.json
 
+      # A clean run with no findings document (an empty diff produces no run
+      # at all) still refreshes a summary this workflow posted before: left
+      # alone, a red summary from an earlier revision would outlive the
+      # changes that absorbed it. The green render happens only when
+      # posted.json already holds our sticky summary — a PR never reviewed
+      # gains no comment.
       - name: Render the publication
         if: needs.review.outputs.rc == '0'
         run: |
           if [ ! -s findings.json ]; then
-            echo "nothing to publish: the review produced no findings document"
-            printf '' > out.json
+            summary_id="$(jq -r \
+              '[.[] | select(.body | contains("<!-- mentat-review "))][0].id // empty' \
+              posted.json)"
+            if [ -n "$summary_id" ]; then
+              printf '{"summary":"","findings":[]}' \
+                | mentat github review --pr "$REPO#$NUMBER" --at "$HEAD_SHA" \
+                    --base-label "$BASE_REF" --origin actions \
+                    --diff review.diff --posted posted.json > out.json
+            else
+              echo "nothing to publish: the review produced no findings document"
+              printf '' > out.json
+            fi
           else
             mentat github review --pr "$REPO#$NUMBER" --at "$HEAD_SHA" \
               --base-label "$BASE_REF" --origin actions \

@@ -280,6 +280,11 @@ let fingerprint_identity () =
     (Review_finding.Fingerprint.equal fp again);
   equal string ~msg:"equal inputs render equally" hex
     (Review_finding.Fingerprint.to_hex again);
+  (* The anchor hashes trimmed — matching is by trimmed quote, so a re-padded
+     quote must re-derive the posted identity, not mint a second one. *)
+  equal string ~msg:"anchor padding does not move the fingerprint" hex
+    (Review_finding.Fingerprint.to_hex
+       (of_finding ~path:"lib/a.ml" ~anchor:"  let x = 1\t" ~title:"T"));
   let differs ~msg other =
     is_true ~msg (not (Review_finding.Fingerprint.equal fp other))
   in

@@ -96,12 +96,15 @@ module Fingerprint : sig
   (** [of_finding ~path ~anchor ~title] is the fingerprint of the finding with
       those members: the first 16 lowercase hexadecimal characters of the
       SHA-256 of the [mentat.github.finding.v1] domain and the three members,
-      each length-framed. The framing is injective over arbitrary strings — no
-      separator byte lives in-band, so no choice of members collides with
-      another by shifting bytes across a member boundary. Callers pass a
-      decoded finding's members; the neutralized [title] a decode produces is
-      a pure function of the model's text, so the fingerprint is deterministic
-      across runs. *)
+      each length-framed, with [anchor] trimmed of leading and trailing
+      whitespace first — a publisher matches anchors by their trimmed quote,
+      and hashing the same normal form keeps a re-padded quote naming the same
+      line from minting a second identity. The framing is injective over
+      arbitrary strings — no separator byte lives in-band, so no choice of
+      members collides with another by shifting bytes across a member
+      boundary. Callers pass a decoded finding's members; the neutralized
+      [title] a decode produces is a pure function of the model's text, so the
+      fingerprint is deterministic across runs. *)
 
   val to_hex : t -> string
   (** [to_hex t] is [t]'s 16 lowercase hexadecimal characters. *)

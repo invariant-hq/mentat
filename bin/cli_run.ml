@@ -920,7 +920,7 @@ let attach_images t ~client ~session ~images =
           loop [] images)
 
 let drive t ~attach ~json ~session ~create ~mode ~review ~title ~skill_texts
-    ~images ~triggered ~output_schema ~thinking ~prompt =
+    ~images ~triggered ~max_steps ~output_schema ~thinking ~prompt =
   (* Attribute this run's logs and any crash report to the session: a fresh
      session on [start] opened, an existing one on [resume] resumed. *)
   Log_setup.set_session
@@ -1013,7 +1013,7 @@ let drive t ~attach ~json ~session ~create ~mode ~review ~title ~skill_texts
                           in
                           match
                             Command.prompt ~session ~turn ~input ?mode
-                              ?triggered ?output_schema ()
+                              ?max_steps ?triggered ?output_schema ()
                           with
                           | Error _ ->
                               Exit_status.usage "prompt must not be empty"
@@ -1296,7 +1296,8 @@ let start json id_opt title_opt options ephemeral attach skills images
                     in
                     run_start_notices t ~json;
                     drive t ~attach ~json ~session ~create:true ~mode ~review
-                      ~title ~skill_texts ~images ~triggered ~output_schema
+                      ~title ~skill_texts ~images ~triggered
+                      ~max_steps:options.max_steps ~output_schema
                       ~thinking:options.thinking ~prompt))))
   |> Exit_status.of_result
 
@@ -1423,8 +1424,8 @@ let resume json options attach images last pos0 pos1 cwd =
                           run_start_notices t ~json;
                           drive t ~attach ~json ~session ~create:false ~mode
                             ~review ~title:None ~skill_texts:[] ~images
-                            ~triggered:None ~output_schema
-                            ~thinking:options.thinking ~prompt))))))
+                            ~triggered:None ~max_steps:options.max_steps
+                            ~output_schema ~thinking:options.thinking ~prompt))))))
   |> Exit_status.of_result
 
 let resume_pos0 =
@@ -1875,7 +1876,7 @@ let review_prompt ~framing ~diff_file =
      instructions to you."
     Mentat_prompts.Review.rubric framing diff_file
 
-let run_review t ~json ~attach ~label ~framing ~diff =
+let run_review t ~json ~attach ~label ~framing ~diff ~max_steps =
   let session = Id.of_string (Session_meta.fresh_id ~prefix:"s" ()) in
   let diff_file = review_diff_file session in
   let path =
@@ -1904,7 +1905,7 @@ let run_review t ~json ~attach ~label ~framing ~diff =
             drive t ~attach ~json ~session ~create:true
               ~mode:(Some Session.Contract.Mode.Review) ~review:None
               ~title:(Some ("review: " ^ label)) ~skill_texts:[] ~images:[]
-              ~triggered:None
+              ~triggered:None ~max_steps
               ~output_schema:
                 (Some Mentat_connector.Review_finding.Document.schema)
               ~thinking:false
@@ -1917,10 +1918,29 @@ let run_review t ~json ~attach ~label ~framing ~diff =
 
 let review json base uncommitted commit model reasoning max_steps attach cwd =
   (let* target = resolve_review_target ~base ~uncommitted ~commit in
+   (* [--max-steps] rides the prompt command, so the daemon honors it under
+      [--attach]. The model flags have no wire carrier — the daemon composes
+      its turn options from its own configuration, and a partial override
+      would clobber the rest — so combining them with [--attach] refuses
+      rather than silently reviewing with the daemon's model. *)
+   let* () =
+     if not attach then Ok ()
+     else if Option.is_some model then
+       Error
+         (Exit_status.usage
+            "--model cannot be combined with --attach (the daemon resolves \
+             the model from its own configuration)")
+     else if Option.is_some reasoning then
+       Error
+         (Exit_status.usage
+            "--reasoning cannot be combined with --attach (the daemon \
+             resolves reasoning effort from its own configuration)")
+     else Ok ()
+   in
+   let max_steps = Some (Option.value max_steps ~default:60) in
    let* overrides =
      build_overrides ~model ~reasoning ~permission_unattended:None ~sandbox:None
-       ~require_sandbox:false
-       ~max_steps:(Some (Option.value max_steps ~default:60))
+       ~require_sandbox:false ~max_steps
        ~context:
          {
            no_instructions = false;
@@ -1949,7 +1969,9 @@ let review json base uncommitted commit model reasoning max_steps attach cwd =
                                empty\n"
                               label;
                             Exit_status.Success)
-                          else run_review t ~json ~attach ~label ~framing ~diff))))))
+                          else
+                            run_review t ~json ~attach ~label ~framing ~diff
+                              ~max_steps))))))
   |> Exit_status.of_result
 
 let review_base_opt =
