@@ -5,6 +5,7 @@
 
 open! Cmdliner
 open Mentat_charter
+open Mentat_github
 
 let docs = Cli_common.s_config
 let ( let* ) = Result.bind
@@ -60,7 +61,7 @@ let add src =
 (* list *)
 
 let disposition_label = function
-  | Receipt.Disposition.Spawned -> "spawned"
+  | Receipt.Disposition.Spawned _ -> "spawned"
   | Receipt.Disposition.Skipped _ -> "skipped"
   | Receipt.Disposition.Dup -> "dup"
   | Receipt.Disposition.Fenced meter ->
@@ -235,21 +236,284 @@ let remove name =
    let state = User_dirs.charter_state_dir dirs name in
    if Sys.file_exists state then
      Output.stdout_printf
-       "state kept at %s: receipts and run roots are the audit trail\n" state;
+       "state kept at %s: receipts and claim markers are the audit trail\n"
+       state;
    Ok Exit_status.Success)
   |> Exit_status.of_result
 
-(* fire — registered so the surface is visible; the pipeline is not in this
-   build. *)
+(* fire — the pipeline, run in this process (the cli trigger arm: the
+   invoker is the owner's own scheduler). The pipeline itself lives in
+   [Charter_fire]; this verb reads the event bytes, requires the read
+   credential, and constructs the injected GitHub closures over the
+   first-party client — the one HTTP-touching assembly in the cone. *)
 
-let fire name =
+let json_mem name = function
+  | Jsont.Object (mems, _) -> Option.map snd (Jsont.Json.find_mem name mems)
+  | _ -> None
+
+let json_string = function Jsont.String (s, _) -> Some s | _ -> None
+
+let json_int = function
+  | Jsont.Number (v, _) when Float.is_integer v -> Some (int_of_float v)
+  | _ -> None
+
+let contains ~needle haystack =
+  let n = String.length needle and m = String.length haystack in
+  let rec go i = i + n <= m && (String.equal (String.sub haystack i n) needle || go (i + 1)) in
+  n > 0 && go 0
+
+let api_error e = Github_api.Error.message e
+
+(* The sweep listing's page items, mapped to the pipeline's open-PR shape.
+   Members the pipeline does not gate on are ignored, the narrow-read
+   posture every foreign payload gets. *)
+let open_prs_of_pages pages =
+  List.concat_map
+    (fun page ->
+      match page with
+      | Jsont.Array (items, _) ->
+          List.filter_map
+            (fun item ->
+              let ( let* ) = Option.bind in
+              let* number = Option.bind (json_mem "number" item) json_int in
+              let* head_sha =
+                Option.bind
+                  (Option.bind (json_mem "head" item) (json_mem "sha"))
+                  json_string
+              in
+              let* base_ref =
+                Option.bind
+                  (Option.bind (json_mem "base" item) (json_mem "ref"))
+                  json_string
+              in
+              let* draft =
+                match json_mem "draft" item with
+                | Some (Jsont.Bool (b, _)) -> Some b
+                | _ -> None
+              in
+              let* author_association =
+                Option.bind (json_mem "author_association" item) json_string
+              in
+              Some
+                {
+                  Charter_fire.Github.number;
+                  head_sha;
+                  base_ref;
+                  draft;
+                  author_association;
+                })
+            items
+      | _ -> [])
+    pages
+
+(* The posted-comments closure: both comment families the publisher writes
+   into, filtered to the credential's own login and this tool's marker
+   openers — marker presence alone is forgeable, so the author predicate is
+   what makes a comment ours. Assumes the read and write credentials share
+   the owner's posting identity, which single-owner charters do. *)
+let posted_listing api ~repo ~number =
+  let ( let* ) = Result.bind in
+  let* login =
+    match Github_api.get api ~path:"/user" with
+    | Error e -> Error (api_error e)
+    | Ok json -> (
+        match Option.bind (json_mem "login" json) json_string with
+        | Some login -> Ok login
+        | None -> Error "/user answered without a login member")
+  in
+  let listing path =
+    match Github_api.get_paginated api ~path ~max_pages:10 with
+    | Error e -> Error (api_error e)
+    | Ok pages ->
+        Ok
+          (List.concat_map
+             (fun page ->
+               match page with Jsont.Array (items, _) -> items | _ -> [])
+             pages)
+  in
+  let* review_comments =
+    listing (Printf.sprintf "/repos/%s/pulls/%d/comments?per_page=100" repo number)
+  in
+  let* issue_comments =
+    listing (Printf.sprintf "/repos/%s/issues/%d/comments?per_page=100" repo number)
+  in
+  let ours item =
+    let by_us =
+      Option.bind (Option.bind (json_mem "user" item) (json_mem "login")) json_string
+      = Some login
+    in
+    let marked =
+      match Option.bind (json_mem "body" item) json_string with
+      | Some body -> contains ~needle:"<!-- mentat-" body
+      | None -> false
+    in
+    by_us && marked
+  in
+  let rows =
+    List.filter_map
+      (fun item ->
+        if not (ours item) then None
+        else
+          match
+            ( Option.bind (json_mem "id" item) json_int,
+              Option.bind (json_mem "body" item) json_string )
+          with
+          | Some id, Some body ->
+              Some
+                (Output.Json.obj
+                   [ ("id", Output.Json.int id); ("body", Output.Json.string body) ])
+          | _ -> None)
+      (review_comments @ issue_comments)
+  in
+  Ok (Output.Json.to_string (Output.Json.list rows))
+
+let fire_env t (loaded : Charter_store.Loaded.t) =
+  let dirs = Composition.dirs t in
+  let repo = loaded.Charter_store.Loaded.charter.Charter.repo in
+  let* token =
+    let path =
+      Filename.concat
+        (Filename.concat loaded.Charter_store.Loaded.dir "secrets")
+        "read-token"
+    in
+    match Fs.read_capped ~max_bytes:Fs.default_max_bytes path with
+    | Ok (Some bytes) when String.length (String.trim bytes) > 0 ->
+        Ok (String.trim bytes)
+    | Ok (Some _) | Ok None ->
+        Error
+          (Exit_status.runtime
+             (Printf.sprintf
+                "fire needs the GitHub read credential at %s (a fine-grained \
+                 PAT with read access to %s)"
+                path repo))
+    | Error message -> Error (Exit_status.runtime message)
+  in
+  let base_url = Composition.getenv t "MENTAT_GITHUB_BASE_URL" in
+  let* api =
+    match Github_api.make ?base_url ~token (Eio.Stdenv.net (Composition.stdenv t)) with
+    | Ok api -> Ok api
+    | Error e -> Error (Exit_status.runtime (api_error e))
+  in
+  let github =
+    {
+      Charter_fire.Github.current_head =
+        (fun ~number ->
+          match
+            Github_api.get api ~path:(Printf.sprintf "/repos/%s/pulls/%d" repo number)
+          with
+          | Error e -> Error (api_error e)
+          | Ok json -> (
+              match
+                Option.bind
+                  (Option.bind (json_mem "head" json) (json_mem "sha"))
+                  json_string
+              with
+              | Some sha -> Ok sha
+              | None -> Error "pull request answered without head.sha"));
+      open_prs =
+        (fun () ->
+          match
+            Github_api.get_paginated api
+              ~path:(Printf.sprintf "/repos/%s/pulls?state=open&per_page=100" repo)
+              ~max_pages:10
+          with
+          | Error e -> Error (api_error e)
+          | Ok pages -> Ok (open_prs_of_pages pages));
+      posted = (fun ~number -> posted_listing api ~repo ~number);
+    }
+  in
+  let git_url =
+    match Composition.getenv t "MENTAT_CHARTER_GIT_URL" with
+    | Some url when String.length url > 0 -> url
+    | Some _ | None -> Printf.sprintf "https://github.com/%s.git" repo
+  in
+  Ok
+    {
+      Charter_fire.dirs;
+      store = Composition.store t;
+      catalog = Composition.catalog t;
+      stdenv = Composition.stdenv t;
+      environment = Composition.environment t;
+      mentat_bin = Sys.executable_name;
+      git_url;
+      github;
+    }
+
+let fire name event_file sweep key =
   (let* name = Argv.charter_name name in
-   Error
-     (Exit_status.runtime
-        (Printf.sprintf
-           "charter fire %s: not implemented in this build (--event and \
-            --sweep land with the fire pipeline)"
-           name)))
+   let* () =
+     match (event_file, sweep) with
+     | Some _, true ->
+         Error (Exit_status.usage "choose one of --event or --sweep")
+     | _ -> Ok ()
+   in
+   let* () =
+     match (key, event_file, sweep) with
+     | Some _, Some _, _ | Some _, _, true ->
+         Error
+           (Exit_status.usage
+              "--key names a bare fire's identity; --event and --sweep carry \
+               their delivery's own")
+     | _ -> Ok ()
+   in
+   Ok
+     (Composition.with_base ~cwd:None ~overrides:[] (fun t ->
+          match Charter_store.load (Composition.dirs t) ~name with
+          | Error e -> Exit_status.runtime (Charter_store.Error.message e)
+          | Ok loaded -> (
+              let cli_armed =
+                List.exists
+                  (function
+                    | Charter.Trigger.Cli -> true
+                    | Charter.Trigger.Github_webhook _ -> false)
+                  loaded.Charter_store.Loaded.charter.Charter.triggers
+              in
+              if not cli_armed then
+                Exit_status.usage
+                  (Printf.sprintf
+                     "charter %s has no cli trigger arm; add {\"kind\": \
+                      \"cli\"} to its trigger list to fire it by hand"
+                     name)
+              else
+                let outcome status =
+                  match status with
+                  | Ok Charter_fire.Disposed -> Exit_status.Success
+                  | Ok Charter_fire.Interrupted -> Exit_status.Interrupted
+                  | Error message -> Exit_status.runtime message
+                in
+                match (event_file, sweep) with
+                | None, false ->
+                    (* Every version-1 charter reviews pull requests, so a
+                       bare or --key fire has nothing to review; the (digest,
+                       key) identity is minted vocabulary awaiting a charter
+                       shape that runs without an event. *)
+                    Exit_status.usage
+                      (Printf.sprintf
+                         "charter %s reviews pull requests and a bare fire \
+                          has nothing to review; use --event FILE or --sweep"
+                         name)
+                | (Some _, _ | None, true)
+                  when not (webhook_arm loaded.Charter_store.Loaded.charter) ->
+                    Exit_status.usage
+                      (Printf.sprintf
+                         "charter %s has no github_webhook trigger; --event \
+                          and --sweep replay webhook deliveries"
+                         name)
+                | Some file, _ -> (
+                    match Fs.read_capped ~max_bytes:(1024 * 1024) file with
+                    | Ok None ->
+                        Exit_status.usage
+                          (Printf.sprintf "--event: file not found: %s" file)
+                    | Error message -> Exit_status.runtime message
+                    | Ok (Some body) -> (
+                        match fire_env t loaded with
+                        | Error status -> status
+                        | Ok env ->
+                            outcome (Charter_fire.fire_event env loaded ~body)))
+                | None, true -> (
+                    match fire_env t loaded with
+                    | Error status -> status
+                    | Ok env -> outcome (Charter_fire.fire_sweep env loaded))))))
   |> Exit_status.of_result
 
 (* command assembly *)
@@ -325,20 +589,69 @@ let remove_cmd =
     (Cmd.info "remove" ~doc ~docs ~man ~exits:Cli_common.exits)
     (Exit_status.term Term.(const remove $ name_arg))
 
+let event_opt =
+  let doc =
+    "Drive the saved webhook delivery in $(docv) — the raw pull_request \
+     payload bytes — through the pipeline, fenced exactly as the ingress \
+     fences a live delivery."
+  in
+  Arg.(value & opt (some string) None & info [ "event" ] ~docv:"FILE" ~doc)
+
+let sweep_flag =
+  let doc =
+    "Reconcile against the repository's open pull requests: one listing \
+     with the read credential, then one synthesized delivery per head that \
+     holds no receipt under the current policy digest."
+  in
+  Arg.(value & flag & info [ "sweep" ] ~doc)
+
+let key_opt =
+  let doc =
+    "The identity key of a bare fire; distinct keys are distinct events. \
+     Reserved: every version-1 charter is event-shaped, so a bare fire is \
+     refused."
+  in
+  Arg.(value & opt (some string) None & info [ "key" ] ~docv:"STRING" ~doc)
+
 let fire_cmd =
-  let doc = "Fire a charter by hand (not implemented in this build)." in
+  let doc = "Fire a charter by hand: a saved delivery, or a sweep." in
+  let envs =
+    [
+      Cmd.Env.info "MENTAT_GITHUB_BASE_URL"
+        ~doc:
+          "Overrides the GitHub API base for the read closures and the \
+           publisher child — for GitHub Enterprise hosts and offline test \
+           servers.";
+      Cmd.Env.info "MENTAT_CHARTER_GIT_URL"
+        ~doc:
+          "Overrides the git remote the checkout fetches from (derived from \
+           the charter's repository by default) — for GitHub Enterprise \
+           hosts and offline test fixtures.";
+    ]
+  in
   let man =
     [
       `S Manpage.s_description;
       `P
-        "The fire pipeline — $(b,--event FILE) to run a saved delivery, \
-         $(b,--sweep) to reconcile against the open pull requests — is not \
-         in this build; the verb refuses until it lands.";
+        "Runs the charter pipeline in this process: gate, identity claim, \
+         delivery receipt, budget fences, checkout provisioning, the sealed \
+         review run, the disposition receipt with usage and derived cost, \
+         publication through the connector, and the egress receipt. \
+         $(b,--event FILE) drives a saved delivery; $(b,--sweep) synthesizes \
+         one delivery per open pull request head without a receipt, so a \
+         crontab line is a complete, fenced, deduplicated review charter \
+         with no listener.";
+      `P
+        "The read credential is $(b,secrets/read-token) in the charter \
+         directory; the write credential, $(b,secrets/write-token), is \
+         optional — absent, the run still reviews and the egress receipt \
+         records that publication was skipped.";
     ]
   in
   Cmd.v
-    (Cmd.info "fire" ~doc ~docs ~man ~exits:Cli_common.exits)
-    (Exit_status.term Term.(const fire $ name_arg))
+    (Cmd.info "fire" ~doc ~docs ~envs ~man ~exits:Cli_common.exits)
+    (Exit_status.term
+       Term.(const fire $ name_arg $ event_opt $ sweep_flag $ key_opt))
 
 let cmd =
   let doc = "Manage standing, unattended review charters." in

@@ -52,12 +52,13 @@ On empty state a charter has no runs to show.
 
   $ mentat charter runs pr-review
 
-`fire` is registered so the surface is visible, but the pipeline is not in
-this build.
+A bare fire has nothing to review — every version-1 charter reviews pull
+requests — so the verb asks for a delivery or a sweep (fire.t drives the
+full pipeline).
 
   $ mentat charter fire pr-review 2>&1
-  mentat: charter fire pr-review: not implemented in this build (--event and --sweep land with the fire pipeline)
-  [1]
+  mentat: charter pr-review reviews pull requests and a bare fire has nothing to review; use --event FILE or --sweep
+  [2]
 
 `remove` deletes the configuration — secrets and webhook identity included.
 No state was recorded here, so nothing is named as kept.

@@ -1,6 +1,7 @@
 (library
  (name mentat_boot)
  (libraries
+  base64
   cmdliner
   dune-build-info
   eio
@@ -40,6 +41,7 @@
   mentat_mutation
   mirage-crypto-rng
   mirage-crypto-rng.unix
+  subprocess
   textdiff
   mentat_tool
   mtime

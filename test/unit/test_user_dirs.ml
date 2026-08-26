@@ -16,6 +16,7 @@ let dirs () =
       ("MENTAT_CONFIG_HOME", "/home/u/.config/mentat");
       ("MENTAT_DATA_HOME", "/home/u/.local/share/mentat");
       ("MENTAT_STATE_HOME", "/home/u/.local/state/mentat");
+      ("MENTAT_CACHE_HOME", "/home/u/.cache/mentat");
     ]
   in
   match User_dirs.resolve ~getenv:(fun k -> List.assoc_opt k env) with
@@ -87,7 +88,13 @@ let charter_paths () =
     (User_dirs.charter_dir dirs "pr-review");
   equal string ~msg:"charter_state_dir lives under the state home"
     "/home/u/.local/state/mentat/charters/pr-review"
-    (User_dirs.charter_state_dir dirs "pr-review")
+    (User_dirs.charter_state_dir dirs "pr-review");
+  (* Run roots live under the cache home: every other home is denied to
+     sandboxed runs as one of Mentat's own directories, and a workspace root
+     inside a denied tree is refused at sandbox resolve. *)
+  equal string ~msg:"charter_runs_dir lives under the cache home"
+    "/home/u/.cache/mentat/charters/pr-review/runs"
+    (User_dirs.charter_runs_dir dirs "pr-review")
 
 let () =
   run "mentat.user_dirs"

@@ -19,6 +19,7 @@ let make_dirs root =
       ("MENTAT_CONFIG_HOME", Filename.concat root "config");
       ("MENTAT_DATA_HOME", Filename.concat root "data");
       ("MENTAT_STATE_HOME", Filename.concat root "state");
+      ("MENTAT_CACHE_HOME", Filename.concat root "cache");
     ]
   in
   match User_dirs.resolve ~getenv:(fun k -> List.assoc_opt k env) with
@@ -238,7 +239,9 @@ let receipts_roundtrip () =
        (ok ~msg:"read empty" (Charter_store.read_receipts dirs ~name)));
   let delivery = receipt ~at:1000.0 Receipt.Kind.Delivery in
   let spawned =
-    receipt ~at:1001.0 (Receipt.Kind.Disposition Receipt.Disposition.Spawned)
+    receipt ~at:1001.0
+      (Receipt.Kind.Disposition
+         (Receipt.Disposition.Spawned { session = "c-fdfec12877f34773" }))
   in
   ok ~msg:"append delivery" (Charter_store.append_receipt dirs ~name delivery);
   ok ~msg:"append spawned" (Charter_store.append_receipt dirs ~name spawned);

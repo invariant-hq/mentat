@@ -3,7 +3,12 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-type t = { config_home : string; data_home : string; state_home : string }
+type t = {
+  config_home : string;
+  data_home : string;
+  state_home : string;
+  cache_home : string;
+}
 
 let is_absolute path = String.length path > 0 && Char.equal path.[0] '/'
 
@@ -41,11 +46,16 @@ let resolve ~getenv =
     resolve_home ~getenv ~override:"MENTAT_STATE_HOME" ~xdg:"XDG_STATE_HOME"
       ~fallback:".local/state/mentat"
   in
-  Ok { config_home; data_home; state_home }
+  let* cache_home =
+    resolve_home ~getenv ~override:"MENTAT_CACHE_HOME" ~xdg:"XDG_CACHE_HOME"
+      ~fallback:".cache/mentat"
+  in
+  Ok { config_home; data_home; state_home; cache_home }
 
 let config_home t = t.config_home
 let data_home t = t.data_home
 let state_home t = t.state_home
+let cache_home t = t.cache_home
 let config_file t = Filename.concat t.config_home "config.json"
 let auth_file t = Filename.concat t.config_home "auth.json"
 let trust_file t = Filename.concat t.config_home "trust.json"
@@ -55,6 +65,18 @@ let charter_dir t name = Filename.concat (charters_dir t) name
 
 let charter_state_dir t name =
   Filename.concat (Filename.concat t.state_home "charters") name
+
+(* Run roots live under the cache home, not the state home, because every
+   other home is denied to sandboxed runs as one of Mentat's own directories
+   — a workspace root inside a denied tree is refused at resolve — and that
+   denial is what keeps the auth store and charter secrets out of a run
+   child's reach. The cache home is deliberately not a denied directory: it
+   holds exactly these disposable checkouts, re-materializable from the
+   remote, and nothing that authenticates. *)
+let charter_runs_dir t name =
+  Filename.concat
+    (Filename.concat (Filename.concat t.cache_home "charters") name)
+    "runs"
 
 (* The socket lives under literal [/tmp], not the daemon dir, so a deep checkout
    or a relocated home cannot overflow [sun_path] (~104 bytes). It is per-user

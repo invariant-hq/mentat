@@ -30,6 +30,15 @@ val data_home : t -> string
 val state_home : t -> string
 (** [state_home t] is the absolute state directory. *)
 
+val cache_home : t -> string
+(** [cache_home t] is the absolute cache directory — disposable,
+    re-materializable data: an absolute [MENTAT_CACHE_HOME] wins, else
+    [XDG_CACHE_HOME/mentat], else [$HOME/.cache/mentat]. Unlike the other
+    three homes it is {e not} one of the directories the sandbox denies to
+    every confined run, because it exists to hold the charter run roots
+    those runs are granted as their workspace; nothing that authenticates
+    may ever live under it. *)
+
 val config_file : t -> string
 (** [config_file t] is [config_home / "config.json"]. *)
 
@@ -59,10 +68,20 @@ val charter_dir : t -> string -> string
 
 val charter_state_dir : t -> string -> string
 (** [charter_state_dir t name] is [state_home / "charters" / name] — the
-    charter's durable record: its receipt log, its per-event-identity claim
-    markers, and its run roots. Homed under the state home, apart from the
-    config-home policy, so removing a charter's configuration can leave its
-    audit trail in place. *)
+    charter's durable record: its receipt log and its per-event-identity
+    claim markers. Homed under the state home, apart from the config-home
+    policy, so removing a charter's configuration can leave its audit trail
+    in place. *)
+
+val charter_runs_dir : t -> string -> string
+(** [charter_runs_dir t name] is [cache_home / "charters" / name / "runs"] —
+    the directory whose per-session subdirectories are [name]'s run roots:
+    each holds one ephemeral checkout, the reviewed diff, the run prompt,
+    and the run log, and is the run child's workspace root. Homed under the
+    cache home because the other homes are denied to sandboxed runs as
+    Mentat's own directories — a workspace root inside one would be refused
+    at sandbox resolve — and because a run root is disposable: the durable
+    outcome lives in the session journal and the receipt log, never here. *)
 
 val daemon_socket_dir : t -> string
 (** [daemon_socket_dir t] is [/tmp/mentat-<uid>-<key>], the directory the

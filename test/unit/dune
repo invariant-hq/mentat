@@ -439,6 +439,17 @@
  (modules test_charter)
  (libraries windtrap mentat_charter jsont jsont.bytesrw))
 
+; The fire pipeline is a boot-library module (both binaries invoke it), so
+; its pure folds are driven through the linked library rather than a
+; flat-directory copy — its effectful spine composes half of boot.
+
+(test
+ (name test_charter_fire)
+ (modules test_charter_fire)
+ (flags
+  (:standard -open Mentat_boot))
+ (libraries windtrap mentat_boot mentat_charter jsont jsont.bytesrw))
+
 (test
  (name test_store)
  (modules test_store)
