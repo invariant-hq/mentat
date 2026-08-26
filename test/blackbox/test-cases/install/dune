@@ -1,0 +1,16 @@
+; The installer under test. scripts/install.sh is copied in as install.sh and
+; declared as a cram dep, so every .t in this family drives the real script
+; from its own sandbox against a local file:// release fixture (via the
+; MENTAT_INSTALL_BASE_URL test seam — no network, ever). curl is a hard
+; requirement: the seam admits file:// through curl's protocol allowlist, and
+; the wget fallbacks cannot fetch file:// URLs at all.
+
+(cram
+ (applies_to :whole_subtree)
+ (alias blackbox)
+ (deps
+  install.sh
+  %{bin:curl}))
+
+(rule
+ (copy ../../../../scripts/install.sh install.sh))

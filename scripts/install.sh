@@ -19,6 +19,18 @@ set -eu
 REPO="invariant-hq/mentat"
 GITHUB="https://github.com"
 
+# Test seam: MENTAT_INSTALL_BASE_URL replaces the GitHub release root in the
+# download URLs so the test suite can install from a local file:// fixture
+# tree shaped like <root>/releases/download/<version>/, and file transfers
+# are then permitted alongside https. Unset (every real install), both
+# values keep the GitHub behavior documented above, byte for byte.
+RELEASE_ROOT="$GITHUB/$REPO"
+FETCH_PROTO='=https'
+if [ -n "${MENTAT_INSTALL_BASE_URL:-}" ]; then
+  RELEASE_ROOT="$MENTAT_INSTALL_BASE_URL"
+  FETCH_PROTO='=https,file'
+fi
+
 usage() {
   cat <<'EOF'
 Install mentat, the OCaml coding agent.
@@ -62,7 +74,7 @@ select_downloader() {
 
 fetch() {
   if [ "$downloader" = curl ]; then
-    curl -fsSL --proto '=https' --tlsv1.2 -o "$2" "$1"
+    curl -fsSL --proto "$FETCH_PROTO" --tlsv1.2 -o "$2" "$1"
   elif [ "$wget_gnu" = 1 ]; then
     wget -q --https-only -O "$2" "$1"
   else
@@ -134,10 +146,10 @@ resolve_version() {
     printf '%s' "$version"
     return
   fi
-  url="$GITHUB/$REPO/releases/latest"
+  url="$RELEASE_ROOT/releases/latest"
   if [ "$downloader" = curl ]; then
     location="$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
-      --proto '=https' --tlsv1.2 "$url")" || err "cannot reach $url"
+      --proto "$FETCH_PROTO" --tlsv1.2 "$url")" || err "cannot reach $url"
   else
     [ "$wget_gnu" = 1 ] || err "this wget cannot report the latest release;
 pass --version X.Y.Z, or install curl or GNU wget"
@@ -158,16 +170,18 @@ modify_path() {
   *":$install_dir:"*) return 0 ;;
   esac
 
-  # Make the freshly installed binary visible to GitHub Actions steps.
-  if [ -n "${GITHUB_PATH:-}" ]; then
-    echo "$install_dir" >> "$GITHUB_PATH"
-    return 0
-  fi
-
+  # --no-modify-path means no path modification anywhere, the GitHub Actions
+  # file included; a workflow that wants the append simply omits the flag.
   if [ "$no_modify_path" = 1 ]; then
     say ""
     say "Add $install_dir to your PATH to use mentat:"
     say "  export PATH=\"$install_dir:\$PATH\""
+    return 0
+  fi
+
+  # Make the freshly installed binary visible to GitHub Actions steps.
+  if [ -n "${GITHUB_PATH:-}" ]; then
+    echo "$install_dir" >> "$GITHUB_PATH"
     return 0
   fi
 
@@ -297,7 +311,7 @@ main() {
   target="$(detect_target)"
   version="$(resolve_version)"
   archive="mentat-$target.tar.gz"
-  base="$GITHUB/$REPO/releases/download/$version"
+  base="$RELEASE_ROOT/releases/download/$version"
 
   installed="$install_dir/mentat"
   installed_d="$install_dir/mentatd"
