@@ -4,6 +4,7 @@
  (package mentat)
  (flags (:standard -open Mentat_boot))
  (modules
+  charter_dashboard
   charter_reconcile
   child_broker
   child_spawn

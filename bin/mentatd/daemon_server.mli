@@ -64,7 +64,10 @@ val serve :
     working-directory workspace. [web_port] pins the loopback port ([None] takes
     an ephemeral one); the URL to open — carrying the bootstrap token — is
     printed to stdout. A web frontend whose client cannot assemble is a loud
-    warning that skips the browser listener, leaving the wire serving.
+    warning that skips the browser listener, leaving the wire serving. The
+    same mount serves the charters dashboard ({!Charter_dashboard}) at
+    [/charters], read fresh per request from the roster, the receipt logs,
+    and the run fences.
 
     [spawned] is the hidden [--spawned] flag: when set the daemon calls [setsid]
     at startup so it outlives the terminal. A first SIGTERM/SIGINT stops

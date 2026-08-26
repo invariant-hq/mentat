@@ -553,14 +553,23 @@ let web_cwd_root () =
    [Routes.to_http]; [stream] follows a session's live render, translating each
    [Routes.Frame.t] to the edge's frame. A feed fault is [mentat.web]'s to own —
    the daemon logs it and lets the stream end, so the browser's [EventSource]
-   re-attaches and catches up from [Last-Event-ID]; no frame is fabricated. *)
-let web_handler env : Server.Web.handler =
+   re-attaches and catches up from [Last-Event-ID]; no frame is fabricated.
+
+   The charters dashboard is the daemon's own page, routed before the
+   library's table: its inputs — the roster, the receipt logs, the run
+   fences — live outside the one client [mentat.web] is allowed to reach. *)
+let web_handler ~charters env : Server.Web.handler =
   {
     Server.Web.respond =
       (fun ~meth ~path ~query ~body ->
+        let response =
+          match (meth, path) with
+          | ("GET" | "HEAD"), [ "charters" ] ->
+              Mentat_web.Routes.Html (charters ())
+          | _ -> Mentat_web.Routes.handle env ~meth ~path ~query ~body
+        in
         let { Mentat_web.Routes.Http.status; headers; body } =
-          Mentat_web.Routes.to_http
-            (Mentat_web.Routes.handle env ~meth ~path ~query ~body)
+          Mentat_web.Routes.to_http response
         in
         { Server.Web.status; headers; body });
     stream =
@@ -588,7 +597,7 @@ let web_handler env : Server.Web.handler =
    daemon's life so the eviction sweep never pulls it out from under the web
    client, and the loopback origins the edge allow-lists are derived from the
    bound port. *)
-let start_web registry ~sw ~net ~clock ~web_port ~token =
+let start_web registry ~sw ~net ~clock ~web_port ~token ~charters =
   let root = web_cwd_root () in
   match get_or_boot registry ~root () with
   | Error status -> Error (exit_message status)
@@ -631,7 +640,9 @@ let start_web registry ~sw ~net ~clock ~web_port ~token =
       let branch ~on_url () =
         Server.Web.serve ~sw ~clock ~token
           ~on_rotate:(fun successor -> on_url (url_of successor))
-          ~origins (web_handler env) listener
+          ~origins
+          (web_handler ~charters env)
+          listener
       in
       Ok (branch, url_of token)
 
@@ -768,10 +779,22 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                    every start. The web branch is computed before the discovery
                    write so its URL is recorded in daemon.json, which is where every
                    client reads it from. *)
+                (* The dashboard's reads happen per request inside the
+                   closure — never here — so a charter installed while the
+                   daemon runs renders at its next request. *)
+                let charters_page () =
+                  Charter_dashboard.page ~now:(Unix.gettimeofday ())
+                    ~ingress:(Option.map snd ingress_listener)
+                    (Charter_dashboard.observe ~dirs
+                       ~store:shared.Composition.store)
+                in
                 let web_branch, web_url =
                   if web then (
                     let token = Server.Token.generate () in
-                    match start_web registry ~sw ~net ~clock ~web_port ~token with
+                    match
+                      start_web registry ~sw ~net ~clock ~web_port ~token
+                        ~charters:charters_page
+                    with
                     | Ok (branch, url) ->
                         (* Only a foreground daemon has a reader. A spawned one's
                            stdout is daemon.log, which is never rotated and which a
