@@ -20,4 +20,5 @@
   mentat_review
   mentat_session
   mentat_workspace
+  optint
   unix))

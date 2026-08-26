@@ -173,6 +173,16 @@ val on_disk_dir : Handle.t -> Mentat_session.Id.t -> string
     capability. A mismatch degrades a probe to "missing", never a wrong claim.
 *)
 
+val stamp : Handle.t -> Mentat_session.Id.t -> string option
+(** [stamp root id] is a cheap identity of [id]'s persisted document bytes,
+    derived from the document file's metadata (device, inode, size,
+    modification time) — one [stat] where {!load} is a read and a decode, for
+    consumers that poll a journal they do not drive. Every commit replaces the
+    document onto a fresh inode, so in practice equal stamps mean unchanged
+    bytes; the equality is metadata, not content, so a stamp only elides a
+    reload on a poll — it never stands in for a read whose value a caller acts
+    on. [None] when the document is missing or unreadable. *)
+
 val load : Handle.t -> Mentat_session.Id.t -> (Document.t, Error.t) result
 (** [load root id] loads and decodes the document for [id] through
     {!Mentat_session.jsont} — semantic replay is validated before [Ok].

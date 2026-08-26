@@ -17,6 +17,7 @@ module Registry = struct
     guard : Mutex.t;
     keyed : (string, keyed) Hashtbl.t;
     reservations : (string, token * Owner.t) Hashtbl.t;
+    probes : (string, int) Hashtbl.t;
   }
 
   let create () =
@@ -24,6 +25,7 @@ module Registry = struct
       guard = Mutex.create ();
       keyed = Hashtbl.create 8;
       reservations = Hashtbl.create 8;
+      probes = Hashtbl.create 8;
     }
 
   (* [users] counts owners and waiters before either can block; the last one
@@ -51,11 +53,43 @@ module Registry = struct
   let try_reserve t key owner =
     Mutex.protect t.guard (fun () ->
         match Hashtbl.find_opt t.reservations key with
-        | Some (_, holder) -> Error holder
+        | Some (_, holder) -> Error (`Reserved holder)
         | None ->
-            let token = ref false in
-            Hashtbl.add t.reservations key (token, owner);
-            Ok token)
+            if Hashtbl.mem t.probes key then Error `Probing
+            else begin
+              let token = ref false in
+              Hashtbl.add t.reservations key (token, owner);
+              Ok token
+            end)
+
+  (* Probes coexist — a probe descriptor holds no lock, so two open at once
+     drop nothing at close — which is why this is a count, not a slot: only
+     acquisition must wait out an open probe, never a sibling probe (a probe
+     turned away by another probe would read as a same-process hold to its
+     caller). *)
+  let probe t key f =
+    let admitted =
+      Mutex.protect t.guard (fun () ->
+          match Hashtbl.find_opt t.reservations key with
+          | Some (_, holder) -> Error holder
+          | None ->
+              let count =
+                Option.value (Hashtbl.find_opt t.probes key) ~default:0
+              in
+              Hashtbl.replace t.probes key (count + 1);
+              Ok ())
+    in
+    match admitted with
+    | Error _ as e -> e
+    | Ok () ->
+        Fun.protect
+          ~finally:(fun () ->
+            Mutex.protect t.guard (fun () ->
+                match Hashtbl.find_opt t.probes key with
+                | Some 1 -> Hashtbl.remove t.probes key
+                | Some count -> Hashtbl.replace t.probes key (count - 1)
+                | None -> ()))
+          (fun () -> Ok (f ()))
 
   let confirm t token = Mutex.protect t.guard (fun () -> token := true)
 
@@ -71,10 +105,6 @@ module Registry = struct
         match Hashtbl.find_opt t.reservations key with
         | Some (current, _) -> current == token && !current
         | None -> false)
-
-  let holder t key =
-    Mutex.protect t.guard (fun () ->
-        Option.map snd (Hashtbl.find_opt t.reservations key))
 end
 
 (* The process-local intern table: physical root identity to registry, scoped to

@@ -42,7 +42,11 @@ type guard = Handle.guard
 type acquire_error = [ `Held of Owner.t option | `Io of Io.t ]
 (** The type for acquisition outcomes that are not the fence. [`Held None] means
     the fence is held but its owner line was unreadable (torn or
-    pre-owner-line): the exclusion is real, only the display is absent. *)
+    pre-owner-line) — the exclusion is real, only the display is absent — or
+    that a same-process {!holder} probe had its descriptor open at that
+    instant, a transient refusal a retry finds gone: a lock taken during the
+    probe's window would be dropped when the probe descriptor closes, so the
+    contender is turned away instead. *)
 
 val try_acquire :
   sw:Eio.Switch.t ->
@@ -92,12 +96,16 @@ val holder :
     the truth: a [run.lock] left behind by a crashed driver reads [`Free].
 
     {b Same-process visibility.} A fence held or being acquired by {e this}
-    process is answered from the root's reservation registry, before any
-    descriptor is opened — POSIX record locks never conflict within one
-    process, so the OS probe cannot see them, and a probe descriptor opened
-    onto an inode this process holds locked would drop the lock at close. What
-    the OS probe then observes is exactly the cross-process contract: [`Held]
-    iff {e another} process holds the lock. *)
+    process is answered from the root's reservation registry with no
+    descriptor touched — POSIX record locks never conflict within one process,
+    so the OS probe cannot see them, and a probe descriptor opened onto an
+    inode this process holds locked would drop the lock at close. The probe
+    and same-process acquisition are mutually exclusive per key: while the
+    probe descriptor is open no acquisition is admitted (it is turned away
+    with a transient [`Held None]), so the no-same-process-lock premise holds
+    across the probe's own suspension points, not merely at its first check.
+    What the OS probe observes is then exactly the cross-process contract:
+    [`Held] iff {e another} process holds the lock. *)
 
 val session : guard -> Mentat_session.Id.t
 (** [session guard] is the fenced session. *)

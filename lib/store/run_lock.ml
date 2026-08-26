@@ -50,57 +50,66 @@ let read_holder fd =
           | Ok owner -> Some owner
           | Error _ -> None))
 
-(* The registry answers for this process before any descriptor opens: the OS
-   probe below cannot see same-process locks (POSIX record locks never conflict
+(* The registry admits the probe before any descriptor opens: the OS probe
+   below cannot see same-process locks (POSIX record locks never conflict
    within one process), and a probe descriptor opened onto an inode this
-   process holds locked would drop the lock at close. With the registry clear,
-   this process holds no lock on the inode, so the probe descriptor is safe to
-   open and close. [F_TEST] observes other-process locks only — exactly the
-   cross-process contract. *)
+   process holds locked would drop the lock at close. [Registry.probe] makes
+   the premise true by construction, not merely at the moment of a check: an
+   existing reservation answers [`Held] with no descriptor touched, and while
+   the probe descriptor is open no same-process acquisition is admitted — an
+   acquire racing the probe sees a transient [`Held] instead of landing a
+   fence the probe's close would silently drop. [F_TEST] then observes
+   other-process locks only — exactly the cross-process contract. *)
 let holder root ~session =
   let registry = Handle.registry root in
   let key = Mentat_session.Id.to_string session in
-  match Handle.Registry.holder registry key with
-  | Some owner -> `Held (Some owner)
-  | None -> (
-      let path = Layout.run_lock session in
-      let cap = Handle.path root path in
-      let probe () =
-        Eio.Path.with_open_in cap @@ fun resource ->
-        Eio_unix.Fd.use_exn "run-lock holder" (Disk.fd_of resource)
-          (fun ufd ->
-            let rec test () =
-              match Unix.lockf ufd Unix.F_TEST 0 with
-              | () -> `Free
-              | exception Unix.Unix_error (Unix.EINTR, _, _) -> test ()
-              | exception Unix.Unix_error ((Unix.EACCES | Unix.EAGAIN), _, _) ->
-                  `Held (read_holder ufd)
-              | exception Unix.Unix_error (code, _, _) ->
-                  `Io
-                    {
-                      Io.op = Io.Lock;
-                      path;
-                      cause = Io.Message (Unix.error_message code);
-                    }
-            in
-            test ())
-      in
-      match probe () with
-      | outcome -> outcome
-      | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
-      | exception Eio.Io (Eio.Fs.E (Eio.Fs.Not_found _), _) -> `Free
-      | exception exn -> (
-          try Disk.raise_io ~op:Io.Open ~path exn
-          with Disk.Io_error payload -> `Io payload))
+  let path = Layout.run_lock session in
+  let cap = Handle.path root path in
+  let probe () =
+    Eio.Path.with_open_in cap @@ fun resource ->
+    Eio_unix.Fd.use_exn "run-lock holder" (Disk.fd_of resource)
+      (fun ufd ->
+        let rec test () =
+          match Unix.lockf ufd Unix.F_TEST 0 with
+          | () -> `Free
+          | exception Unix.Unix_error (Unix.EINTR, _, _) -> test ()
+          | exception Unix.Unix_error ((Unix.EACCES | Unix.EAGAIN), _, _) ->
+              `Held (read_holder ufd)
+          | exception Unix.Unix_error (code, _, _) ->
+              `Io
+                {
+                  Io.op = Io.Lock;
+                  path;
+                  cause = Io.Message (Unix.error_message code);
+                }
+        in
+        test ())
+  in
+  let contained () =
+    match probe () with
+    | outcome -> outcome
+    | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
+    | exception Eio.Io (Eio.Fs.E (Eio.Fs.Not_found _), _) -> `Free
+    | exception exn -> (
+        try Disk.raise_io ~op:Io.Open ~path exn
+        with Disk.Io_error payload -> `Io payload)
+  in
+  match Handle.Registry.probe registry key contained with
+  | Error owner -> `Held (Some owner)
+  | Ok outcome -> outcome
 
 let try_acquire ~sw root ~session ~owner =
   let registry = Handle.registry root in
   let key = Mentat_session.Id.to_string session in
   (* Reserve before open: at most one same-process contender ever reaches the
      descriptor, so no two descriptors to a candidate run.lock exist in this
-     process. *)
+     process. A fence probe in flight also turns the reservation away —
+     [`Held None], transient for the probe descriptor's lifetime — because a
+     lock taken while the probe's descriptor is open would be dropped at its
+     close. *)
   match Handle.Registry.try_reserve registry key owner with
-  | Error holder -> Error (`Held (Some holder))
+  | Error (`Reserved holder) -> Error (`Held (Some holder))
+  | Error `Probing -> Error (`Held None)
   | Ok token -> (
       let path = Layout.run_lock session in
       let cap = Handle.path root path in

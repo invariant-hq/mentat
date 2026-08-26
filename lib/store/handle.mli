@@ -51,11 +51,17 @@ module Registry : sig
       reservation another acquisition minted — even one made with an equal, or
       the very same, {!Owner.t}. *)
 
-  val try_reserve : t -> string -> Owner.t -> (token, Owner.t) result
-  (** [try_reserve t key owner] atomically reserves [key], minting its witness,
-      or returns the existing reservation's owner. An existing entry means this
-      process is already acquiring or holding the session's fence. The reserver
-      is now exclusive within the process and must {!confirm} or {!cancel}. *)
+  val try_reserve :
+    t -> string -> Owner.t -> (token, [ `Reserved of Owner.t | `Probing ]) result
+  (** [try_reserve t key owner] atomically reserves [key], minting its witness.
+      [`Reserved holder] names the existing reservation's owner — this process
+      is already acquiring or holding the session's fence. [`Probing] means a
+      read-only fence probe ({!probe}) has a descriptor open on the inode: an
+      acquisition admitted now would take a lock that closing the probe's
+      descriptor silently drops, so the reserver is turned away for the
+      probe's — bounded, descriptor-lifetime — duration instead. On [Ok] the
+      reserver is exclusive within the process and must {!confirm} or
+      {!cancel}. *)
 
   val confirm : t -> token -> unit
   (** [confirm t token] marks [token]'s reservation held — the OS lock is
@@ -72,13 +78,19 @@ module Registry : sig
   (** [holds t key token] is [true] iff [key]'s current reservation is the one
       [token] witnessed and it has been confirmed. *)
 
-  val holder : t -> string -> Owner.t option
-  (** [holder t key] is the owner of [key]'s current reservation — pending or
-      confirmed — when this process is acquiring or holding the session's
-      fence, and [None] otherwise. The read-only fence probe consults it before
-      touching any descriptor: a probe descriptor opened while this process
-      holds the fence would, on close, drop every record lock the process holds
-      on the inode. *)
+  val probe : t -> string -> (unit -> 'a) -> ('a, Owner.t) result
+  (** [probe t key f] runs [f] with same-process acquisition of [key] excluded,
+      and is the read-only fence probe's one entry: [f] opens, tests, and
+      closes a probe descriptor on the fence inode, which is safe only while
+      this process can hold no lock on it — closing {e any} descriptor drops
+      every record lock the process holds on the inode, and POSIX record locks
+      are invisible to a same-process test anyway. If [key] is reserved —
+      pending or confirmed, this process is acquiring or holding the session's
+      fence — [f] never runs and the reservation's owner is returned; the
+      answer is the registry's, no descriptor is touched. Otherwise
+      acquisitions of [key] are excluded ({!try_reserve} answers [`Probing])
+      until [f] returns or raises. Probes coexist with each other: two open
+      probe descriptors hold no locks to drop. *)
 end
 
 type t
