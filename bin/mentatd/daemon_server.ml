@@ -518,17 +518,6 @@ let start_web registry ~sw ~net ~clock ~web_port ~token =
 
 (* ---- The serve body ---- *)
 
-(* Poll an atomic the signal handler sets, so a first SIGTERM/SIGINT stops the
-   accept loop cooperatively (the Eio-safe signal path the run surface uses). *)
-let wait_for_stop clock stop_requested =
-  let rec loop () =
-    if Atomic.get stop_requested then ()
-    else (
-      Eio.Time.sleep clock 0.1;
-      loop ())
-  in
-  loop ()
-
 (* A7: MENTAT_DAEMON_MAX_IDLE (test-only) stops the daemon after [max_idle]
    continuous seconds with zero bound connections, so a background daemon a
    blackbox test spawns cannot outlive the test. Absent, the daemon runs until
@@ -538,14 +527,14 @@ let max_idle_seconds environment =
     (List.assoc_opt "MENTAT_DAEMON_MAX_IDLE" environment)
     float_of_string_opt
 
-let idle_watchdog clock ~max_idle registry stop_requested =
+let idle_watchdog clock ~max_idle registry stop =
   let idle_since = ref (Eio.Time.now clock) in
   let rec loop () =
     Eio.Time.sleep clock 0.5;
     if Atomic.get registry.active > 0 then idle_since := Eio.Time.now clock
     else if Eio.Time.now clock -. !idle_since >= max_idle then
-      Atomic.set stop_requested true;
-    if Atomic.get stop_requested then () else loop ()
+      Stop_signal.request stop;
+    if Stop_signal.requested stop then () else loop ()
   in
   loop ()
 
@@ -604,7 +593,7 @@ let serve ~socket_override ~spawned ~web ~web_port =
               in
               let record =
                 {
-                  Discovery.socket = Filename.concat socket_dir "mentat.sock";
+                  Discovery.socket = Server.Bind.socket_path ~dir:socket_dir_abs;
                   pid = Unix.getpid ();
                   protocol = protocol_version;
                   binary = Daemon.binary_version;
@@ -634,25 +623,12 @@ let serve ~socket_override ~spawned ~web ~web_port =
                     Eio.traceln "mentatd: rewriting discovery failed: %s"
                       message
               in
-              let stop_requested = Atomic.make false in
-              (* D7 escalation (F3): the first SIGTERM/SIGINT requests a graceful
-                 stop; a second — arriving while a graceful teardown is wedged —
-                 forces immediate exit (the OS then releases every fence). Without
-                 this a repeat signal would be swallowed. *)
-              let request_stop _ =
-                if Atomic.exchange stop_requested true then Stdlib.exit 130
-              in
-              let previous_term =
-                Sys.signal Sys.sigterm (Sys.Signal_handle request_stop)
-              in
-              let previous_int =
-                Sys.signal Sys.sigint (Sys.Signal_handle request_stop)
-              in
-              Fun.protect
-                ~finally:(fun () ->
-                  Sys.set_signal Sys.sigterm previous_term;
-                  Sys.set_signal Sys.sigint previous_int)
-                (fun () ->
+              (* D7 escalation (F3): the shared stop seam — a first
+                 SIGTERM/SIGINT requests a graceful stop, a second while a
+                 wedged teardown holds forces immediate exit and the OS
+                 releases every fence. *)
+              let stop = Stop_signal.create () in
+              Stop_signal.with_signals stop (fun () ->
                   (* Re-adopt what a previous node life left running or
                      unfinished, before the first connection is served: the
                      broker enumerates orphaned children and adopts their
@@ -677,14 +653,13 @@ let serve ~socket_override ~spawned ~web ~web_port =
                       (fun () ->
                         Server.serve ~sw ~clock
                           ~driver_for:(driver_for registry) listener);
-                      (fun () -> wait_for_stop clock stop_requested);
+                      (fun () -> Stop_signal.wait ~clock stop);
                     ]
                   in
                   let branches =
                     match max_idle_seconds shared.Composition.environment with
                     | Some max_idle ->
-                        (fun () ->
-                          idle_watchdog clock ~max_idle registry stop_requested)
+                        (fun () -> idle_watchdog clock ~max_idle registry stop)
                         :: branches
                     | None -> branches
                   in

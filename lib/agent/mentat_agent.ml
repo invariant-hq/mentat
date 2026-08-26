@@ -128,6 +128,24 @@ let child_result session turn outcome =
   let usage = (Mentat_session.metrics session).Mentat_session.Metrics.usage in
   ([ Mentat_llm.Content.text text ], Some usage)
 
+(* The one settled-child judgment: the journal's settled head projected into
+   the parent's result. Recovery's rebuild and the broker's integration both
+   consume it, so "what did the child conclude" has a single home; [None]
+   means work is (or must be presumed) outstanding. *)
+let settled_result child_session =
+  match
+    Mentat_session.State.settled_head (Mentat_session.state child_session)
+  with
+  | None -> None
+  | Some (last, outcome) ->
+      let turn = Mentat_session.Turn.id last in
+      let outcome =
+        Option.value outcome
+          ~default:
+            (Mentat_session.Turn.Outcome.failed ~message:"child outcome unknown")
+      in
+      Some (child_result child_session turn outcome)
+
 (* The one settlement tail every wake shares: buffer the result, return the
    capacity permit, and nudge the parent's parked wait. The parent driver may
    be absent (its process half is elsewhere, or it has shut down) — the buffered
@@ -489,7 +507,7 @@ and observe_delegation t ~parent ~parent_cwd edge =
              broker would race a second process against a fence this process
              holds. *)
           if Option.is_none (find_driver t child) then
-            ops.Ports.materialize ~child ~delegation)
+            ops.Ports.materialize ~child)
 
 (* In-process materialization: attach a child driver as a sibling and submit
    its first turn. The started guard makes a re-drive idempotent — a child
@@ -552,25 +570,9 @@ and rebuild_children t ~parent session =
       | Error Ports.Store_error.Not_found -> redrive ()
       | Error _ -> redrive ()
       | Ok loaded -> (
-          let child_session = S.session_of loaded in
-          let state = Mentat_session.state child_session in
-          match Mentat_session.State.turns state with
-          | [] -> redrive ()
-          | turns -> (
-              match Mentat_session.State.active_turn state with
-              | Some _ -> redrive ()
-              | None ->
-                  let last = List.nth turns (List.length turns - 1) in
-                  let turn = Mentat_session.Turn.id last in
-                  let outcome =
-                    Option.value
-                      (Mentat_session.State.turn_outcome turn state)
-                      ~default:
-                        (Mentat_session.Turn.Outcome.failed
-                           ~message:"child outcome unknown")
-                  in
-                  Scheduler.note_settled t.scheduler delegation
-                    (child_result child_session turn outcome))))
+          match settled_result (S.session_of loaded) with
+          | None -> redrive ()
+          | Some result -> Scheduler.note_settled t.scheduler delegation result))
     (Mentat_session.State.delegations (Mentat_session.state session))
 
 (* Delivery of a recorded parent-to-child message. The idempotency id
@@ -811,32 +813,18 @@ let integrate_brokered_child t ~child =
       match head with
       | Error _ -> `Not_settled
       | Ok child_session -> (
-          let state = Mentat_session.state child_session in
-          match Mentat_session.State.turns state with
-          | [] -> `Not_settled
-          | turns -> (
-              match Mentat_session.State.active_turn state with
-              | Some _ -> `Not_settled
-              | None ->
-                  let last = List.nth turns (List.length turns - 1) in
-                  let turn = Mentat_session.Turn.id last in
-                  let outcome =
-                    Option.value
-                      (Mentat_session.State.turn_outcome turn state)
-                      ~default:
-                        (Mentat_session.Turn.Outcome.failed
-                           ~message:"child outcome unknown")
-                  in
-                  settle_delegation t ~parent ~delegation
-                    (child_result child_session turn outcome);
-                  (* The child's fence is free once its process exits, so a
-                     message its lifetime shadowed is deliverable now; the
-                     derived-id dedup makes a repeat sweep harmless. *)
-                  (match S.view parent with
-                  | Error _ -> ()
-                  | Ok loaded ->
-                      redrive_messages ~only:delegation t (S.session_of loaded));
-                  `Integrated)))
+          match settled_result child_session with
+          | None -> `Not_settled
+          | Some result ->
+              settle_delegation t ~parent ~delegation result;
+              (* The child's fence is free once its process exits, so a
+                 message its lifetime shadowed is deliverable now; the
+                 derived-id dedup makes a repeat sweep harmless. *)
+              (match S.view parent with
+              | Error _ -> ()
+              | Ok loaded ->
+                  redrive_messages ~only:delegation t (S.session_of loaded));
+              `Integrated))
 
 let fail_brokered_child t ~child ~message =
   match Scheduler.parent_of t.scheduler child with

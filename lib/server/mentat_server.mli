@@ -97,6 +97,18 @@ module Bind : sig
   val loopback : port:int option -> token:Token.t -> t
   (** [loopback ~port ~token] binds 127.0.0.1 only. [None] requests an ephemeral
       port (written to the discovery file). A token is required. *)
+
+  val socket_path : dir:Lpath.Abs.t -> string
+  (** [socket_path ~dir] is the native path of the socket a {!unix} bind at
+      [dir] creates. The socket's leaf name is owned here; consumers that
+      display, dial, or remove the endpoint derive the path rather than
+      restating the literal. *)
+
+  val remove_endpoint : dir:Lpath.Abs.t -> unit
+  (** [remove_endpoint ~dir] best-effort removes the on-disk residue a {!unix}
+      bind leaves once its server is gone: the socket file, then [dir] itself.
+      A path that resists — a non-empty or foreign directory — is left behind
+      as diagnosable residue; never an error. *)
 end
 
 type listener

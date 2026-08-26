@@ -4649,9 +4649,7 @@ let brokered_spy () =
   let materialized = ref [] in
   let ops =
     {
-      Ports.materialize =
-        (fun ~child ~delegation ->
-          materialized := (child, delegation) :: !materialized);
+      Ports.materialize = (fun ~child -> materialized := child :: !materialized);
       cancel = (fun ~child:_ -> ());
     }
   in
@@ -4711,11 +4709,9 @@ let a_brokered_spawn_hands_identity_and_integrates_on_the_wake () =
       let child = Session.Delegation.child edge in
       let delegation = Session.Delegation.id edge in
       (match !materialized with
-      | [ (handed_child, handed_delegation) ] ->
+      | [ handed_child ] ->
           is_true ~msg:"the handoff names the child"
-            (Session.Id.equal handed_child child);
-          is_true ~msg:"the handoff names the delegation"
-            (Session.Delegation.Id.equal handed_delegation delegation)
+            (Session.Id.equal handed_child child)
       | handed -> failf "expected one handoff, got %d" (List.length handed));
       (* No sibling driver was attached: the child materializes elsewhere. *)
       is_true ~msg:"an unstarted brokered child probes Not_settled"

@@ -111,10 +111,7 @@ module type STORE = sig
 end
 
 type child_ops = {
-  materialize :
-    child:Mentat_session.Id.t ->
-    delegation:Mentat_session.Delegation.Id.t ->
-    unit;
+  materialize : child:Mentat_session.Id.t -> unit;
   cancel : child:Mentat_session.Id.t -> unit;
 }
 

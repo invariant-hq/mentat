@@ -3,39 +3,11 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(* [mentat] lives beside [mentatd] in every release artifact, so the spawn
-   resolves the sibling of the running executable. [Unix.create_process] cannot
-   report a missing program (the exec fails in the child), so an absent
-   sibling, a directory at the path, or a present-but-non-executable file is
-   refused here, loudly, rather than surfacing as a spawn that never
-   converges. [MENTAT_BIN] overrides the sibling resolution for layouts where
-   the two binaries do not share a directory (a build tree, a test harness). *)
+(* [mentat] lives beside [mentatd] in every release artifact; the shared
+   sibling policy — including the loud refusal of a path that would only fail
+   inside the forked child — lives with [Daemon.resolve_sibling]. *)
 let resolve_mentat () =
-  let is_program path =
-    Sys.file_exists path
-    && (not (Sys.is_directory path))
-    &&
-    match Unix.access path [ Unix.X_OK ] with
-    | () -> true
-    | exception Unix.Unix_error _ -> false
-  in
-  match Sys.getenv_opt "MENTAT_BIN" with
-  | Some bin when not (String.equal bin "") ->
-      if is_program bin then Ok bin
-      else
-        Error (Printf.sprintf "MENTAT_BIN names %s, which is not a program" bin)
-  | _ ->
-      let sibling =
-        Filename.concat (Filename.dirname Sys.executable_name) "mentat"
-      in
-      if is_program sibling then Ok sibling
-      else
-        Error
-          (Printf.sprintf
-             "the mentat binary is missing: expected %s (every release \
-              installs it beside mentatd); reinstall, or set MENTAT_BIN to \
-              run one from elsewhere"
-             sibling)
+  Daemon.resolve_sibling ~env:"MENTAT_BIN" ~name:"mentat" ~beside:"mentatd"
 
 (* The child's stdio log, one per session under the daemon home, named by the
    same path-safe leaf its socket directory uses. Unrotated: a child is spawned

@@ -87,50 +87,72 @@ let resolve_edge store ~root child =
            (Session.Delegation.Id.to_string delegation))
 
 (* The child idle predicate over durable heads, read fence-free so observation
-   never contends with this process's own driver: the session has run (its
-   first turn exists), nothing is active, nothing is queued, and every
-   delegation edge it recorded names a session that is idle by the same
-   measure — so exiting abandons no obligation. The tree is finite (ids are
-   parent-minted), so the recursion terminates. *)
-let rec idle store child =
-  match Store.Session.load store child with
-  | Error _ -> false
-  | Ok doc ->
-      let state = Session.state (Store.Session.Document.session doc) in
-      Session.State.turns state <> []
-      && Option.is_none (Session.State.active_turn state)
-      && Session.State.pending_queue state = []
-      && List.for_all
-           (fun edge -> idle store (Session.Delegation.child edge))
-           (Session.State.delegations state)
+   never contends with this process's own driver. It builds on the shared
+   settled-head judgment ({!Mentat_session.State.settled_head}) and is
+   deliberately stronger: the head must be settled, nothing may be queued, and
+   every delegation edge the session recorded must name a session idle by the
+   same measure — exiting abandons no obligation. Reads are elided by the
+   document stamp, so the poll decodes a journal only when its persisted
+   bytes have changed. The [seen] set bounds the walk: ids are parent-minted,
+   so an uncorrupted tree is finite, and a corrupt journal naming an ancestor
+   edge must not recurse forever. *)
+let idle store cache child =
+  let rec go seen child =
+    let id = Session.Id.to_string child in
+    if Hashtbl.mem seen id then true
+    else begin
+      Hashtbl.replace seen id ();
+      let local =
+        match Store.Session.stamp store child with
+        | None -> None
+        | Some stamp -> (
+            match Hashtbl.find_opt cache id with
+            | Some (cached, settled, children) when String.equal cached stamp
+              ->
+                Some (settled, children)
+            | Some _ | None -> (
+                match Store.Session.load store child with
+                | Error _ -> None
+                | Ok doc ->
+                    let state =
+                      Session.state (Store.Session.Document.session doc)
+                    in
+                    let settled =
+                      Option.is_some (Session.State.settled_head state)
+                      && Session.State.pending_queue state = []
+                    in
+                    let children =
+                      List.map Session.Delegation.child
+                        (Session.State.delegations state)
+                    in
+                    Hashtbl.replace cache id (stamp, settled, children);
+                    Some (settled, children)))
+      in
+      match local with
+      | None -> false
+      | Some (settled, children) -> settled && List.for_all (go seen) children
+    end
+  in
+  go (Hashtbl.create 8) child
 
 (* Stop once the child has been continuously idle — and every connection closed
    — for the linger window. A fresh boot on an unstarted child is never idle
    (no turn yet), so the watchdog cannot fire before the first-turn submit
    lands. *)
-let idle_watchdog clock ~linger store child active stop_requested =
+let idle_watchdog clock ~linger store child active stop =
+  let cache = Hashtbl.create 8 in
   let idle_since = ref None in
   let rec loop () =
     Eio.Time.sleep clock 0.25;
-    (if Atomic.get active > 0 || not (idle store child) then idle_since := None
+    (if Atomic.get active > 0 || not (idle store cache child) then
+       idle_since := None
      else
        match !idle_since with
        | None -> idle_since := Some (Eio.Time.now clock)
        | Some since ->
            if Eio.Time.now clock -. since >= linger then
-             Atomic.set stop_requested true);
-    if Atomic.get stop_requested then () else loop ()
-  in
-  loop ()
-
-(* Poll an atomic the signal handler sets, so a first SIGTERM/SIGINT stops the
-   serve loop cooperatively (the Eio-safe signal path the daemon uses). *)
-let wait_for_stop clock stop_requested =
-  let rec loop () =
-    if Atomic.get stop_requested then ()
-    else (
-      Eio.Time.sleep clock 0.1;
-      loop ())
+             Stop_signal.request stop);
+    if Stop_signal.requested stop then () else loop ()
   in
   loop ()
 
@@ -169,12 +191,10 @@ let ensure_socket_parents dir =
 
 (* Endpoint removal runs after the Eio run has completed: the listening
    socket's own teardown (at switch close) unlinks the socket path, so an
-   earlier unlink here would make that teardown fail on the missing entry. The
-   unlink below is the backstop for a teardown that could not run. *)
+   earlier removal here would make that teardown fail on the missing entry.
+   This is the backstop for a teardown that could not run. *)
 let remove_socket dir =
-  (try Unix.unlink (Filename.concat dir "mentat.sock")
-   with Unix.Unix_error _ -> ());
-  try Unix.rmdir dir with Unix.Unix_error _ -> ()
+  Server.Bind.remove_endpoint ~dir:(Lpath.Abs.of_string_exn dir)
 
 let serve_run ~session ~socket_dir_override ~spawned ~cwd ~bound_socket_dir =
   Eio_main.run @@ fun stdenv ->
@@ -183,7 +203,12 @@ let serve_run ~session ~socket_dir_override ~spawned ~cwd ~bound_socket_dir =
   | Error status -> status
   | Ok shared -> (
       if spawned then ignore (Unix.setsid ());
-      match Composition.instance shared ~sw ~cwd ~overrides:[] () with
+      match
+        (* The labeled owner is what lets the broker tell this server's fence
+           hold apart from an interactive one it must never preempt. *)
+        Composition.instance shared ~sw ~cwd ~overrides:[]
+          ~owner_label:Composition.child_server_owner_label ()
+      with
       | Error status -> status
       | Ok instance -> (
           let store = shared.Composition.store in
@@ -216,7 +241,8 @@ let serve_run ~session ~socket_dir_override ~spawned ~cwd ~bound_socket_dir =
                   if not spawned then
                     Printf.printf "mentat serve-session: serving %s at %s\n%!"
                       session
-                      (Filename.concat socket_dir "mentat.sock");
+                      (Server.Bind.socket_path
+                         ~dir:(Lpath.Abs.of_string_exn socket_dir));
                   (* The first-turn submit, relocated from the runtime's
                      in-process materialization: the deterministic turn id is
                      derived from the durable edge and the task submitted
@@ -252,26 +278,13 @@ let serve_run ~session ~socket_dir_override ~spawned ~cwd ~bound_socket_dir =
                         (Printf.sprintf "session %s: first turn: %s" session
                            message)
                   | Ok () ->
-                      let stop_requested = Atomic.make false in
+                      (* The shared stop seam: a first SIGTERM/SIGINT requests
+                         a graceful stop; a second — while a wedged teardown
+                         holds — forces immediate exit and the OS releases
+                         the fence. *)
+                      let stop = Stop_signal.create () in
                       let active = Atomic.make 0 in
-                      (* First SIGTERM/SIGINT requests a graceful stop; a
-                         second — while a wedged teardown holds — forces
-                         immediate exit and the OS releases the fence. *)
-                      let request_stop _ =
-                        if Atomic.exchange stop_requested true then
-                          Stdlib.exit 130
-                      in
-                      let previous_term =
-                        Sys.signal Sys.sigterm (Sys.Signal_handle request_stop)
-                      in
-                      let previous_int =
-                        Sys.signal Sys.sigint (Sys.Signal_handle request_stop)
-                      in
-                      Fun.protect
-                        ~finally:(fun () ->
-                          Sys.set_signal Sys.sigterm previous_term;
-                          Sys.set_signal Sys.sigint previous_int)
-                        (fun () ->
+                      Stop_signal.with_signals stop (fun () ->
                           let linger =
                             linger_seconds shared.Composition.environment
                           in
@@ -293,10 +306,10 @@ let serve_run ~session ~socket_dir_override ~spawned ~cwd ~bound_socket_dir =
                                             (Composition.root instance))
                                        ~driver ~active)
                                   listener);
-                              (fun () -> wait_for_stop clock stop_requested);
+                              (fun () -> Stop_signal.wait ~clock stop);
                               (fun () ->
                                 idle_watchdog clock ~linger store child active
-                                  stop_requested);
+                                  stop);
                             ];
                           (* Durable-first close; the endpoint itself is
                              removed by {!serve} once the Eio run — whose

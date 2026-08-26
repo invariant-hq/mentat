@@ -555,6 +555,12 @@ let turn id t = Option.map (fun r -> r.turn) (Turn_map.find_opt id t.turns)
 let turn_outcome id t =
   Option.bind (Turn_map.find_opt id t.turns) (fun r -> r.outcome)
 
+let settled_head t =
+  match (t.turn_order_rev, t.active_turn) with
+  | [], _ | _, Some _ -> None
+  | last :: _, None ->
+      Option.map (fun r -> (r.turn, r.outcome)) (Turn_map.find_opt last t.turns)
+
 let turn_response_count id t =
   Option.map (fun r -> r.response_count) (Turn_map.find_opt id t.turns)
 

@@ -419,6 +419,14 @@ val active_turn_id : t -> Turn.Id.t option
 val turn_outcome : Turn.Id.t -> t -> Turn.Outcome.t option
 (** [turn_outcome id t] is the terminal outcome of turn [id], if finished. *)
 
+val settled_head : t -> (Turn.t * Turn.Outcome.t option) option
+(** [settled_head t] is the last accepted turn and its recorded outcome when
+    [t] has run and nothing is active — the session's settled head, the one
+    judgment "this session's work is concluded" reduces to. [None] while no
+    turn has been accepted or a turn is still unfinished. The outcome is
+    [None] when the head turn finished without recording one (a
+    crash-truncated journal); the head is settled either way. *)
+
 val turn_response_count : Turn.Id.t -> t -> int option
 (** [turn_response_count id t] is the number of provider responses for turn
     [id], if known. *)

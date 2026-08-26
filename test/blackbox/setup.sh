@@ -245,3 +245,37 @@ stop_daemon () {
     unset MENTAT_DAEMON_PID
   fi
 }
+
+# The subagent suite's shared child choreography. child_sock_base derives the
+# daemon's per-session endpoint tree from discovery — capture it into
+# SOCK_BASE once the first daemon is up (the path is stable across daemon
+# restarts, but daemon.json only exists while one runs). wait_child polls a
+# session's fence-free view until it is idle with the expected number of
+# settled turns; wait_child_exit blocks until the child's detached server has
+# exited — its endpoint directory under $SOCK_BASE is gone — so a following
+# export finds the session fence free.
+child_sock_base () {
+  printf '%s/s\n' "$(dirname "$(mentat_cram json .socket "$XDG_DATA_HOME/mentat/daemon/daemon.json")")"
+}
+
+wait_child () {
+  local child="$1" want="$2" tries=0 out phase turns
+  while :; do
+    out=$(mentat session show "$child" --json --cwd "$PWD/work" 2>/dev/null) || out=
+    phase=$(printf '%s' "$out" | mentat_cram json .phase 2>/dev/null) || phase=
+    turns=$(printf '%s' "$out" | mentat_cram json .turns 2>/dev/null) || turns=
+    if [ "$phase" = idle ] && [ "$turns" = "$want" ]; then break; fi
+    tries=$((tries + 1))
+    if [ "$tries" -gt 300 ]; then echo "wait_child timed out: $out"; break; fi
+    sleep 0.1
+  done
+}
+
+wait_child_exit () {
+  local dir="$SOCK_BASE/$1" tries=0
+  while [ -e "$dir" ]; do
+    tries=$((tries + 1))
+    if [ "$tries" -gt 300 ]; then echo "child server still up: $dir"; break; fi
+    sleep 0.1
+  done
+}

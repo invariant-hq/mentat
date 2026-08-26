@@ -26,27 +26,8 @@ A durable allow rule lets the delegated child run its shell tool unattended.
   >   { "action": "allow", "matcher": { "type": "command", "pattern": { "type": "any" } } } ] } } }
   > JSON
 
-  $ wait_child () {
-  >   local child="$1" want="$2" tries=0 out phase turns
-  >   while :; do
-  >     out=$(mentat session show "$child" --json --cwd "$PWD/work" 2>/dev/null) || out=
-  >     phase=$(printf '%s' "$out" | mentat_cram json .phase 2>/dev/null) || phase=
-  >     turns=$(printf '%s' "$out" | mentat_cram json .turns 2>/dev/null) || turns=
-  >     if [ "$phase" = idle ] && [ "$turns" = "$want" ]; then break; fi
-  >     tries=$((tries + 1))
-  >     if [ "$tries" -gt 300 ]; then echo "wait_child timed out: $out"; break; fi
-  >     sleep 0.1
-  >   done
-  > }
-
-  $ wait_child_exit () {
-  >   local dir="$SOCK_BASE/$1" tries=0
-  >   while [ -e "$dir" ]; do
-  >     tries=$((tries + 1))
-  >     if [ "$tries" -gt 300 ]; then echo "child server still up: $dir"; break; fi
-  >     sleep 0.1
-  >   done
-  > }
+The child choreography helpers — wait_child, wait_child_exit, and the
+$SOCK_BASE capture below — live in setup.sh beside the daemon helpers.
 
 Block until the parent's wait claim is durable — its call id appears in the
 parent's persisted document — the exact state the node's death must preserve
@@ -70,7 +51,7 @@ Stage 1 — spawn, and hold the child busy on a long tool.
   > JSONL
   $ start_fake_openai_unordered stage1.jsonl capture1 port1
   $ start_daemon
-  $ SOCK_BASE="$(dirname "$(mentat_cram json .socket "$XDG_DATA_HOME/mentat/daemon/daemon.json")")/s"
+  $ SOCK_BASE="$(child_sock_base)"
   $ mentat run start --attach --json --id parent "PLEASE_SPAWN" --cwd "$PWD/work" >stage1.out 2>stage1.err
   $ wait_fake_server
   $ grep -c '"outcome":"completed"' stage1.out

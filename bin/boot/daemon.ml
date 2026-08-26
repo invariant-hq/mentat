@@ -57,20 +57,21 @@ let rotate_daemon_log dirs log =
         ~current:log
   | _ | (exception Unix.Unix_error _) -> ()
 
-(* The daemon lives in its own binary, [mentatd], shipped beside [mentat] in
-   every release artifact — so the spawn resolves the sibling of the running
+(* [mentat] and [mentatd] ship beside each other in every release artifact —
+   so each spawns the other by resolving the sibling of the running
    executable. [Unix.create_process] cannot report a missing program (the exec
    fails in the child), so an absent sibling must be refused here, loudly,
-   rather than surface as a spawn that never converges. [MENTATD_BIN] overrides
-   the sibling resolution for layouts where the two binaries do not share a
+   rather than surface as a spawn that never converges. [env] overrides the
+   sibling resolution for layouts where the two binaries do not share a
    directory (a build tree, a test harness). *)
-let resolve_mentatd () =
+let resolve_sibling ~env ~name ~beside =
   (* [Sys.file_exists] alone would accept a directory — which a build tree has
-     at exactly this path ([bin/mentatd/] holding the executable) — and an
-     exec of a directory fails only in the forked child, invisibly. So would a
-     present-but-non-executable file: [Unix.create_process] reports its exec
-     failure only in the child too, so execute permission must be checked
-     here, loudly, rather than surface as a spawn that never converges. *)
+     at exactly the daemon's path ([bin/mentatd/] holding the executable) —
+     and an exec of a directory fails only in the forked child, invisibly. So
+     would a present-but-non-executable file: [Unix.create_process] reports
+     its exec failure only in the child too, so execute permission must be
+     checked here, loudly, rather than surface as a spawn that never
+     converges. *)
   let is_program path =
     Sys.file_exists path
     && (not (Sys.is_directory path))
@@ -79,24 +80,24 @@ let resolve_mentatd () =
     | () -> true
     | exception Unix.Unix_error _ -> false
   in
-  match Sys.getenv_opt "MENTATD_BIN" with
+  match Sys.getenv_opt env with
   | Some bin when not (String.equal bin "") ->
       if is_program bin then Ok bin
-      else
-        Error
-          (Printf.sprintf "MENTATD_BIN names %s, which is not a program" bin)
+      else Error (Printf.sprintf "%s names %s, which is not a program" env bin)
   | _ ->
       let sibling =
-        Filename.concat (Filename.dirname Sys.executable_name) "mentatd"
+        Filename.concat (Filename.dirname Sys.executable_name) name
       in
       if is_program sibling then Ok sibling
       else
         Error
           (Printf.sprintf
-             "the mentatd binary is missing: expected %s (every release \
-              installs it beside mentat); reinstall, or set MENTATD_BIN to \
-              run one from elsewhere"
-             sibling)
+             "the %s binary is missing: expected %s (every release installs \
+              it beside %s); reinstall, or set %s to run one from elsewhere"
+             name sibling beside env)
+
+let resolve_mentatd () =
+  resolve_sibling ~env:"MENTATD_BIN" ~name:"mentatd" ~beside:"mentat"
 
 let spawn dirs ~bin =
   ensure_daemon_dir dirs;

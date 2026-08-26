@@ -87,6 +87,12 @@ let man =
 
 let envs =
   [
+    Cmd.Env.info "MENTAT_BIN"
+      ~doc:
+        "The $(b,mentat) binary the daemon's child broker spawns for \
+         delegated sessions, overriding the resolution of the sibling of the \
+         running executable — for layouts where the two binaries do not \
+         share a directory (a build tree, a test harness).";
     Cmd.Env.info "MENTAT_LOG"
       ~doc:
         "Diagnostics log level: $(b,quiet), $(b,error), $(b,warning), \

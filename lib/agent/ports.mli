@@ -314,17 +314,15 @@ val script :
 (** {1:children The child backend} *)
 
 type child_ops = {
-  materialize :
-    child:Mentat_session.Id.t ->
-    delegation:Mentat_session.Delegation.Id.t ->
-    unit;
-      (** [materialize ~child ~delegation] makes the recorded child run: the
-          broker owns admission, spawn, observation, and reaping. The call
-          carries identity only — the child re-reads its task and role from
-          the durable delegation edge, so no content crosses the seam. It is
-          idempotent on [child]: re-materializing a child that is already
-          running is a no-op, and a re-drive after a crash re-issues the same
-          identities. *)
+  materialize : child:Mentat_session.Id.t -> unit;
+      (** [materialize ~child] makes the recorded child run: the broker owns
+          admission, spawn, observation, and reaping. The call carries one
+          identity and nothing else — the child's own boot re-derives its
+          delegation edge from its document's lineage backlink and re-reads
+          the task and role from that durable edge, so no content crosses the
+          seam. It is idempotent on [child]: re-materializing a child that is
+          already running is a no-op, and a re-drive after a crash re-issues
+          the same identity. *)
   cancel : child:Mentat_session.Id.t -> unit;
       (** [cancel ~child] asks the broker to stop [child]'s work: a semantic
           interrupt delivered to the child first, with a bounded escalation to
@@ -335,16 +333,17 @@ type child_ops = {
 }
 (** The calls an out-of-process child backend consumes.
 
-    The record is narrower than the whole cross-backend contract. A broker
-    submits the child's first turn under the deterministic id of
-    {!Mentat_agent.child_first_turn}, exactly as the in-process arm does. The
-    runtime's child-cancellation cascade ([cancel_children]) and
-    parent-to-child message delivery ([deliver_child_message], which attaches
-    an in-process driver) today resolve in-process drivers only; they are the
-    dispatch sites a brokered backend reaches through [cancel] and a future
-    delivery call. And a brokered child's settlement never crosses this
-    record at all: it is the broker's own observation of the child journal
-    that reports the settled result back into the parent's scheduler. *)
+    The record is narrower than the whole cross-backend contract. The child's
+    own boot submits the child's first turn under the deterministic id of
+    {!Mentat_agent.child_first_turn} — the broker submits nothing, it only
+    makes the process exist. The runtime's child-cancellation cascade
+    ([cancel_children]) and parent-to-child message delivery
+    ([deliver_child_message], which attaches an in-process driver) today
+    resolve in-process drivers only; they are the dispatch sites a brokered
+    backend reaches through [cancel] and a future delivery call. And a
+    brokered child's settlement never crosses this record at all: it is the
+    broker's own observation of the child journal that reports the settled
+    result back into the parent's scheduler. *)
 
 (** Where a delegated child session materializes. The engine always records
     the delegation edge, creates the child document, and keeps the semantic

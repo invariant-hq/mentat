@@ -483,8 +483,15 @@ let stage_store_reported ~stdenv ~sw ~dirs ~getenv ?data_home () =
         | Some path -> Printf.sprintf "%s (report saved: %s)" message path
         | None -> message)
 
+(* The owner label a per-session child server acquires the run fence under.
+   The daemon's broker reads it back from a fence's owner line: only a holder
+   carrying this label is a child server its escalation ladder may preempt —
+   any other same-host holder (an interactive CLI that resumed the child) must
+   never be signalled. *)
+let child_server_owner_label = "serve-session"
+
 let make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
-    ~review_base ?child_backend () : t =
+    ~review_base ?owner_label ?child_backend () : t =
   {
     shared;
     root;
@@ -492,7 +499,7 @@ let make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
     config;
     ambient = environment;
     switch = sw;
-    owner = Store.Run_lock.Owner.make ();
+    owner = Store.Run_lock.Owner.make ?label:owner_label ();
     review_base;
     model_overlay = Hashtbl.create 8;
     review_overlay = Hashtbl.create 8;
@@ -552,7 +559,7 @@ let stage_shared ~stdenv ~sw ?data_home () : (shared, Exit_status.t) result =
    own switch [sw] (the engine and watch lane live under it, so eviction closes
    one switch). No store is opened here — the shared handle is reused, which is
    what keeps the fence's same-process half honest. *)
-let instance shared ~sw ~cwd ~overrides ?environment ?review_base
+let instance shared ~sw ~cwd ~overrides ?environment ?review_base ?owner_label
     ?child_backend () : (t, Exit_status.t) result =
   let ( let* ) = Result.bind in
   let environment = Option.value environment ~default:shared.environment in
@@ -565,7 +572,7 @@ let instance shared ~sw ~cwd ~overrides ?environment ?review_base
   in
   Ok
     (make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
-       ~review_base ?child_backend ())
+       ~review_base ?owner_label ?child_backend ())
 
 (* The engine's drivers are long-lived fibers under the instance switch; shut
    them down so the switch can close instead of blocking on idle drivers. The
@@ -3297,7 +3304,9 @@ let adopt_session t session =
       match t.engine with
       | Some engine -> Engine.adopt engine session
       | None ->
-          Error (Mentat_protocol.Error.unavailable "the engine is not built"))
+          (* [build_driver] stores the engine before returning [Ok] and
+             nothing unsets it, so an assembled instance always carries one. *)
+          assert false)
 
 let integrate_child t ~child =
   match t.engine with

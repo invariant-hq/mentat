@@ -63,14 +63,19 @@ type bind =
   | Unix of { dir : Lpath.Abs.t }
   | Loopback of { port : int option; token : Token.t }
 
+let socket_name = "mentat.sock"
+
 module Bind = struct
   type t = bind
 
   let unix ~dir = Unix { dir }
   let loopback ~port ~token = Loopback { port; token }
-end
+  let socket_path ~dir = Filename.concat (Lpath.Abs.to_string dir) socket_name
 
-let socket_name = "mentat.sock"
+  let remove_endpoint ~dir =
+    (try Unix.unlink (socket_path ~dir) with Unix.Unix_error _ -> ());
+    try Unix.rmdir (Lpath.Abs.to_string dir) with Unix.Unix_error _ -> ()
+end
 
 (* The [sockaddr_un.sun_path] buffer is 104 bytes on macOS (108 on Linux); the
    smaller bound is the portable limit, and a path needs room for its NUL. A path
@@ -78,7 +83,6 @@ let socket_name = "mentat.sock"
    [EINVAL], so we refuse it up front with a message naming the limit and the
    escape (the whole reason the default socket lives under a short [/tmp] key). *)
 let sun_path_max = 104
-let unix_socket_path dir = Filename.concat (Lpath.Abs.to_string dir) socket_name
 
 type listener = {
   bind : bind;
@@ -150,7 +154,7 @@ let ensure_private_dir dir =
 let listen ~sw ~net bind =
   match bind with
   | Unix { dir } ->
-      let path = unix_socket_path dir in
+      let path = Bind.socket_path ~dir in
       if String.length path >= sun_path_max then
         invalid_arg
           (Printf.sprintf
@@ -1259,7 +1263,7 @@ let make_ctx ~sw ~net ?workspace ?environment bind =
   in
   match bind with
   | Unix { dir } ->
-      let path = unix_socket_path dir in
+      let path = Bind.socket_path ~dir in
       let dial ~sw =
         (Eio.Net.connect ~sw net (`Unix path)
           :> [ `Close | Eio.Flow.two_way_ty ] Eio.Resource.t)

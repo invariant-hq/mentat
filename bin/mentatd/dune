@@ -3,7 +3,7 @@
  (public_name mentatd)
  (package mentat)
  (flags (:standard -open Mentat_boot))
- (modules child_broker child_spawn daemon_server main)
+ (modules child_broker child_spawn daemon_server main reconcile)
  (libraries
   cmdliner
   eio

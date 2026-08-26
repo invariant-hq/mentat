@@ -1467,6 +1467,33 @@ let turn_replay_group =
             (State.final_text st);
           is_true ~msg:"latest model is the turn's"
             (Option.equal Llm.Model.equal (Some model) (State.latest_model st)));
+      test "the settled head names the concluded turn and nothing sooner"
+        (fun () ->
+          is_true ~msg:"an empty session has no settled head"
+            (Option.is_none (State.settled_head (state [])));
+          let t = turn () in
+          let c = claim (Session.Turn.id t) in
+          let started = [ Event.turn_started t; Event.provider_requested c ] in
+          is_true ~msg:"an active turn has no settled head"
+            (Option.is_none (State.settled_head (state started)));
+          let finished = started @ [ respond c "Done."; finish t ] in
+          (match State.settled_head (state finished) with
+          | Some (head, Some outcome) ->
+              equal turn_id_value ~msg:"the head is the finished turn"
+                (Session.Turn.id t) (Session.Turn.id head);
+              equal outcome_value ~msg:"the head carries its outcome"
+                Session.Turn.Outcome.completed outcome
+          | Some (_, None) -> fail "the recorded outcome must surface"
+          | None -> fail "a finished turn is the settled head");
+          let follow_up =
+            turn ~id:"turn-2"
+              ~input:(Session.Turn.Input.user_text "More.")
+              ()
+          in
+          is_true ~msg:"a newly active turn clears the settled head"
+            (Option.is_none
+               (State.settled_head
+                  (state (finished @ [ Event.turn_started follow_up ])))));
       test "turn ids are unique across the session" (fun () ->
           let t = turn () in
           let c = claim (Session.Turn.id t) in

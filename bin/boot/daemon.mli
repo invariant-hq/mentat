@@ -32,6 +32,17 @@ val ensure_daemon_dir : User_dirs.t -> unit
 (** [ensure_daemon_dir dirs] creates the per-user daemon home ([0700]) if it
     does not exist; an existing one is left untouched. *)
 
+val resolve_sibling :
+  env:string -> name:string -> beside:string -> (string, string) result
+(** [resolve_sibling ~env ~name ~beside] is the sibling-binary policy shared
+    by the pair of executables that ship side by side: the program [name] next
+    to the running executable, unless the environment variable [env] names one
+    to run from elsewhere. A path that is absent, a directory, or not
+    executable is refused loudly here — [Unix.create_process] reports an exec
+    failure only inside the forked child, invisibly — with a message naming
+    the expected path, [beside] (the binary the caller is running as), and
+    [env] as the escape. *)
+
 val stop : unit -> Exit_status.t
 (** [stop ()] stops the running per-user daemon: it reads [daemon.json], and —
     if the claim is held (the daemon is live) — sends the recorded pid a SIGTERM
