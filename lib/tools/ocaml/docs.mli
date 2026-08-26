@@ -164,6 +164,7 @@ val make :
   ocamlfind_program:string list ->
   opam_switch_prefix:string option ->
   ?dune_lease:(unit -> [ `Free | `Held | `Leased of unit -> unit ]) ->
+  ?dune_activity:(unit -> int option) ->
   unit ->
   Mentat_tool.t
 (** [make workspace_io ~clock ~merlin_program ~dune_program ~ocamlfind_program
@@ -180,6 +181,15 @@ val make :
     query fails [`Unavailable] with text naming the lock and the
     Merlin-backed alternatives, never Dune's own lock advice. Path queries
     never consult it.
+
+    [dune_activity] is the build witness the resolved universe is cached
+    on: the attach observer's event generation, or [None] with no observer
+    (default: no witness, no caching). While the generation stands still no
+    build event has flowed, so repeated name queries reuse the resolved
+    universe and consult neither the lease nor [dune describe] — a burst of
+    queries costs one describe and at most one watch pause. Its blind spot
+    is the shared sampled-stream one: a rebuild between samples moves no
+    generation. Path queries never consult it either.
 
     It closes
     the capability, monotonic clock, boot-resolved program prefixes, and

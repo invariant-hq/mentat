@@ -1232,6 +1232,57 @@ let%expect_test "a leased name query returns the lease; path queries never consu
     path query: never consulted the lease
     |}]
 
+let%expect_test "an unchanged build witness reuses the universe without the lock"
+    =
+  with_world "describe-cache" @@ fun world ->
+  List.iter
+    (fun index ->
+      set_response world "dune" index (local_workspace_output world))
+    [ 1; 2; 3 ];
+  let clock = Eio_mock.Clock.Mono.make () in
+  let generation = ref (Some 1) in
+  let leases = ref 0 in
+  let tool =
+    Docs.make world.base.io ~clock
+      ~merlin_program:[ world.base.fake; world.base.plan_dir; "merlin" ]
+      ~dune_program:[ world.base.fake; world.base.plan_dir; "dune" ]
+      ~ocamlfind_program:[ world.base.fake; world.base.plan_dir; "ocamlfind" ]
+      ~opam_switch_prefix:None
+      ~dune_lease:(fun () ->
+        incr leases;
+        `Free)
+      ~dune_activity:(fun () -> !generation)
+      ()
+  in
+  let query () =
+    let result =
+      Tool.Call.run
+        (decode_call tool (input "demo"))
+        ~cancelled:(fun () -> false)
+      |> finished
+    in
+    print_status result
+  in
+  query ();
+  query ();
+  Printf.printf "two queries, one generation: describes=%d leases=%d
+"
+    (invocation_count world "dune")
+    !leases;
+  generation := Some 2;
+  query ();
+  Printf.printf "the witness moved: describes=%d leases=%d
+"
+    (invocation_count world "dune")
+    !leases;
+  [%expect {|
+    status: completed
+    status: completed
+    two queries, one generation: describes=1 leases=1
+    status: completed
+    the witness moved: describes=2 leases=2
+    |}]
+
 let%expect_test "name queries refuse while a foreign watch holds dune's lock"
     =
   with_world "watch-lock" @@ fun world ->

@@ -470,7 +470,7 @@ Global_lock.lock_exn` and fail beside any watch.
 | tool | disposition |
 |---|---|
 | `ocaml_dune_describe` | **Deleted** — the tool (`lib/tools/ocaml/dune_describe.*`), its expect suite (`test/tools/test_tools_ocaml_dune_describe_expect.ml`), `lib/tools/output/ocaml/project.mli`, and its arms in `tool_distill.ml:37,373`, `argument.ml:164`, `catalog-and-boot.t`, `test_tools_dependency_laws.ml`, `test_tools_output.ml`. `Mentat_ocaml_dune_describe`'s pure normalizers stay for docs. `prompts/skills/ocaml-dune.md:148,279-283` stop recommending `dune describe`; `TODO.md:6` is removed. Re-entry when dune serves describe over RPC. |
-| `ocaml_docs` — `dune describe workspace` | **Leased** past our own watch: the supervisor pauses the child (SIGTERM, daemon-scale grace), the one-shot runs where it was, and the machine respawns through the ordinary probe-first cycle — a one-shot still winding down is discovered, never fought. Leases nest; shutdown overrides a lost one. Only a **foreign** watch — not ours to pause — still earns the honest refusal for name queries: `another session's build watch holds dune's build lock…`; path queries never consult the lease. |
+| `ocaml_docs` — `dune describe workspace` | The resolved universe is **cached on the observer's activity generation** — the lint trigger's own build witness: while no build event has flowed, repeated name queries reuse it and take no lock at all, so a burst of queries costs one describe and at most one watch pause (blind spot: the shared sub-sample one; no witness, no caching). A stale universe is **Leased** past our own watch: the supervisor pauses the child (SIGTERM, daemon-scale grace), the one-shot runs where it was, and the machine respawns through the ordinary probe-first cycle — a one-shot still winding down is discovered, never fought. Leases nest; shutdown overrides a lost one. Only a **foreign** watch — not ours to pause — still earns the honest refusal for name queries: `another session's build watch holds dune's build lock…`; path queries never consult the lease. |
 | `ocaml_eval` — `dune ocaml top .` | Same lease, same foreign-only refusal. Never dune's "delete `_build/.lock`" text. |
 
 The refusal fires beside a **foreign** watch only — the common lock holder
@@ -658,6 +658,13 @@ flush on tool-timeout evidence) would mint the state it announces.
   ordered against a request; the diagnostic stream orders itself.
 - **A synthetic build probe** — cancels and restarts running builds under the
   nightly, and its bound is the rebuild's duration (§3).
+- **A lease linger** (hold the watch down briefly after a release so
+  consecutive one-shots share one bounce) — loses to the universe cache: the
+  linger speculates on a next call with a magic duration and keeps the watch
+  down when none comes, while the cache removes the repeat calls' need for
+  the lock entirely; and eval, whose runs are long, never needed either. Can
+  be added later without a wire change if real bursts of lock-takers outrun
+  the cache.
 - **Separate build dir** (`TODO.md:6`) — the agent's `dune build` then takes
   the free `_build/.lock` and runs a second cold build: double CPU, two rule
   graphs, `.merlin-conf` from whichever built last, notices about a build the

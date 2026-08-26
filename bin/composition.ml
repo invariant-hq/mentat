@@ -2362,7 +2362,12 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
       Tools.Ocaml.Find_references.make build_capability ~clock
         ~program:merlin_program;
       Tools.Ocaml.Docs.make build_capability ~clock ~merlin_program
-        ~dune_program ~ocamlfind_program ~opam_switch_prefix ~dune_lease ();
+        ~dune_program ~ocamlfind_program ~opam_switch_prefix ~dune_lease
+        ~dune_activity:(fun () ->
+          (* The slot, never the accessor: a docs query is not the moment to
+             construct an observer, and with none there is no witness. *)
+          Option.map Mentat_ocaml_dune_rpc.Instance.activity t.dune_rpc)
+        ();
     ]
   in
   let read_core_tools =
