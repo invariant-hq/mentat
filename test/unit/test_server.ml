@@ -746,8 +746,8 @@ let edge_group =
           is_true ~msg:"a token equals its own re-parse"
             (Server.Token.equal a
                (Server.Token.of_string (Server.Token.to_string a)));
-          (* The hand-written constant-time compare over the three cases the
-             ruling names (eqaf is not in the lock). *)
+          (* The constant-time compare (eqaf-backed) over the three cases the
+             ruling names. *)
           let tok = Server.Token.of_string in
           is_true ~msg:"equal: identical strings compare equal"
             (Server.Token.equal (tok "abcdef") (tok "abcdef"));
@@ -3032,6 +3032,434 @@ let web_edge_group =
                 (contains_substring "data: attach failed" body)));
     ]
 
+(* ---- The webhook ingress family ---- *)
+
+(* HMAC-SHA256 rebuilt from the bare hash (the keyed two-pass construction), so
+   the server's verifier is checked against the construction itself rather than
+   against its own [hmac_string]; the pinned literals in the first test anchor
+   this helper to the wire format. *)
+let hmac_sha256 ~key message =
+  let block = 64 in
+  let key =
+    if String.length key > block then
+      Digestif.SHA256.(to_raw_string (digest_string key))
+    else key
+  in
+  let key = key ^ String.make (block - String.length key) '\000' in
+  let xor_pad byte =
+    String.init block (fun i -> Char.chr (Char.code key.[i] lxor byte))
+  in
+  let inner =
+    Digestif.SHA256.(to_raw_string (digest_string (xor_pad 0x36 ^ message)))
+  in
+  Digestif.SHA256.(to_raw_string (digest_string (xor_pad 0x5c ^ inner)))
+
+let hex_of_raw s =
+  let buffer = Buffer.create (String.length s * 2) in
+  String.iter
+    (fun c -> Buffer.add_string buffer (Printf.sprintf "%02x" (Char.code c)))
+    s;
+  Buffer.contents buffer
+
+let ingress_secret = "It's a Secret to Everybody"
+let ingress_path = "/ingress/github/charter-1"
+
+let signature_of ~secret body =
+  "sha256=" ^ hex_of_raw (hmac_sha256 ~key:secret body)
+
+let signed_headers ?(secret = ingress_secret) body =
+  [
+    ("content-type", "application/json");
+    ("X-Hub-Signature-256", signature_of ~secret body);
+  ]
+
+(* A scripted ingress: every id resolves to the one charter (or [Unknown]),
+   recording the resolved ids; [deliver] records what it was handed custody of
+   before answering [outcome]. *)
+let scripted_ingress ?(known = true) ?(enabled = true) ?(outcome = `Accepted)
+    ~secret () =
+  let resolved = ref [] in
+  let deliveries = ref [] in
+  let ingress =
+    {
+      Server.Ingress.resolve =
+        (fun ~ingress_id ->
+          resolved := ingress_id :: !resolved;
+          if known then Server.Ingress.Charter { secret; enabled }
+          else Server.Ingress.Unknown);
+      deliver =
+        (fun ~ingress_id ~enabled ~body ->
+          deliveries := (ingress_id, enabled, body) :: !deliveries;
+          outcome);
+    }
+  in
+  (ingress, resolved, deliveries)
+
+(* Serve with the family mounted over a unix socket; no handshake is ever
+   spoken, so every delivery below also witnesses that the ingress needs no
+   connection binding. *)
+let with_ingress_server ~ingress f =
+  Eio_main.run @@ fun env ->
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  Eio.Switch.run @@ fun sw ->
+  let dir = socket_dir () in
+  let bind = Server.Bind.unix ~dir in
+  let listener = Server.listen ~sw ~net bind in
+  Eio.Fiber.fork_daemon ~sw (fun () ->
+      (try
+         Server.serve ~sw ~clock ~ingress
+           ~driver_for:(const_driver_for (make_driver ()))
+           listener
+       with Eio.Cancel.Cancelled _ -> ());
+      `Stop_daemon);
+  let body () =
+    f ~net ~sw ~dir;
+    Ok ()
+  in
+  match Eio.Time.with_timeout clock 30.0 body with
+  | Ok () -> ()
+  | Error `Timeout -> fail "deadlock guard: the ingress harness exceeded 30s"
+
+(* The loopback variant, for the bearer-separation probes: same [serve], a
+   token-carrying TCP bind, raw HTTP via the web helpers. *)
+let with_loopback_ingress_server ~ingress f =
+  Eio_main.run @@ fun env ->
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  Eio.Switch.run @@ fun sw ->
+  let token = Server.Token.generate () in
+  let listener =
+    Server.listen ~sw ~net (Server.Bind.loopback ~port:None ~token)
+  in
+  let port =
+    match Server.port listener with Some p -> p | None -> fail "no bound port"
+  in
+  Eio.Fiber.fork_daemon ~sw (fun () ->
+      (try
+         Server.serve ~sw ~clock ~ingress
+           ~driver_for:(const_driver_for (make_driver ()))
+           listener
+       with Eio.Cancel.Cancelled _ -> ());
+      `Stop_daemon);
+  let body () =
+    f ~net ~sw ~port ~token;
+    Ok ()
+  in
+  match Eio.Time.with_timeout clock 30.0 body with
+  | Ok () -> ()
+  | Error `Timeout -> fail "deadlock guard: the ingress harness exceeded 30s"
+
+let ingress_post ~net ~dir ~sw ?(headers = []) path body =
+  let client = raw_client ~net ~dir in
+  let response, rbody =
+    Cohttp_eio.Client.post client ~sw
+      ~headers:(Cohttp.Header.of_list headers)
+      ~body:(Cohttp_eio.Body.of_string body)
+      (Uri.of_string ("http://mentat" ^ path))
+  in
+  (Cohttp.Code.code_of_status (Cohttp.Response.status response), raw_read rbody)
+
+let one_delivery ~msg deliveries =
+  match !deliveries with
+  | [ delivery ] -> delivery
+  | l -> failf "%s: expected exactly one delivery, saw %d" msg (List.length l)
+
+let ingress_group =
+  group "webhook ingress"
+    [
+      test "the test's HMAC construction matches the pinned wire goldens"
+        (fun () ->
+          (* Two fixed literals computed outside this tree: the classic
+             HMAC-SHA256 vector, and the GitHub webhook documentation's
+             secret/payload pair — the exact wire format a delivery carries. *)
+          equal string ~msg:"the classic HMAC-SHA256 vector"
+            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+            (hex_of_raw
+               (hmac_sha256 ~key:"key"
+                  "The quick brown fox jumps over the lazy dog"));
+          equal string ~msg:"the GitHub documentation pair, header-formatted"
+            ("sha256="
+            ^ "757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17"
+            )
+            (signature_of ~secret:ingress_secret "Hello, World!"));
+      test "a signed delivery is a content-free 202 with the exact raw bytes"
+        (fun () ->
+          let ingress, resolved, deliveries =
+            scripted_ingress ~secret:ingress_secret ()
+          in
+          (* Content neutrality: the body is bytes, not a text format. *)
+          let payload = String.init 256 Char.chr in
+          with_ingress_server ~ingress (fun ~net ~sw ~dir ->
+              let status, rbody =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers payload)
+                  ingress_path payload
+              in
+              equal int ~msg:"a verified delivery is 202" 202 status;
+              equal string ~msg:"the 202 is content-free" "" rbody;
+              equal (list string) ~msg:"the resolver saw the path token"
+                [ "charter-1" ] !resolved;
+              let id, enabled, body = one_delivery ~msg:"accepted" deliveries in
+              equal string ~msg:"the callback saw the path token" "charter-1"
+                id;
+              is_true ~msg:"the resolver's enabled snapshot rode through"
+                enabled;
+              equal string ~msg:"the callback saw the exact raw bytes" payload
+                body));
+      test "an absent signature header is a content-free 401" (fun () ->
+          let ingress, _, deliveries =
+            scripted_ingress ~secret:ingress_secret ()
+          in
+          with_ingress_server ~ingress (fun ~net ~sw ~dir ->
+              let status, rbody =
+                ingress_post ~net ~dir ~sw ingress_path "{}"
+              in
+              equal int ~msg:"no header is refused" 401 status;
+              equal string ~msg:"the 401 is content-free" "" rbody;
+              equal int ~msg:"custody was never offered" 0
+                (List.length !deliveries)));
+      test "a wrong signature is the same content-free 401" (fun () ->
+          let ingress, _, deliveries =
+            scripted_ingress ~secret:ingress_secret ()
+          in
+          with_ingress_server ~ingress (fun ~net ~sw ~dir ->
+              (* Well-formed 64-hex, computed over different bytes. *)
+              let status, rbody =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers "other bytes")
+                  ingress_path "{}"
+              in
+              equal int ~msg:"a mismatch is refused" 401 status;
+              equal string ~msg:"the 401 is content-free" "" rbody;
+              equal int ~msg:"custody was never offered" 0
+                (List.length !deliveries)));
+      test "malformed signature values are the same content-free 401" (fun () ->
+          let ingress, _, deliveries =
+            scripted_ingress ~secret:ingress_secret ()
+          in
+          with_ingress_server ~ingress (fun ~net ~sw ~dir ->
+              let refuse ~msg value =
+                let status, rbody =
+                  ingress_post ~net ~dir ~sw
+                    ~headers:[ ("X-Hub-Signature-256", value) ]
+                    ingress_path "{}"
+                in
+                equal int ~msg 401 status;
+                equal string ~msg:"content-free" "" rbody
+              in
+              let hex =
+                hex_of_raw (hmac_sha256 ~key:ingress_secret "{}")
+              in
+              refuse ~msg:"odd-length hex" "sha256=abc";
+              refuse ~msg:"non-hex digits"
+                ("sha256=" ^ String.make 64 'z');
+              refuse ~msg:"missing prefix" hex;
+              refuse ~msg:"wrong prefix separator" ("sha256:" ^ hex);
+              refuse ~msg:"uppercase prefix" ("SHA256=" ^ hex);
+              refuse ~msg:"empty digest" "sha256=";
+              equal int ~msg:"custody was never offered" 0
+                (List.length !deliveries)));
+      test "the SHA-1 X-Hub-Signature is never consulted" (fun () ->
+          let ingress, _, deliveries =
+            scripted_ingress ~secret:ingress_secret ()
+          in
+          with_ingress_server ~ingress (fun ~net ~sw ~dir ->
+              (* A genuinely valid SHA-1 signature, and no SHA-256 header: if
+                 the legacy header were consulted this would verify. *)
+              let sha1 =
+                Digestif.SHA1.(
+                  to_hex (hmac_string ~key:ingress_secret "{}"))
+              in
+              let status, rbody =
+                ingress_post ~net ~dir ~sw
+                  ~headers:[ ("X-Hub-Signature", "sha1=" ^ sha1) ]
+                  ingress_path "{}"
+              in
+              equal int ~msg:"the legacy header verifies nothing" 401 status;
+              equal string ~msg:"content-free" "" rbody;
+              equal int ~msg:"custody was never offered" 0
+                (List.length !deliveries)));
+      test "an unknown ingress id is a content-free 404" (fun () ->
+          let ingress, resolved, deliveries =
+            scripted_ingress ~known:false ~secret:ingress_secret ()
+          in
+          with_ingress_server ~ingress (fun ~net ~sw ~dir ->
+              let status, rbody =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers "{}")
+                  ingress_path "{}"
+              in
+              equal int ~msg:"an unresolvable id is 404" 404 status;
+              equal string ~msg:"the 404 is content-free" "" rbody;
+              equal (list string) ~msg:"the resolver was asked"
+                [ "charter-1" ] !resolved;
+              equal int ~msg:"custody was never offered" 0
+                (List.length !deliveries)));
+      test "a disabled charter verifies, then informs the callback" (fun () ->
+          let ingress, _, deliveries =
+            scripted_ingress ~enabled:false ~secret:ingress_secret ()
+          in
+          with_ingress_server ~ingress (fun ~net ~sw ~dir ->
+              (* An unverified sender cannot observe even the disablement. *)
+              let status, rbody =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers "other bytes")
+                  ingress_path "{}"
+              in
+              equal int ~msg:"disabled still gates on the signature" 401 status;
+              equal string ~msg:"content-free" "" rbody;
+              equal int ~msg:"no unverified custody" 0
+                (List.length !deliveries);
+              (* A verified delivery is handed over with the snapshot; what
+                 disabled means (a skipped receipt) is the callback's. *)
+              let status, rbody =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers "{}")
+                  ingress_path "{}"
+              in
+              equal int ~msg:"verified custody still answers 202" 202 status;
+              equal string ~msg:"content-free" "" rbody;
+              let _, enabled, _ = one_delivery ~msg:"disabled" deliveries in
+              is_false ~msg:"the callback was told the charter is disabled"
+                enabled));
+      test "a body over the 1 MiB cap is a content-free 413" (fun () ->
+          let cap = 1024 * 1024 in
+          let ingress, _, deliveries =
+            scripted_ingress ~secret:ingress_secret ()
+          in
+          with_ingress_server ~ingress (fun ~net ~sw ~dir ->
+              let at_cap = String.make cap 'x' in
+              let status, rbody =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers at_cap)
+                  ingress_path at_cap
+              in
+              equal int ~msg:"exactly the cap is still a delivery" 202 status;
+              equal string ~msg:"content-free" "" rbody;
+              let _, _, body = one_delivery ~msg:"at-cap" deliveries in
+              equal int ~msg:"the callback saw every byte of the cap" cap
+                (String.length body);
+              deliveries := [];
+              let over = String.make (cap + 1) 'x' in
+              let status, rbody =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers over)
+                  ingress_path over
+              in
+              equal int ~msg:"one byte over the cap is refused" 413 status;
+              equal string ~msg:"the 413 is content-free" "" rbody;
+              (* A grossly oversized body trips the read cap itself; the
+                 refusal may tear the connection under the client mid-write,
+                 so only a delivered response is asserted on. *)
+              (match
+                 ingress_post ~net ~dir ~sw
+                   ~headers:(signed_headers "irrelevant")
+                   ingress_path
+                   (String.make (4 * cap) 'x')
+               with
+              | status, rbody ->
+                  equal int ~msg:"far over the cap is refused" 413 status;
+                  equal string ~msg:"content-free" "" rbody
+              | exception _ -> ());
+              equal int ~msg:"custody was never offered past the cap" 0
+                (List.length !deliveries)));
+      test "a refused delivery is a content-free 500" (fun () ->
+          let ingress, _, deliveries =
+            scripted_ingress ~outcome:(`Refused "receipts.jsonl: read-only")
+              ~secret:ingress_secret ()
+          in
+          with_ingress_server ~ingress (fun ~net ~sw ~dir ->
+              let status, rbody =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers "{}")
+                  ingress_path "{}"
+              in
+              equal int ~msg:"unwritable custody is 500, never 202" 500 status;
+              equal string ~msg:"the 500 is content-free" "" rbody;
+              equal int ~msg:"the delivery reached the callback once" 1
+                (List.length !deliveries)));
+      test "everything else under the prefix is a content-free 404" (fun () ->
+          let ingress, _, deliveries =
+            scripted_ingress ~secret:ingress_secret ()
+          in
+          with_ingress_server ~ingress (fun ~net ~sw ~dir ->
+              let refuse ~msg (status, rbody) =
+                equal int ~msg 404 status;
+                equal string ~msg:"content-free" "" rbody
+              in
+              let client = raw_client ~net ~dir in
+              refuse ~msg:"GET on the route is not the family's shape"
+                (raw_get client ~sw ingress_path);
+              refuse ~msg:"a missing id"
+                (ingress_post ~net ~dir ~sw
+                   ~headers:(signed_headers "{}")
+                   "/ingress/github" "{}");
+              refuse ~msg:"a trailing segment"
+                (ingress_post ~net ~dir ~sw
+                   ~headers:(signed_headers "{}")
+                   (ingress_path ^ "/extra") "{}");
+              refuse ~msg:"an unknown provider segment"
+                (ingress_post ~net ~dir ~sw
+                   ~headers:(signed_headers "{}")
+                   "/ingress/gitlab/charter-1" "{}");
+              equal int ~msg:"custody was never offered" 0
+                (List.length !deliveries)));
+      test "the family and the bearer surface grant each other nothing"
+        (fun () ->
+          let ingress, _, deliveries =
+            scripted_ingress ~secret:ingress_secret ()
+          in
+          with_loopback_ingress_server ~ingress
+            (fun ~net ~sw ~port ~token ->
+              let bearer =
+                ("authorization", "Bearer " ^ Server.Token.to_string token)
+              in
+              (* A valid wire token, a bad signature: the family's own
+                 content-free 401, not the bearer's bodied one — the token
+                 bought nothing under /ingress/. *)
+              let status, _, rbody =
+                web_post ~net ~port ~sw
+                  ~headers:(bearer :: signed_headers "other bytes")
+                  ~body:"{}" ingress_path
+              in
+              equal int ~msg:"a wire token does not verify a delivery" 401
+                status;
+              equal string ~msg:"the refusal is the family's, content-free" ""
+                rbody;
+              equal int ~msg:"custody was never offered" 0
+                (List.length !deliveries);
+              (* A valid signature outside /ingress/: the bearer surface
+                 answers, and the signature buys nothing there. *)
+              let status, _, rbody =
+                web_post ~net ~port ~sw
+                  ~headers:(signed_headers "{}")
+                  ~body:"{}" "/wire"
+              in
+              equal int ~msg:"a valid signature opens no other route" 401
+                status;
+              equal string ~msg:"the bearer refusal, not the family's"
+                "unauthorized" rbody;
+              (* The family owns only its prefix: health stays pre-auth. *)
+              let status, _, rbody = web_get ~net ~port ~sw "/health" in
+              equal int ~msg:"health is untouched" 200 status;
+              equal string ~msg:"health body" "ok" rbody));
+      test "an unconfigured serve leaves /ingress paths as before" (fun () ->
+          with_server ~driver:(make_driver ())
+            (fun ~env:_ ~net ~sw ~dir ~bind:_ ~remote:_ ->
+              (* No [?ingress]: the prefix is nobody's, so the request rides
+                 the ordinary pre-binding path to its bodied 404. *)
+              let status, rbody =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers "{}")
+                  ingress_path "{}"
+              in
+              equal int ~msg:"an unmounted family answers as any unknown route"
+                404 status;
+              equal string ~msg:"the ordinary bodied not-found, not the \
+                                 family's content-free one" "not found" rbody));
+    ]
+
 let () =
   Random.self_init ();
   run "mentat.server"
@@ -3045,6 +3473,7 @@ let () =
       reads_group;
       commands_group;
       edge_group;
+      ingress_group;
       introspection_group;
       m4_group;
       idempotency_group;

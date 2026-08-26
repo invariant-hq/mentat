@@ -19,24 +19,10 @@ let to_hex s =
     s;
   Buffer.contents buffer
 
-(* Constant-time string equality: the running time depends only on the lengths,
-   never on where the first differing byte lies, so a comparison cannot leak a
-   token by timing. Hand-written because [eqaf] is not in the
-   lock and this campaign adds no lock entries; the length-checked byte-wise
-   [lxor]/[lor] fold is the standard constant-time idiom, unit-tested against the
-   equal, unequal-same-length, and unequal-length cases. Token length is fixed
-   (a hex CSPRNG value) and not itself secret, so folding to the longer length is
-   sound. *)
-let constant_time_equal a b =
-  let la = String.length a and lb = String.length b in
-  let n = if la > lb then la else lb in
-  let acc = ref (la lxor lb) in
-  for i = 0 to n - 1 do
-    let ca = if i < la then Char.code a.[i] else 0 in
-    let cb = if i < lb then Char.code b.[i] else 0 in
-    acc := !acc lor (ca lxor cb)
-  done;
-  Int.equal !acc 0
+(* Every secret compare here — token, cookie, ingress MAC — goes through
+   [Eqaf.equal]: constant time in where the first differing byte lies, so a
+   comparison cannot leak a secret by timing (lengths are fixed-width and not
+   themselves secret). *)
 
 (* CSPRNG helpers shared by the connection token and the browser session cookie:
    a hex value from [Mirage_crypto_rng], seeded once. stdlib
@@ -60,7 +46,7 @@ module Token = struct
   let generate () = csprng_hex 32
   let of_string s = s
   let to_string t = t
-  let equal = constant_time_equal
+  let equal = Eqaf.equal
 end
 
 module Origin = struct
@@ -203,6 +189,24 @@ let port listener =
   match listener.addr with
   | Some (`Tcp (_ip, port)) -> Some port
   | Some (`Unix _) | None -> None
+
+(* The webhook ingress configuration: the resolver answering an ingress id with
+   one consistent charter snapshot (secret and enabled state read together, so
+   verification and delivery of a single request see the same charter), and the
+   delivery callback taking custody of verified bytes. The family built on it
+   lives beside [handle]; the semantics are the .mli's. *)
+module Ingress = struct
+  type resolution = Charter of { secret : string; enabled : bool } | Unknown
+
+  type t = {
+    resolve : ingress_id:string -> resolution;
+    deliver :
+      ingress_id:string ->
+      enabled:bool ->
+      body:string ->
+      [ `Accepted | `Refused of string ];
+  }
+end
 
 (* HTTP responses (server side). cohttp owns body framing: [reply] a fixed
    string, [reply_stream] an SSE body cohttp reads from a flow source and
@@ -623,8 +627,120 @@ let reply_unbound meth path =
       reply_stream (one_frame_puller (error_frame error))
   | _ -> reply ~status:`Not_found ~body:"not found" ()
 
-let handle ~clock ~heartbeat ~driver_for ~bindings ~bind ~ledger conn request
-    body =
+(* ---- The webhook ingress: POST /ingress/github/<ingress-id> ---- *)
+
+(* Every ingress answer is content-free — an empty body, no content type: an
+   internet-facing endpoint gets garbage, and garbage deserves no detail. *)
+let content_free status = Cohttp_eio.Server.respond_string ~status ~body:"" ()
+
+(* 1 MiB. Policy headroom over observed webhook payloads (~100 KiB), enforced by
+   capping the read itself, never by trusting a length the sender declared. *)
+let ingress_body_cap = 1024 * 1024
+
+(* When the family is mounted it owns the whole [/ingress/] prefix, so no path
+   beneath it ever reaches the bearer check, the handshake bindings, or the
+   endpoint table: a valid wire token grants nothing here, and a valid delivery
+   signature grants nothing past this arm. *)
+let ingress_claims path =
+  String.equal path "/ingress" || String.starts_with ~prefix:"/ingress/" path
+
+(* The one route shape in the family. Anything else under the prefix — another
+   provider segment, a trailing slash, a missing id — is a content-free 404. *)
+let ingress_route path =
+  match String.split_on_char '/' path with
+  | [ ""; "ingress"; "github"; id ] when not (String.equal id "") -> Some id
+  | _ -> None
+
+let hex_digit = function
+  | '0' .. '9' as c -> Some (Char.code c - Char.code '0')
+  | 'a' .. 'f' as c -> Some (Char.code c - Char.code 'a' + 10)
+  | 'A' .. 'F' as c -> Some (Char.code c - Char.code 'A' + 10)
+  | _ -> None
+
+let hex_decode s =
+  let len = String.length s in
+  if len = 0 || len mod 2 <> 0 then None
+  else
+    let buffer = Bytes.create (len / 2) in
+    let rec go i =
+      if i >= len then Some (Bytes.to_string buffer)
+      else
+        match (hex_digit s.[i], hex_digit s.[i + 1]) with
+        | Some hi, Some lo ->
+            Bytes.set buffer (i / 2) (Char.chr ((hi lsl 4) lor lo));
+            go (i + 2)
+        | _, _ -> None
+    in
+    go 0
+
+(* The MAC a delivery presents: [X-Hub-Signature-256: sha256=<hex>], decoded to
+   raw digest bytes. [None] — an absent header, a wrong prefix, undecodable or
+   odd-length hex — lands in the same content-free 401 as a clean mismatch, so
+   a probe learns nothing from the refusal shape. The SHA-1 [X-Hub-Signature]
+   is never consulted. *)
+let ingress_presented_mac headers =
+  match Cohttp.Header.get headers "x-hub-signature-256" with
+  | None -> None
+  | Some value ->
+      let prefix = "sha256=" in
+      let plen = String.length prefix in
+      if
+        String.length value > plen
+        && String.equal (String.sub value 0 plen) prefix
+      then hex_decode (String.sub value plen (String.length value - plen))
+      else None
+
+(* Read the delivery body under the cap without ever buffering the excess: the
+   reader's buffer is allowed exactly one byte past the cap, so an oversized
+   body is refused as soon as the boundary is crossed, not after it arrives. *)
+let read_ingress_body body =
+  let reader = Eio.Buf_read.of_flow body ~max_size:(ingress_body_cap + 1) in
+  match Eio.Buf_read.take_all reader with
+  | raw when String.length raw <= ingress_body_cap -> Ok raw
+  | _ -> Error `Too_large
+  | exception Eio.Buf_read.Buffer_limit_exceeded -> Error `Too_large
+
+(* One delivery, per the .mli's response contract: resolve the path id (unknown
+   ⇒ 404), read the capped raw body (over ⇒ 413), verify the HMAC-SHA256 over
+   those exact bytes against the charter's retained secret (absent, malformed,
+   or mismatched ⇒ one 401 — a disabled charter still verifies, so an
+   unverified sender cannot observe even the disablement), and only then hand
+   custody to the callback: [`Accepted] ⇒ 202, [`Refused] ⇒ 500 with the
+   reason logged, never sent. Refusals are answered, never raised, and never
+   per-event news. *)
+let handle_ingress ~(ingress : Ingress.t) meth path request body =
+  match (meth, ingress_route path) with
+  | `POST, Some ingress_id -> (
+      match ingress.Ingress.resolve ~ingress_id with
+      | Ingress.Unknown -> content_free `Not_found
+      | Ingress.Charter { secret; enabled } -> (
+          let headers = Cohttp.Request.headers request in
+          let presented = ingress_presented_mac headers in
+          match read_ingress_body body with
+          | Error `Too_large -> content_free (`Code 413)
+          | Ok raw -> (
+              let verified =
+                match presented with
+                | None -> false
+                | Some presented ->
+                    Eqaf.equal presented
+                      (Digestif.SHA256.to_raw_string
+                         (Digestif.SHA256.hmac_string ~key:secret raw))
+              in
+              if not verified then content_free `Unauthorized
+              else
+                match
+                  ingress.Ingress.deliver ~ingress_id ~enabled ~body:raw
+                with
+                | `Accepted -> content_free `Accepted
+                | `Refused reason ->
+                    Eio.traceln "mentat_server: ingress delivery refused: %s"
+                      reason;
+                    content_free `Internal_server_error)))
+  | _, _ -> content_free `Not_found
+
+let handle ~clock ~heartbeat ~driver_for ~bindings ~bind ~ledger ~ingress conn
+    request body =
   let uri = Cohttp.Request.uri request in
   let path = Uri.path uri in
   let meth = Cohttp.Request.meth request in
@@ -633,26 +749,31 @@ let handle ~clock ~heartbeat ~driver_for ~bindings ~bind ~ledger conn request
       (* Pre-auth and content-free. *)
       reply ~content_type:"text/plain; charset=utf-8" ~status:`OK ~body:"ok" ()
   | _ -> (
-      match authorize bind request with
-      | Error `Unauthorized ->
-          reply ~status:`Unauthorized ~body:"unauthorized" ()
-      | Ok () -> (
-          let body_text = read_body body in
-          match (meth, path) with
-          | `POST, "/handshake" ->
-              handle_handshake ~driver_for ~bindings conn body_text
-          | _ -> (
-              match Hashtbl.find_opt bindings (conn_key conn) with
-              | None -> reply_unbound meth path
-              | Some { target; _ } -> (
-                  let driver = target.driver in
-                  match (meth, path) with
-                  | `GET, "/feed" ->
-                      handle_feed ~clock ~heartbeat ~driver request uri
-                  | `POST, "/login" ->
-                      handle_login ~clock ~heartbeat ~driver body_text
-                  | `POST, "/wire" -> handle_wire ~driver ~ledger body_text
-                  | _ -> reply ~status:`Not_found ~body:"not found" ()))))
+      match ingress with
+      | Some ingress when ingress_claims path ->
+          handle_ingress ~ingress meth path request body
+      | Some _ | None -> (
+          match authorize bind request with
+          | Error `Unauthorized ->
+              reply ~status:`Unauthorized ~body:"unauthorized" ()
+          | Ok () -> (
+              let body_text = read_body body in
+              match (meth, path) with
+              | `POST, "/handshake" ->
+                  handle_handshake ~driver_for ~bindings conn body_text
+              | _ -> (
+                  match Hashtbl.find_opt bindings (conn_key conn) with
+                  | None -> reply_unbound meth path
+                  | Some { target; _ } -> (
+                      let driver = target.driver in
+                      match (meth, path) with
+                      | `GET, "/feed" ->
+                          handle_feed ~clock ~heartbeat ~driver request uri
+                      | `POST, "/login" ->
+                          handle_login ~clock ~heartbeat ~driver body_text
+                      | `POST, "/wire" ->
+                          handle_wire ~driver ~ledger body_text
+                      | _ -> reply ~status:`Not_found ~body:"not found" ())))))
 
 let default_ledger_cap = 1024
 
@@ -667,7 +788,7 @@ let is_disconnect = function
   | _ -> false
 
 let serve ~sw ~clock ?(heartbeat_s = default_heartbeat)
-    ?(ledger_cap = default_ledger_cap) ~driver_for listener =
+    ?(ledger_cap = default_ledger_cap) ?ingress ~driver_for listener =
   let stop, resolve_stop = Eio.Promise.create () in
   Eio.Switch.on_release sw (fun () ->
       ignore (Eio.Promise.try_resolve resolve_stop ()));
@@ -680,7 +801,7 @@ let serve ~sw ~clock ?(heartbeat_s = default_heartbeat)
     Cohttp_eio.Server.make
       ~callback:
         (handle ~clock ~heartbeat:heartbeat_s ~driver_for ~bindings
-           ~bind:listener.bind ~ledger)
+           ~bind:listener.bind ~ledger ~ingress)
       ()
   in
   listener.run_server ~stop
@@ -742,7 +863,7 @@ module Web = struct
 
     let valid jar presented =
       Hashtbl.fold
-        (fun secret () found -> found || constant_time_equal presented secret)
+        (fun secret () found -> found || Eqaf.equal presented secret)
         jar.secrets false
   end
 
@@ -1221,8 +1342,7 @@ let client_handshake ~base ~token ~workspace ~environment client ~sw =
         | Error _ when status = 400 ->
             Printf.sprintf
               "daemon rejected the handshake (%s); a running daemon older than \
-               this client cannot read it — restart it with `mentat serve \
-               --stop`"
+               this client cannot read it — restart it with `mentatd --stop`"
               (String.trim text)
         | Error _ -> String.trim text
       in

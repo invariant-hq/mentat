@@ -24,6 +24,10 @@
   mentat_review
   mentat_session
   mentat_workspace
+  ;; the webhook ingress's delivery authentication: HMAC-SHA256 over the raw
+  ;; body, compared in constant time
+  digestif
+  eqaf
   ;; the socket transport and its security primitives
   eio
   eio.unix

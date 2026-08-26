@@ -112,6 +112,81 @@ val port : listener -> int option
     reads it to name the browser URL when the bind requested an ephemeral port.
     [None] for a {!Bind.unix} listener, which carries no port. *)
 
+(** {1:ingress The webhook ingress}
+
+    A content-neutral route family {!serve} mounts when given an {!Ingress.t} —
+    the third pre-auth surface beside the handshake and [GET /health]:
+
+    {v POST /ingress/github/<ingress-id> v}
+
+    [<ingress-id>] is an opaque path token (a high-entropy capability, a second
+    factor but never the authenticator). The family does exactly one thing:
+    authenticate each delivery end-to-end — [X-Hub-Signature-256], an
+    HMAC-SHA256 over the {b raw} request body, compared in constant time — and
+    hand the verified bytes to the injected callback. Verification and routing
+    live here;
+    what a verified delivery {e means} (receipts, gates, spawning) is entirely
+    the callback owner's.
+
+    The family shares nothing with the other surfaces: it never consults the
+    bearer token, the endpoint table, the handshake bindings, or the browser
+    edge's cookie/[Origin] machinery — a valid wire token grants nothing under
+    [/ingress/], and a valid delivery signature grants nothing outside it.
+
+    Every refusal is answered, never raised, and {b content-free} (an empty
+    body; an internet-facing endpoint gets garbage, and garbage deserves no
+    detail): an id {!Ingress.resolution.Unknown} to the resolver is [404]; an
+    absent [X-Hub-Signature-256], an undecodable one, and a clean mismatch are
+    one indistinguishable [401] (the SHA-1 [X-Hub-Signature] is never
+    consulted); a body over 1 MiB is [413], its read capped so the excess is
+    never buffered; anything under [/ingress/] that is not the family's one
+    route shape is [404]. A verified delivery answers by the callback:
+    [`Accepted] is a content-free [202], [`Refused] a content-free [500]. *)
+
+module Ingress : sig
+  type resolution =
+    | Charter of { secret : string; enabled : bool }
+        (** The charter answering to an ingress id: the webhook secret its
+            deliveries are verified against, and whether it is enabled. A
+            disabled charter {b still verifies} against the retained secret —
+            disabling is owner intent, not hook failure, and an unverified
+            delivery must not be able to observe even that much — and [enabled]
+            is passed through to {!t.deliver} unread, so interpreting it (a
+            skipped-disabled receipt, say) stays with the callback. *)
+    | Unknown
+        (** No charter answers to the id (never minted, or removed): a
+            content-free [404]. *)
+  (** The type for the resolver's answer: one consistent charter snapshot —
+      secret and enabled state read together — that both the verification and
+      the delivery of a single request use. *)
+
+  type t = {
+    resolve : ingress_id:string -> resolution;
+        (** Resolve an ingress id to its charter snapshot. Called once per
+            syntactically well-formed request, before the body is read. *)
+    deliver :
+      ingress_id:string ->
+      enabled:bool ->
+      body:string ->
+      [ `Accepted | `Refused of string ];
+        (** Take custody of one {b verified} delivery: [body] is the exact raw
+            bytes the signature was checked over, [enabled] the snapshot
+            {!resolve} answered (so the decision is made on the state the
+            signature was verified under, without a second resolve).
+            [`Accepted] means custody is durable — answered as [202]
+            immediately, before any interpretation work. [`Refused reason]
+            means it is not (a receipt that cannot be written): answered as a
+            content-free [500] so the sender retries or its log shows the
+            failure; [reason] is logged, never sent. Report failure as
+            [`Refused], never by raising: a raise tears down the connection
+            with no response at all. *)
+  }
+  (** The type for the ingress configuration: the two callbacks the family
+      routes through. Both run on the serving fiber; keep them prompt (resolve
+      a handful of charters, append one receipt), never blocking on gate or
+      run work. *)
+end
+
 (** {1:serve Serving a driver over the wire} *)
 
 type target = {
@@ -136,14 +211,16 @@ val serve :
   clock:_ Eio.Time.clock ->
   ?heartbeat_s:float ->
   ?ledger_cap:int ->
+  ?ingress:Ingress.t ->
   driver_for:
     (workspace:string option ->
     environment:(string * string) list option ->
     (target, Mentat_protocol.Error.t) result) ->
   listener ->
   unit
-(** [serve ~sw ~clock ?heartbeat_s ?ledger_cap ~driver_for listener] runs the
-    accept loop. Each connection's {b first} request must be [POST /handshake];
+(** [serve ~sw ~clock ?heartbeat_s ?ledger_cap ?ingress ~driver_for listener]
+    runs the accept loop. Each connection's {b first} request must be
+    [POST /handshake];
     [serve] calls [driver_for] with the requested workspace — and the
     environment the client offered, which matters only to the handshake that
     (re)boots a workspace instance; a live instance keeps the environment it
@@ -164,7 +241,11 @@ val serve :
 
     [clock] paces the SSE keep-alive, whose idle interval is [heartbeat_s]
     seconds (default [15.]). It answers a pre-auth, content-free [GET /health].
-    It blocks until [sw] is cancelled.
+    Given [ingress], it also mounts the {{!section-ingress}webhook ingress}
+    family, which then owns every path under [/ingress/] — resolved before, and
+    never through, the bearer check and the endpoint table; without [ingress]
+    no such family exists and those paths answer as any other unknown route. It
+    blocks until [sw] is cancelled.
 
     The request-id find-or-create ledger that dedups a lost-ack retry of a
     [Requires_request_id] operation is daemon-global and {b bounded}: it holds
