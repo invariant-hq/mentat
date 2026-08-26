@@ -337,16 +337,23 @@ The download may be corrupted or tampered with; not installing."
   fi
 
   tar -xzf "$tmp/$archive" -C "$tmp"
-  for b in mentat mentatd; do
-    [ -f "$tmp/$b" ] || err "archive did not contain a $b binary"
-  done
+  [ -f "$tmp/mentat" ] || err "archive did not contain a mentat binary"
+  # The archive's own contents are the vintage signal: releases before the
+  # daemon ship no mentatd, and pinning one with --version must stay
+  # installable — the mentatd half of everything below is conditioned on the
+  # member's presence, never required.
+  has_mentatd=false
+  [ -f "$tmp/mentatd" ] && has_mentatd=true
 
   # Stage inside the destination directory first so the final renames are
   # atomic even when $tmp is on another filesystem, and so a running mentat
   # keeps the executable it started from.
-  chmod 755 "$tmp/mentat" "$tmp/mentatd"
+  chmod 755 "$tmp/mentat"
   cp -f "$tmp/mentat" "$staged"
-  cp -f "$tmp/mentatd" "$staged_d"
+  if [ "$has_mentatd" = true ]; then
+    chmod 755 "$tmp/mentatd"
+    cp -f "$tmp/mentatd" "$staged_d"
+  fi
 
   # Run the staged copies before publishing them. They sit on the destination
   # filesystem, so this is the exec check the final path would get, and a
@@ -354,9 +361,11 @@ The download may be corrupted or tampered with; not installing."
   reported="$("$staged" --version 2> /dev/null || true)"
   [ -n "$reported" ] || err "the $target binary does not run on this machine
 Nothing was installed. Please report this with the output of: uname -sm"
-  reported_d="$("$staged_d" --version 2> /dev/null || true)"
-  [ -n "$reported_d" ] || err "the $target mentatd binary does not run on this machine
+  if [ "$has_mentatd" = true ]; then
+    reported_d="$("$staged_d" --version 2> /dev/null || true)"
+    [ -n "$reported_d" ] || err "the $target mentatd binary does not run on this machine
 Nothing was installed. Please report this with the output of: uname -sm"
+  fi
 
   # Two renames, not one: POSIX cannot publish a pair atomically. Each rename
   # is itself atomic, and the window where a new mentat sits beside an old
@@ -364,9 +373,13 @@ Nothing was installed. Please report this with the output of: uname -sm"
   # catching the skew is refused loudly by the daemon identity check rather
   # than silently attached to a mismatched daemon.
   mv -f "$staged" "$installed"
-  mv -f "$staged_d" "$installed_d"
   say "Installed $reported -> $installed"
-  say "Installed $reported_d -> $installed_d"
+  if [ "$has_mentatd" = true ]; then
+    mv -f "$staged_d" "$installed_d"
+    say "Installed $reported_d -> $installed_d"
+  else
+    say "note: release $version predates the mentatd daemon; only mentat was installed"
+  fi
   modify_path
 
   say ""
