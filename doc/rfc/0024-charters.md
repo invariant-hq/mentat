@@ -284,9 +284,14 @@ synthesizes deliveries for heads without receipts (the same fold rung 1b
 later runs at boot). A crontab line `*/5 * * * * mentat charter fire
 pr-review --sweep` is therefore a complete, fenced, deduplicated,
 publishing review charter with zero listener, zero tunnel, zero service
-unit — rung 1 dogfoods on cron alone. `fire` reaches the node over the
-daemon surface and lazily starts it (`Daemon.find_or_spawn`,
-`bin/daemon.mli:75-88`).
+unit — rung 1 dogfoods on cron alone. `fire` runs the pipeline in the
+invoking process itself — the charter machinery is one code path with
+two invoking processes (the CLI and the node) — so a crontab line needs
+no resident node at all. The per-event-identity `O_CREAT|O_EXCL` marker
+(§3 step 1) is what serializes a CLI `fire` against a resident intake:
+one winner runs, the loser reads `dup`. (This supersedes an earlier
+draft's daemon-surface transport, which contradicted §3 step 1's own
+cross-process design and would have made rung 1 depend on residency.)
 
 ## 3. Triggers
 
