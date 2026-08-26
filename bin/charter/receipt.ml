@@ -95,7 +95,7 @@ end
 
 module Disposition = struct
   type t =
-    | Spawned
+    | Spawned of { session : string }
     | Skipped of string
     | Dup
     | Fenced of Meter.t
@@ -103,6 +103,7 @@ module Disposition = struct
     | Superseded
     | Refused of string
     | Reaped of {
+        session : string;
         exit : int;
         head : Head.t;
         usage : Jsont.json;
@@ -116,7 +117,7 @@ module Kind = struct
     | Delivery
     | Disposition of Disposition.t
     | Egress of {
-        summary : [ `Created | `Updated | `None_needed ];
+        summary : [ `Created | `Updated | `None_needed | `Skipped_no_token ];
         threads : int;
       }
     | Alert of {
@@ -138,7 +139,8 @@ let mem name value = Jsont.Json.mem (Jsont.Json.name name) value
 let str s = Jsont.Json.string s
 
 let disposition_mems = function
-  | Disposition.Spawned -> [ mem "disposition" (str "spawned") ]
+  | Disposition.Spawned { session } ->
+      [ mem "disposition" (str "spawned"); mem "session" (str session) ]
   | Disposition.Skipped reason ->
       [ mem "disposition" (str "skipped"); mem "reason" (str reason) ]
   | Disposition.Dup -> [ mem "disposition" (str "dup") ]
@@ -151,9 +153,10 @@ let disposition_mems = function
   | Disposition.Superseded -> [ mem "disposition" (str "superseded") ]
   | Disposition.Refused reason ->
       [ mem "disposition" (str "refused"); mem "reason" (str reason) ]
-  | Disposition.Reaped { exit; head; usage; usd; cause } ->
+  | Disposition.Reaped { session; exit; head; usage; usd; cause } ->
       [
         mem "disposition" (str "reaped");
+        mem "session" (str session);
         mem "exit" (Jsont.Json.int exit);
         mem "head" (str (Head.to_string head));
         mem "usage" usage;
@@ -174,7 +177,8 @@ let kind_mems = function
                (match summary with
                | `Created -> "created"
                | `Updated -> "updated"
-               | `None_needed -> "none_needed"));
+               | `None_needed -> "none_needed"
+               | `Skipped_no_token -> "skipped_no_token"));
           mem "threads" (Jsont.Json.int threads);
         ] )
   | Kind.Alert { transition; window } ->
@@ -278,6 +282,10 @@ let decode line =
         in
         finish slots (Kind.Disposition (wrap reason))
       in
+      let session_value slots =
+        let* json = value slots "session" in
+        Decode.as_non_empty_string ~context:"session" json
+      in
       let* kind_word = peek_string "kind" mems in
       (match kind_word with
       | "delivery" ->
@@ -287,8 +295,9 @@ let decode line =
           let* word = peek_string "disposition" mems in
           match word with
           | "spawned" ->
-              let* slots = route [ "disposition" ] in
-              finish slots (Kind.Disposition Disposition.Spawned)
+              let* slots = route [ "disposition"; "session" ] in
+              let* session = session_value slots in
+              finish slots (Kind.Disposition (Disposition.Spawned { session }))
           | "dup" ->
               let* slots = route [ "disposition" ] in
               finish slots (Kind.Disposition Disposition.Dup)
@@ -315,8 +324,13 @@ let decode line =
               finish slots (Kind.Disposition (Disposition.Fenced meter))
           | "reaped" ->
               let* slots =
-                route [ "disposition"; "exit"; "head"; "usage"; "usd"; "cause" ]
+                route
+                  [
+                    "disposition"; "session"; "exit"; "head"; "usage"; "usd";
+                    "cause";
+                  ]
               in
+              let* session = session_value slots in
               let* exit =
                 let* json = value slots "exit" in
                 let* exit = Decode.non_negative_int ~context:"exit" json in
@@ -351,7 +365,7 @@ let decode line =
               in
               finish slots
                 (Kind.Disposition
-                   (Disposition.Reaped { exit; head; usage; usd; cause }))
+                   (Disposition.Reaped { session; exit; head; usage; usd; cause }))
           | other ->
               error ~context:"disposition"
                 (Printf.sprintf "unknown disposition %S" other))
@@ -363,9 +377,11 @@ let decode line =
             | "created" -> Ok `Created
             | "updated" -> Ok `Updated
             | "none_needed" -> Ok `None_needed
+            | "skipped_no_token" -> Ok `Skipped_no_token
             | _ ->
                 error ~context:"summary"
-                  "must be \"created\", \"updated\", or \"none_needed\""
+                  "must be \"created\", \"updated\", \"none_needed\", or \
+                   \"skipped_no_token\""
           in
           let* threads =
             let* json = value slots "threads" in
@@ -432,7 +448,8 @@ let diagnostic t =
   | Kind.Delivery -> Printf.sprintf "%s delivery %s" stamp t.identity
   | Kind.Disposition d -> (
       match d with
-      | Disposition.Spawned -> Printf.sprintf "%s spawned %s" stamp t.identity
+      | Disposition.Spawned { session } ->
+          Printf.sprintf "%s spawned %s: session %s" stamp t.identity session
       | Disposition.Skipped reason ->
           Printf.sprintf "%s skipped %s: %s" stamp t.identity reason
       | Disposition.Dup -> Printf.sprintf "%s dup %s" stamp t.identity
@@ -445,9 +462,10 @@ let diagnostic t =
           Printf.sprintf "%s superseded %s" stamp t.identity
       | Disposition.Refused reason ->
           Printf.sprintf "%s refused %s: %s" stamp t.identity reason
-      | Disposition.Reaped { exit; head; usd; cause; usage = _ } ->
-          Printf.sprintf "%s reaped %s: exit %d, head %s, cause %s, %s" stamp
-            t.identity exit (Head.to_string head) (Cause.to_string cause)
+      | Disposition.Reaped { session; exit; head; usd; cause; usage = _ } ->
+          Printf.sprintf "%s reaped %s: session %s, exit %d, head %s, cause %s, %s"
+            stamp t.identity session exit (Head.to_string head)
+            (Cause.to_string cause)
             (match usd with
             | Some usd -> Printf.sprintf "$%.4f" usd
             | None -> "unpriced"))
@@ -456,7 +474,8 @@ let diagnostic t =
         (match summary with
         | `Created -> "created"
         | `Updated -> "updated"
-        | `None_needed -> "none_needed")
+        | `None_needed -> "none_needed"
+        | `Skipped_no_token -> "skipped_no_token")
         threads
   | Kind.Alert { transition; window } ->
       Printf.sprintf "%s alert %s: %s (window %s)" stamp t.identity
@@ -464,3 +483,34 @@ let diagnostic t =
         (match window with
         | `Meter meter -> Meter.to_string meter
         | `Identity -> "identity")
+
+(* Log queries. *)
+
+let delivery_recorded ~digest ~identity receipts =
+  List.exists
+    (fun t ->
+      match t.kind with
+      | Kind.Delivery ->
+          String.equal t.digest digest && String.equal t.identity identity
+      | Kind.Disposition _ | Kind.Egress _ | Kind.Alert _ -> false)
+    receipts
+
+let alerted ~digest ~identity ~transition receipts =
+  List.exists
+    (fun t ->
+      match t.kind with
+      | Kind.Alert { transition = fired; window = `Identity } ->
+          String.equal t.digest digest
+          && String.equal t.identity identity
+          && (match (fired, transition) with
+             | Transition.Failed, Transition.Failed
+             | Transition.Parked, Transition.Parked
+             | Transition.Fenced, Transition.Fenced ->
+                 true
+             | (Transition.Failed | Transition.Parked | Transition.Fenced), _
+               ->
+                 false)
+      | Kind.Alert { window = `Meter _; _ }
+      | Kind.Delivery | Kind.Disposition _ | Kind.Egress _ ->
+          false)
+    receipts

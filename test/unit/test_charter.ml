@@ -333,6 +333,20 @@ let charter_envelope_is_closed () =
     (amended
        ~old_string:{|"events": ["pull_request.opened", "pull_request.synchronize",|}
        ~new_string:{|      "events": ["pull_request.sychronize",|});
+  (* The closed vocabulary tracks GitHub's documented enum: every documented
+     action must load, [stacked] being the newest admission. *)
+  (match
+     Charter.decode
+       (amended
+          ~old_string:
+            {|"events": ["pull_request.opened", "pull_request.synchronize",|}
+          ~new_string:
+            {|      "events": ["pull_request.stacked", "pull_request.synchronize",|})
+   with
+  | Ok _ -> ()
+  | Error e ->
+      failf "a documented pull_request action must load: %s"
+        (Charter.Error.message e));
   rejects ~msg:"unknown notify transition" ~expect:"notify.on[0]"
     (amended ~old_string:{|"notify": { "on": ["failed", "parked", "fenced"],|}
        ~new_string:{|  "notify": { "on": ["clean_run", "parked", "fenced"],|});
@@ -420,10 +434,13 @@ let usage_json =
       Jsont.Json.mem (Jsont.Json.name "output") (Jsont.Json.int 340);
     ]
 
+let sample_session = "c-fdfec12877f34773"
+
 let all_kinds =
   [
     Receipt.Kind.Delivery;
-    Receipt.Kind.Disposition Receipt.Disposition.Spawned;
+    Receipt.Kind.Disposition
+      (Receipt.Disposition.Spawned { session = sample_session });
     Receipt.Kind.Disposition (Receipt.Disposition.Skipped "draft pull requests are not admitted");
     Receipt.Kind.Disposition Receipt.Disposition.Dup;
     Receipt.Kind.Disposition (Receipt.Disposition.Fenced Receipt.Meter.Usd_per_day);
@@ -433,6 +450,7 @@ let all_kinds =
     Receipt.Kind.Disposition
       (Receipt.Disposition.Reaped
          {
+           session = sample_session;
            exit = 0;
            head = Receipt.Head.Settled;
            usage = usage_json;
@@ -442,6 +460,7 @@ let all_kinds =
     Receipt.Kind.Disposition
       (Receipt.Disposition.Reaped
          {
+           session = sample_session;
            exit = 130;
            head = Receipt.Head.Interrupted;
            usage = usage_json;
@@ -450,6 +469,7 @@ let all_kinds =
          });
     Receipt.Kind.Egress { summary = `Created; threads = 3 };
     Receipt.Kind.Egress { summary = `None_needed; threads = 0 };
+    Receipt.Kind.Egress { summary = `Skipped_no_token; threads = 0 };
     Receipt.Kind.Alert
       {
         transition = Receipt.Transition.Fenced;
@@ -486,6 +506,7 @@ let receipt_round_trips () =
       (Receipt.Kind.Disposition
          (Receipt.Disposition.Reaped
             {
+              session = sample_session;
               exit = 1;
               head = Receipt.Head.Unsettled;
               usage = usage_json;
@@ -498,7 +519,9 @@ let receipt_round_trips () =
   | Ok read -> (
       match read.Receipt.kind with
       | Receipt.Kind.Disposition
-          (Receipt.Disposition.Reaped { exit; head; usd; cause; usage = _ }) ->
+          (Receipt.Disposition.Reaped
+             { session; exit; head; usd; cause; usage = _ }) ->
+          equal string ~msg:"session survives" sample_session session;
           equal int ~msg:"exit" 1 exit;
           is_true ~msg:"head" (Receipt.Head.equal Receipt.Head.Unsettled head);
           equal (option float_exact) ~msg:"unpriced usd survives" None usd;
@@ -530,7 +553,20 @@ let receipt_decode_is_strict () =
     (Printf.sprintf {|{"kind":"delivery",%s,"note":"n"}|} base);
   receipt_rejects ~msg:"reason does not belong on spawned"
     ~expect:{|unknown member "reason"|}
-    (Printf.sprintf {|{"kind":"disposition",%s,"disposition":"spawned","reason":"r"}|}
+    (Printf.sprintf
+       {|{"kind":"disposition",%s,"disposition":"spawned","session":"c-1","reason":"r"}|}
+       base);
+  receipt_rejects ~msg:"spawned requires the session"
+    ~expect:{|missing member "session"|}
+    (Printf.sprintf {|{"kind":"disposition",%s,"disposition":"spawned"}|} base);
+  receipt_rejects ~msg:"empty session" ~expect:"session"
+    (Printf.sprintf
+       {|{"kind":"disposition",%s,"disposition":"spawned","session":""}|}
+       base);
+  receipt_rejects ~msg:"reaped requires the session"
+    ~expect:{|missing member "session"|}
+    (Printf.sprintf
+       {|{"kind":"disposition",%s,"disposition":"reaped","exit":0,"head":"settled","usage":{},"cause":"exited"}|}
        base);
   receipt_rejects ~msg:"missing at" ~expect:{|missing member "at"|}
     {|{"kind":"delivery","identity":"i","digest":"ab"}|};
@@ -548,23 +584,23 @@ let receipt_decode_is_strict () =
        base);
   receipt_rejects ~msg:"exit above 255" ~expect:"exit"
     (Printf.sprintf
-       {|{"kind":"disposition",%s,"disposition":"reaped","exit":256,"head":"settled","usage":{},"cause":"exited"}|}
+       {|{"kind":"disposition",%s,"disposition":"reaped","session":"c-1","exit":256,"head":"settled","usage":{},"cause":"exited"}|}
        base);
   receipt_rejects ~msg:"unknown head" ~expect:{|unknown head outcome "gone"|}
     (Printf.sprintf
-       {|{"kind":"disposition",%s,"disposition":"reaped","exit":0,"head":"gone","usage":{},"cause":"exited"}|}
+       {|{"kind":"disposition",%s,"disposition":"reaped","session":"c-1","exit":0,"head":"gone","usage":{},"cause":"exited"}|}
        base);
   receipt_rejects ~msg:"unknown cause" ~expect:{|unknown cause "boredom"|}
     (Printf.sprintf
-       {|{"kind":"disposition",%s,"disposition":"reaped","exit":0,"head":"settled","usage":{},"cause":"boredom"}|}
+       {|{"kind":"disposition",%s,"disposition":"reaped","session":"c-1","exit":0,"head":"settled","usage":{},"cause":"boredom"}|}
        base);
   receipt_rejects ~msg:"usage must be an object" ~expect:"usage"
     (Printf.sprintf
-       {|{"kind":"disposition",%s,"disposition":"reaped","exit":0,"head":"settled","usage":3,"cause":"exited"}|}
+       {|{"kind":"disposition",%s,"disposition":"reaped","session":"c-1","exit":0,"head":"settled","usage":3,"cause":"exited"}|}
        base);
   receipt_rejects ~msg:"negative usd" ~expect:"usd"
     (Printf.sprintf
-       {|{"kind":"disposition",%s,"disposition":"reaped","exit":0,"head":"settled","usage":{},"usd":-0.5,"cause":"exited"}|}
+       {|{"kind":"disposition",%s,"disposition":"reaped","session":"c-1","exit":0,"head":"settled","usage":{},"usd":-0.5,"cause":"exited"}|}
        base);
   receipt_rejects ~msg:"unknown egress summary" ~expect:"summary"
     (Printf.sprintf {|{"kind":"egress",%s,"summary":"upserted","threads":1}|}
@@ -597,16 +633,24 @@ let receipt_diagnostics () =
        (receipt
           (Receipt.Kind.Disposition
              (Receipt.Disposition.Fenced Receipt.Meter.Usd_per_day))));
+  equal string ~msg:"spawned line"
+    (Printf.sprintf "1970-01-02T01:01:01Z spawned %s: session %s"
+       sample_identity sample_session)
+    (Receipt.diagnostic
+       (receipt
+          (Receipt.Kind.Disposition
+             (Receipt.Disposition.Spawned { session = sample_session }))));
   equal string ~msg:"reaped line"
     (Printf.sprintf
-       "1970-01-02T01:01:01Z reaped %s: exit 0, head settled, cause exited, \
-        $1.2500"
-       sample_identity)
+       "1970-01-02T01:01:01Z reaped %s: session %s, exit 0, head settled, \
+        cause exited, $1.2500"
+       sample_identity sample_session)
     (Receipt.diagnostic
        (receipt
           (Receipt.Kind.Disposition
              (Receipt.Disposition.Reaped
                 {
+                  session = sample_session;
                   exit = 0;
                   head = Receipt.Head.Settled;
                   usage = usage_json;
@@ -624,6 +668,48 @@ let receipt_diagnostics () =
     (Receipt.diagnostic
        (receipt ~at:1787616000.0
           (Receipt.Kind.Disposition Receipt.Disposition.Dup)))
+
+let receipt_log_queries () =
+  let other_digest = "feedfacefeedface" in
+  let log =
+    [
+      receipt Receipt.Kind.Delivery;
+      receipt (Receipt.Kind.Disposition Receipt.Disposition.Dup);
+      receipt
+        (Receipt.Kind.Alert
+           { transition = Receipt.Transition.Failed; window = `Identity });
+      receipt
+        (Receipt.Kind.Alert
+           {
+             transition = Receipt.Transition.Fenced;
+             window = `Meter Receipt.Meter.Runs_per_hour;
+           });
+    ]
+  in
+  is_true ~msg:"the delivery is recorded"
+    (Receipt.delivery_recorded ~digest:sample_digest
+       ~identity:sample_identity log);
+  is_false ~msg:"another digest's marker has no delivery line"
+    (Receipt.delivery_recorded ~digest:other_digest ~identity:sample_identity
+       log);
+  is_false ~msg:"another identity has no delivery line"
+    (Receipt.delivery_recorded ~digest:sample_digest
+       ~identity:"cli:0123456789abcdef:k" log);
+  is_false ~msg:"a disposition is not a delivery"
+    (Receipt.delivery_recorded ~digest:sample_digest ~identity:sample_identity
+       [ receipt (Receipt.Kind.Disposition Receipt.Disposition.Dup) ]);
+  is_true ~msg:"the identity-window failed alert is recorded"
+    (Receipt.alerted ~digest:sample_digest ~identity:sample_identity
+       ~transition:Receipt.Transition.Failed log);
+  is_false ~msg:"parked never fired"
+    (Receipt.alerted ~digest:sample_digest ~identity:sample_identity
+       ~transition:Receipt.Transition.Parked log);
+  is_false ~msg:"a meter-window alert is not an identity alert"
+    (Receipt.alerted ~digest:sample_digest ~identity:sample_identity
+       ~transition:Receipt.Transition.Fenced log);
+  is_false ~msg:"a policy edit resets identity alerts"
+    (Receipt.alerted ~digest:other_digest ~identity:sample_identity
+       ~transition:Receipt.Transition.Failed log)
 
 (* Events. *)
 
@@ -821,7 +907,9 @@ let spawned_at ?(digest = sample_digest) at =
     Receipt.at;
     identity = sample_identity;
     digest;
-    kind = Receipt.Kind.Disposition Receipt.Disposition.Spawned;
+    kind =
+      Receipt.Kind.Disposition
+        (Receipt.Disposition.Spawned { session = sample_session });
   }
 
 let reaped_at ?(digest = sample_digest) ?usd at =
@@ -833,6 +921,7 @@ let reaped_at ?(digest = sample_digest) ?usd at =
       Receipt.Kind.Disposition
         (Receipt.Disposition.Reaped
            {
+             session = sample_session;
              exit = 0;
              head = Receipt.Head.Settled;
              usage = usage_json;
@@ -1011,6 +1100,8 @@ let () =
       test "receipt decode rejects every departure from the contract"
         receipt_decode_is_strict;
       test "receipt diagnostics render pinned one-liners" receipt_diagnostics;
+      test "log queries answer the torn-claim and alert-dedup questions"
+        receipt_log_queries;
       test "a pull_request payload decodes narrowly" event_decodes;
       test "event decode names the member a payload lacks or mangles"
         event_decode_is_narrow;

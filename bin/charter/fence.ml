@@ -28,7 +28,7 @@ let spawns_in_window ~digest ~now receipts =
   List.fold_left
     (fun count (receipt : Receipt.t) ->
       match receipt.Receipt.kind with
-      | Receipt.Kind.Disposition Receipt.Disposition.Spawned
+      | Receipt.Kind.Disposition (Receipt.Disposition.Spawned _)
         when relevant ~digest ~now ~window receipt ->
           count + 1
       | _ -> count)

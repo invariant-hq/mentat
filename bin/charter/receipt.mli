@@ -97,7 +97,11 @@ end
 (** Dispositions — what was decided about a delivered event. *)
 module Disposition : sig
   type t =
-    | Spawned  (** A run child was spawned for the event. *)
+    | Spawned of { session : string }
+        (** A run child was spawned for the event, on the derived session
+            [session]. The receipt is the audit record binding the event to
+            its run: the session id is stamped here because it cannot be
+            re-derived from a receipt's identity string alone. *)
     | Skipped of string  (** The gate refused it, for the carried reason. *)
     | Dup  (** An identical event identity already holds a receipt. *)
     | Fenced of Meter.t  (** A budget fence refused the admission. *)
@@ -107,6 +111,7 @@ module Disposition : sig
     | Refused of string
         (** Admission failed before the gate, for the carried reason. *)
     | Reaped of {
+        session : string;  (** The reaped run's session id. *)
         exit : int;  (** The child's exit code, [0] to [255]. *)
         head : Head.t;  (** The journal head's outcome at reap. *)
         usage : Jsont.json;
@@ -125,7 +130,7 @@ module Kind : sig
     | Delivery  (** The event arrived and was durably recorded. *)
     | Disposition of Disposition.t  (** What was decided about it. *)
     | Egress of {
-        summary : [ `Created | `Updated | `None_needed ];
+        summary : [ `Created | `Updated | `None_needed | `Skipped_no_token ];
         threads : int;
       }
         (** What the publisher concluded: whether the summary comment was
@@ -134,7 +139,10 @@ module Kind : sig
             and how many finding threads were posted. [`None_needed] is a
             real egress fact: without it a settled run with no comment
             would look egress-less forever and be re-published on every
-            reconcile pass. *)
+            reconcile pass. [`Skipped_no_token] states honestly that the
+            run completed but no write credential existed to publish with —
+            publication was skipped, not attempted, and the fold treats the
+            run's egress as decided rather than pending. *)
     | Alert of {
         transition : Transition.t;
         window : [ `Meter of Meter.t | `Identity ];
@@ -181,11 +189,33 @@ val decode : string -> (t, Error.t) result
     duplicate member, a missing member, a wrongly-typed member, an unknown
     kind, disposition, meter, transition, head outcome, or cause, an alert
     window that names neither a meter nor ["identity"], a negative or
-    non-finite timestamp, an empty identity, a digest that is not lowercase
-    hexadecimal, an exit code outside [0]–[255], or a negative cost or
-    thread count is an [Error] naming the offending part. The
+    non-finite timestamp, an empty identity or session, a digest that is not
+    lowercase hexadecimal, an exit code outside [0]–[255], or a negative
+    cost or thread count is an [Error] naming the offending part. The
     [usage] member of a reaped disposition must be a JSON object and is
     otherwise preserved without interpretation. *)
+
+(** {1:folds Log queries}
+
+    Pure folds over a receipt list, clockless — the questions admission asks
+    that key on the record itself rather than on a trailing time window
+    (those live in {!Fence}). *)
+
+val delivery_recorded : digest:string -> identity:string -> t list -> bool
+(** [delivery_recorded ~digest ~identity receipts] is [true] iff [receipts]
+    carries a delivery receipt for [identity] stamped [digest]. This is the
+    torn-claim discriminator: a claim marker without a matching delivery
+    line belongs to a claimer that died between creating the marker and
+    recording the delivery, so a later claimer reading a duplicate marker
+    consults this fold to tell a real duplicate from an abandoned claim. *)
+
+val alerted : digest:string -> identity:string -> transition:Transition.t -> t list -> bool
+(** [alerted ~digest ~identity ~transition receipts] is [true] iff
+    [receipts] carries an alert receipt for [transition] with the
+    identity-scoped window — an alert whose [window] is [`Identity] — for
+    [identity] under [digest]. An identity-scoped alert fires once per
+    event, ever: the window is the event itself, not a trailing duration,
+    so the fold reads no clock. *)
 
 val diagnostic : t -> string
 (** [diagnostic t] is [t] rendered as one human-readable line: the UTC
