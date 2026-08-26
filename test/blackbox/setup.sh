@@ -124,25 +124,23 @@ wait_fake_server () {
 # leave it listening, so the build-health notice producer observes the given
 # scenario (failing|clean). Backgrounds it, waits until it has registered and is
 # accepting, and records its pid for stop_fake_dune. It runs until stopped.
-start_fake_dune () {
-  local scenario="${1:-failing}"
+# All starters share this core; extra flags pass through.
+start_fake_dune_with () {
   rm -f fake-dune-ready
-  fake_dune_rpc_server --root "$PWD" --scenario "$scenario" \
-    --ready fake-dune-ready &
+  fake_dune_rpc_server --root "$PWD" "$@" --ready fake-dune-ready &
   MENTAT_FAKE_DUNE_PID=$!
   wait_for_file fake-dune-ready
+}
+
+start_fake_dune () {
+  start_fake_dune_with --scenario "${1:-failing}"
 }
 
 # Like start_fake_dune, but dynamic: the server re-reads STATE_FILE
 # (clean|failing|error2) on a short tick and answers its parked long-polls on a
 # change, so a turn's own tool command can flip the build state mid-turn.
 start_fake_dune_state () {
-  local state_file="$1"
-  rm -f fake-dune-ready
-  fake_dune_rpc_server --root "$PWD" --state-file "$state_file" \
-    --ready fake-dune-ready &
-  MENTAT_FAKE_DUNE_PID=$!
-  wait_for_file fake-dune-ready
+  start_fake_dune_with --state-file "$1"
 }
 
 # Watch-supervisor posture: dune.watch defaults to auto, under which a
@@ -156,12 +154,7 @@ start_fake_dune_state () {
 # pinned socket a real watch binds — so a supervisor probing that path finds
 # an answering foreign server.
 start_fake_dune_at_root () {
-  local state_file="$1"
-  rm -f fake-dune-ready
-  fake_dune_rpc_server --root "$PWD" --state-file "$state_file" \
-    --socket-at-root --ready fake-dune-ready &
-  MENTAT_FAKE_DUNE_PID=$!
-  wait_for_file fake-dune-ready
+  start_fake_dune_with --state-file "$1" --socket-at-root
 }
 
 # Put the fake dune shim on PATH under the name `dune`: invoked as

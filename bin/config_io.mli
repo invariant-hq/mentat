@@ -63,6 +63,12 @@ val read_layer :
     empty configuration if the file is absent. [Error message] on a malformed
     file. *)
 
+val ensure_gitignored : root:Lpath.Abs.t -> string -> (unit, string) result
+(** [ensure_gitignored ~root name] appends [name] to
+    [<root>/.mentat/.gitignore] unless already listed — the one convention for
+    keeping executable-owned entries under [.mentat] out of the project's
+    status. *)
+
 val plan_write :
   dirs:User_dirs.t ->
   root:Lpath.Abs.t ->

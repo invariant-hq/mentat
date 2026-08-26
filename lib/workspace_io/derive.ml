@@ -695,7 +695,7 @@ let session_run_dirs primary =
       match Unix.lstat (Lpath.Abs.to_string meta) with
       | { Unix.st_kind = Unix.S_DIR; st_uid; _ }
         when st_uid = Unix.getuid () -> (
-          match Lpath.Abs.add_component meta "run" with
+          match Lpath.Abs.add_component meta Mentat_workspace.run_dir_name with
           | Error _ -> Ok []
           | Ok run -> Result.map Option.to_list (owned_directory run))
       | _ -> Ok []

@@ -67,6 +67,30 @@ module Mode = struct
   let pp ppf t = Format.pp_print_string ppf (to_string t)
 end
 
+module Dune_watch = struct
+  type t = Auto | Observe | Off
+
+  let all = [ Auto; Observe; Off ]
+
+  let to_string = function
+    | Auto -> "auto"
+    | Observe -> "observe"
+    | Off -> "off"
+
+  let of_string = function
+    | "auto" -> Some Auto
+    | "observe" -> Some Observe
+    | "off" -> Some Off
+    | _ -> None
+
+  let equal a b =
+    match (a, b) with
+    | Auto, Auto | Observe, Observe | Off, Off -> true
+    | (Auto | Observe | Off), _ -> false
+
+  let pp ppf t = Format.pp_print_string ppf (to_string t)
+end
+
 module Read = struct
   type t = Project | All
 
@@ -227,7 +251,6 @@ let string_enum_of_string ~what ~spellings value =
 
 let tools_editor_spellings = [ "auto"; "apply-patch"; "string-replace" ]
 let workspace_tooling_spellings = [ "auto"; "on"; "off" ]
-let dune_watch_spellings = [ "auto"; "observe"; "off" ]
 let web_search_provider_spellings = [ "exa"; "parallel"; "off" ]
 let tui_diff_layout_spellings = [ "auto"; "unified"; "split" ]
 
@@ -246,8 +269,8 @@ let workspace_tooling_of_string =
     ~spellings:workspace_tooling_spellings
 
 let dune_watch_of_string =
-  string_enum_of_string ~what:"dune watch mode"
-    ~spellings:dune_watch_spellings
+  decode_enum ~what:"dune watch mode" ~all:Dune_watch.all
+    ~to_string:Dune_watch.to_string Dune_watch.of_string
 
 let web_search_provider_of_string =
   string_enum_of_string ~what:"web search provider"
@@ -599,6 +622,7 @@ let reasoning_id : Mentat_llm.Request.Options.Reasoning_effort.t Type.Id.t =
 
 let unattended_id : Mentat_permission.Unattended.t Type.Id.t = Type.Id.make ()
 let mode_id : Mode.t Type.Id.t = Type.Id.make ()
+let dune_watch_id : Dune_watch.t Type.Id.t = Type.Id.make ()
 let require_id : Mentat_sandbox.Requirement.t Type.Id.t = Type.Id.make ()
 let read_id : Read.t Type.Id.t = Type.Id.make ()
 let env_inherit_id : Env_inherit.t Type.Id.t = Type.Id.make ()
@@ -690,22 +714,28 @@ let string_list_codec =
     values = None;
   }
 
-let sandbox_roots_codec =
+(* A validated string list: [string_list_codec] with one [validate] run at
+   every boundary — text, stored value, and JSON alike. The validator owns
+   element checking too; one that wants the shared token-shape check
+   composes {!check_string_elements} itself. *)
+let validated_string_list_codec validate =
   {
     string_list_codec with
     parse_text =
       (fun ~label raw ->
         let* values = parse_string_list label raw in
-        validate_sandbox_roots label values);
-    check =
-      (fun ~label values ->
-        let* values = check_string_elements label values in
-        validate_sandbox_roots label values);
+        validate label values);
+    check = (fun ~label values -> validate label values);
     decode_json =
       (fun ~label leaf ->
         let* values = decode_string_list_leaf label leaf in
-        validate_sandbox_roots label values);
+        validate label values);
   }
+
+let sandbox_roots_codec =
+  validated_string_list_codec (fun label values ->
+      let* values = check_string_elements label values in
+      validate_sandbox_roots label values)
 
 (* [dune.targets] entries are passed verbatim after [dune build --watch], and
    the field is workspace-shared — so a leading dash would let a project
@@ -730,50 +760,14 @@ let validate_lint_command key = function
   | [] -> Ok []
   | values -> validate_merlin_program key values
 
-let lint_command_codec =
-  {
-    string_list_codec with
-    parse_text =
-      (fun ~label raw ->
-        let* values = parse_string_list label raw in
-        validate_lint_command label values);
-    check = (fun ~label values -> validate_lint_command label values);
-    decode_json =
-      (fun ~label leaf ->
-        let* values = decode_string_list_leaf label leaf in
-        validate_lint_command label values);
-  }
+let lint_command_codec = validated_string_list_codec validate_lint_command
 
 let dune_targets_codec =
-  {
-    string_list_codec with
-    parse_text =
-      (fun ~label raw ->
-        let* values = parse_string_list label raw in
-        validate_dune_targets label values);
-    check =
-      (fun ~label values ->
-        let* values = check_string_elements label values in
-        validate_dune_targets label values);
-    decode_json =
-      (fun ~label leaf ->
-        let* values = decode_string_list_leaf label leaf in
-        validate_dune_targets label values);
-  }
+  validated_string_list_codec (fun label values ->
+      let* values = check_string_elements label values in
+      validate_dune_targets label values)
 
-let merlin_codec =
-  {
-    string_list_codec with
-    parse_text =
-      (fun ~label raw ->
-        let* values = parse_string_list label raw in
-        validate_merlin_program label values);
-    check = (fun ~label values -> validate_merlin_program label values);
-    decode_json =
-      (fun ~label leaf ->
-        let* values = decode_string_list_leaf label leaf in
-        validate_merlin_program label values);
-  }
+let merlin_codec = validated_string_list_codec validate_merlin_program
 
 (* A closed enum whose domain value has a dedicated type. Typed values need no
    [check]: the type is the invariant. [values] enumerates the enum's
@@ -850,7 +844,9 @@ let workspace_tooling_codec =
     workspace_tooling_of_string
 
 let dune_watch_codec =
-  string_enum_codec ~spellings:dune_watch_spellings dune_watch_of_string
+  vocab_codec ~type_id:dune_watch_id ~equal:Dune_watch.equal
+    ~to_text:Dune_watch.to_string ~all:Dune_watch.all
+    ~of_text:dune_watch_of_string
 
 let tui_diff_layout_codec =
   string_enum_codec ~spellings:tui_diff_layout_spellings
@@ -910,7 +906,7 @@ module Field = struct
     | Notices_fswatch : (bool, defaulted) t
     | Notices_cr_comments : (bool, defaulted) t
     | Notices_dune_diagnostics : (bool, defaulted) t
-    | Dune_watch : (string, defaulted) t
+    | Dune_watch : (Dune_watch.t, defaulted) t
     | Dune_targets : (string list, defaulted) t
     | Dune_lint_command : (string list, defaulted) t
     | Workspace_tooling : (string, defaulted) t
@@ -1433,7 +1429,7 @@ module Field = struct
         defaulted bool_codec ~default:(builtin field true)
     | Dune_watch ->
         defaulted dune_watch_codec ~shared:true
-          ~default:(builtin field "auto")
+          ~default:(builtin field Dune_watch.Auto)
           ~env:("MENTAT_DUNE_WATCH", dune_watch_of_string)
     | Dune_targets ->
         defaulted dune_targets_codec ~shared:true

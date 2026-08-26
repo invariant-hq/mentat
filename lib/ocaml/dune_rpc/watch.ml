@@ -5,6 +5,12 @@
 
 type word = Defer | Announce of Mentat_workspace.Health.t
 
+let word_equal a b =
+  match (a, b) with
+  | Defer, Defer -> true
+  | Announce a, Announce b -> Mentat_workspace.Health.equal a b
+  | (Defer | Announce _), _ -> false
+
 let compose word ~observed =
   match (word, observed) with
   | _, (Mentat_workspace.Health.Live _ as live) -> live

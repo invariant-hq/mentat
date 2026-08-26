@@ -224,6 +224,41 @@ let mentat_dirs_of dirs =
 
 let product_default_mode = Cfg.Mode.Workspace_write
 
+(* The project-tooling rung of the dune-lane ladder: trust first — an
+   untrusted project's config never speaks — then the [workspace.tooling]
+   knob, whose [auto] asks the project marker. The marker is a thunk so a
+   knob that already decides never stats anything. Unknown spellings are
+   unrepresentable past the config codec. *)
+let tooling_gate ~trusted ~project_marker config =
+  if not trusted then Error `Untrusted
+  else
+    match Cfg.Resolved.get Cfg.Field.workspace_tooling config with
+    | "off" -> Error `Tooling_off
+    | "on" -> Ok ()
+    | _ -> if project_marker () then Ok () else Error `No_project
+
+(* The whole dune-lane gate ladder, derived once: the running gate
+   ({!dune_watch_mode}) projects the mode half, doctor's probe renders the
+   prose half — one derivation, so the row and the lane cannot disagree. *)
+let dune_lane_posture ~trusted ~project_marker config =
+  match tooling_gate ~trusted ~project_marker config with
+  | Error _ as off -> off
+  | Ok () -> (
+      match Cfg.Resolved.get Cfg.Field.dune_watch config with
+      | Cfg.Dune_watch.Off -> Error `Watch_off
+      | Cfg.Dune_watch.Observe -> Ok `Observe_chosen
+      | Cfg.Dune_watch.Auto ->
+          let sandbox_mode =
+            Option.value
+              (Cfg.Resolved.find Cfg.Field.sandbox_mode config)
+              ~default:product_default_mode
+          in
+          (* A watch that could not write [_build] would only die at
+             startup: a read-only posture demotes auto to observe. *)
+          if Cfg.Mode.equal sandbox_mode Cfg.Mode.Read_only then
+            Ok `Observe_demoted
+          else Ok `Auto)
+
 type sandbox_posture = {
   posture_mode : Cfg.Mode.t;
   posture_read : Cfg.Read.t;
@@ -897,55 +932,37 @@ let probe ~stdenv ~sw ~cwd : Probe.t =
               Ok "dune project"
             else Error "no dune-project (OCaml tooling inactive)"
       in
-      (* The dune-lane posture: every rung the composition gates on —
-         trust, the workspace.tooling knob, the project marker, dune.watch,
-         and the read-only demotion — read here without an instance, so
-         the row and the running lane cannot disagree. *)
+      (* The dune-lane posture: the same {!dune_lane_posture} derivation
+         the running gate projects, rendered to prose — read here without
+         an instance. The marker is doctor's own local stat: this probe is
+         a local-state diagnostic and has no capability. *)
       let dune_lane =
         match config_resolved with
         | Error message -> Error message
-        | Ok config ->
-            if not trusted then Error "lane off: workspace not trusted"
-            else (
-              let tooling =
-                match
-                  Cfg.Resolved.get Cfg.Field.workspace_tooling config
-                with
-                | "on" -> Ok ()
-                | "off" -> Error "lane off: workspace.tooling = off"
-                | "auto" | _ -> (
-                    match project with
-                    | Ok _ -> Ok ()
-                    | Error reason -> Error reason)
-              in
-              match tooling with
-              | Error _ as off -> off
-              | Ok () -> (
-                  match Cfg.Resolved.get Cfg.Field.dune_watch config with
-                  | "off" -> Error "lane off: dune.watch = off"
-                  | "observe" ->
-                      Ok "observe — attaches to a running watch only"
-                  | "auto" -> (
-                      let read_only =
-                        match
-                          Cfg.Resolved.find Cfg.Field.sandbox_mode config
-                        with
-                        | Some Cfg.Mode.Read_only -> true
-                        | Some _ | None -> false
-                      in
-                      if read_only then
-                        Ok
-                          "observe — auto demoted by sandbox.mode = \
-                           read-only"
-                      else
-                        Ok
-                          (Printf.sprintf
-                             "auto — spawns and supervises `dune build \
-                              --watch %s`"
-                             (String.concat " "
-                                (Cfg.Resolved.get Cfg.Field.dune_targets
-                                   config))))
-                  | other -> Error ("unknown dune.watch value: " ^ other)))
+        | Ok config -> (
+            match
+              dune_lane_posture ~trusted
+                ~project_marker:(fun () -> Result.is_ok project)
+                config
+            with
+            | Error `Untrusted -> Error "lane off: workspace not trusted"
+            | Error `Tooling_off -> Error "lane off: workspace.tooling = off"
+            | Error `No_project ->
+                Error
+                  (match project with
+                  | Error reason -> reason
+                  | Ok _ -> "no dune-project (OCaml tooling inactive)")
+            | Error `Watch_off -> Error "lane off: dune.watch = off"
+            | Ok `Observe_chosen ->
+                Ok "observe — attaches to a running watch only"
+            | Ok `Observe_demoted ->
+                Ok "observe — auto demoted by sandbox.mode = read-only"
+            | Ok `Auto ->
+                Ok
+                  (Printf.sprintf
+                     "auto — spawns and supervises `dune build --watch %s`"
+                     (String.concat " "
+                        (Cfg.Resolved.get Cfg.Field.dune_targets config))))
       in
       (* The lint command's reachability, answered on the ambient toolchain
          ladder — doctor is a local diagnostic, and the sealed child PATH
@@ -1383,16 +1400,14 @@ let project_marker_is_regular capability marker =
       | Error (Mentat_workspace_io.File_error.Io _) ->
           false)
 
+let project_marker capability () =
+  project_marker_is_regular capability "dune-project"
+  || project_marker_is_regular capability "dune-workspace"
+
 let project_tools_enabled t capability =
-  t.trusted
-  &&
-  match Cfg.Resolved.get Cfg.Field.workspace_tooling t.config with
-  | "on" -> true
-  | "off" -> false
-  | "auto" ->
-      project_marker_is_regular capability "dune-project"
-      || project_marker_is_regular capability "dune-workspace"
-  | tooling -> invalid_arg ("unknown workspace.tooling value: " ^ tooling)
+  Result.is_ok
+    (tooling_gate ~trusted:t.trusted ~project_marker:(project_marker capability)
+       t.config)
 
 (* The [dune.watch] posture for one capability: [None] for an untrusted or
    tooling-disabled workspace and for the knob's [off] — off constructs no
@@ -1402,24 +1417,13 @@ let project_tools_enabled t capability =
    [notices.dune_diagnostics] silences the model's build notices without
    turning the watch or its status row off. *)
 let dune_watch_mode t capability =
-  if not (project_tools_enabled t capability) then None
-  else
-    let mode =
-      match Cfg.Resolved.get Cfg.Field.dune_watch t.config with
-      | "off" -> None
-      | "observe" -> Some Dune_watch.Mode.Observe
-      | "auto" -> Some Dune_watch.Mode.Auto
-      | mode -> invalid_arg ("unknown dune.watch value: " ^ mode)
-    in
-    let sandbox_mode =
-      Option.value
-        (Cfg.Resolved.find Cfg.Field.sandbox_mode t.config)
-        ~default:product_default_mode
-    in
-    match (mode, sandbox_mode) with
-    | Some Dune_watch.Mode.Auto, Cfg.Mode.Read_only ->
-        Some Dune_watch.Mode.Observe
-    | mode, _ -> mode
+  match
+    dune_lane_posture ~trusted:t.trusted
+      ~project_marker:(project_marker capability) t.config
+  with
+  | Error (`Untrusted | `Tooling_off | `No_project | `Watch_off) -> None
+  | Ok `Auto -> Some Dune_watch.Mode.Auto
+  | Ok (`Observe_chosen | `Observe_demoted) -> Some Dune_watch.Mode.Observe
 
 (* The shared observer, created on first demand under the instance switch. The
    attach loop holds the watch's diagnostic and progress subscriptions on its
@@ -1485,7 +1489,7 @@ let dune_watch_supervisor t capability ~mode ~instance =
         Dune_watch.make ~rpc:instance ~capability
           ~mono:(Eio.Stdenv.mono_clock t.shared.stdenv)
           ~sw:t.switch ~root:t.root
-          ~run_id:(Printf.sprintf "watch-%d" (Unix.getpid ()))
+          ~pid:(Unix.getpid ())
           ~mode ~program
           ~targets:(Cfg.Resolved.get Cfg.Field.dune_targets t.config)
       in
@@ -1539,6 +1543,25 @@ let dune_lint_runner t capability ~instance =
               in
               t.dune_lint <- Some runner;
               Some runner))
+
+(* Construct-and-engage, shared by the drain's first force and the user's
+   [/dune] verbs: the lane's gate decides whether there is a supervisor to
+   construct at all, construction is pure and memoized, and engage is
+   idempotent. The lint runner deliberately rides only the drain — a user's
+   verb concerns the watch, and the runner engages at the first drain
+   whether or not a verb came first. *)
+let ensure_dune_watch t capability =
+  match dune_watch_mode t capability with
+  | None -> None
+  | Some mode ->
+      Option.map
+        (fun instance ->
+          let supervisor =
+            dune_watch_supervisor t capability ~mode ~instance
+          in
+          Dune_watch.engage supervisor;
+          supervisor)
+        (dune_rpc_instance t capability)
 
 (* The review git loader wiring: the effect closures that adapt the workspace
    capability's sealed boundaries into the [run]/[read]/[write] the pure
@@ -1847,23 +1870,7 @@ let workspace_cone t capability ~base_spec : Client.Driver.Workspace.t =
        the verb is an observation only. *)
     dune_control =
       (fun ~op ->
-        let supervisor =
-          match t.dune_watch with
-          | Some supervisor -> Some supervisor
-          | None -> (
-              match dune_watch_mode t capability with
-              | None -> None
-              | Some mode ->
-                  Option.map
-                    (fun instance ->
-                      let supervisor =
-                        dune_watch_supervisor t capability ~mode ~instance
-                      in
-                      Dune_watch.engage supervisor;
-                      supervisor)
-                    (dune_rpc_instance t capability))
-        in
-        (match (supervisor, op) with
+        (match (ensure_dune_watch t capability, op) with
         | Some supervisor, `Restart -> Dune_watch.restart supervisor
         | Some supervisor, `Stop -> Dune_watch.stop supervisor
         | None, (`Restart | `Stop) -> ());
@@ -2405,7 +2412,7 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
   let build_health_notices =
     match dune_watch_mode t read_capability with
     | None -> None
-    | Some mode ->
+    | Some _ ->
         let notices_enabled =
           Cfg.Resolved.get Cfg.Field.notices_dune_diagnostics t.config
         in
@@ -2414,15 +2421,13 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
            engages the supervisor. The first engine drain does both. *)
         let engaged =
           lazy
-            (match dune_rpc_instance t read_capability with
+            (match ensure_dune_watch t build_capability with
             | None -> ()
-            | Some instance ->
-                let supervisor =
-                  dune_watch_supervisor t build_capability ~mode ~instance
-                in
-                Dune_watch.engage supervisor;
+            | Some _ ->
                 Option.iter Dune_lint.engage
-                  (dune_lint_runner t build_capability ~instance))
+                  (Option.bind (dune_rpc_instance t read_capability)
+                     (fun instance ->
+                       dune_lint_runner t build_capability ~instance)))
         in
         let producer =
           lazy

@@ -182,6 +182,13 @@ val protected_meta_names : string list
 (** [protected_meta_names] is [[".git"; ".mentat"]], the top-level metadata
     names that native edits and confined commands must not rewrite. *)
 
+val run_dir_name : string
+(** [run_dir_name] is ["run"]: the [.mentat] subdirectory holding
+    per-process runtime state (the build watch supervisor's private
+    registry). The sandbox's session-run grant and the supervisor's
+    directory maintenance both take the name here, so the grant and the
+    directory cannot drift apart. *)
+
 val protected_meta_component : Path.t -> string option
 (** [protected_meta_component path] is [Some name] iff the first component of
     [Path.rel path] is a {!protected_meta_names} entry. It is [Some ".git"] for

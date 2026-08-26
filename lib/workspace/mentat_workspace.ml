@@ -117,6 +117,7 @@ let pp ppf t =
     Root.pp t.primary pp_roots t.read_only Path.pp t.cwd
 
 let protected_meta_names = [ ".git"; ".mentat" ]
+let run_dir_name = "run"
 
 let protected_meta_component path =
   match Lpath.Rel.components (Path.rel path) with
