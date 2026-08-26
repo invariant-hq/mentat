@@ -14,14 +14,14 @@ open Windtrap
 let exec = "/usr/local/bin/mentatd"
 let log = "/home/owner/.local/share/mentat/daemon/daemon.log"
 
-let rendered platform ~exec ~log =
-  match Service.Unit_file.render platform ~exec ~log with
+let rendered ?(args = []) platform ~exec ~log =
+  match Service.Unit_file.render platform ~exec ~args ~log with
   | Ok rendered -> rendered
   | Error message -> failf "render refused: %s" message
 
-let refused platform ~exec ~log =
-  match Service.Unit_file.render platform ~exec ~log with
-  | Ok _ -> fail "render accepted a path it must refuse"
+let refused ?(args = []) platform ~exec ~log =
+  match Service.Unit_file.render platform ~exec ~args ~log with
+  | Ok _ -> fail "render accepted a value it must refuse"
   | Error message -> message
 
 (* The two renders are pinned byte-for-byte: the unit file is an outward
@@ -125,6 +125,40 @@ let renders =
             (refused Service.Platform.Linux ~exec ~log);
           contains ~sub:{|<string>/tmp/we"ird/mentatd</string>|}
             (rendered Service.Platform.Macos ~exec ~log));
+      test "install flags ride the exec line on both platforms" (fun () ->
+          let args =
+            [
+              "--ingress-port=8080";
+              "--github-base-url=https://ghe.example.test/api/v3";
+            ]
+          in
+          let plist = rendered ~args Service.Platform.Macos ~exec ~log in
+          contains
+            ~sub:
+              "    <string>/usr/local/bin/mentatd</string>\n\
+              \    <string>--ingress-port=8080</string>\n\
+              \    <string>--github-base-url=https://ghe.example.test/api/v3</string>"
+            plist;
+          let unit = rendered ~args Service.Platform.Linux ~exec ~log in
+          contains
+            ~sub:
+              "ExecStart=\"/usr/local/bin/mentatd\" \"--ingress-port=8080\" \
+               \"--github-base-url=https://ghe.example.test/api/v3\"\n"
+            unit);
+      test "arguments walk the same refusals as paths" (fun () ->
+          let args = [ "--github-base-url=https://x/\ny" ] in
+          contains ~sub:"control character"
+            (refused ~args Service.Platform.Macos ~exec ~log);
+          contains ~sub:"control character"
+            (refused ~args Service.Platform.Linux ~exec ~log);
+          let quoted = [ {|--github-base-url=https://x/"y|} ] in
+          contains ~sub:"quote or backslash"
+            (refused ~args:quoted Service.Platform.Linux ~exec ~log);
+          contains ~sub:{|<string>--github-base-url=https://x/"y</string>|}
+            (rendered ~args:quoted Service.Platform.Macos ~exec ~log);
+          let percent = [ "--github-base-url=https://x/a%20b" ] in
+          contains ~sub:"\"--github-base-url=https://x/a%%20b\""
+            (rendered ~args:percent Service.Platform.Linux ~exec ~log));
     ]
 
 let paths =

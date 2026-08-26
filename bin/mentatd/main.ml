@@ -190,6 +190,27 @@ let print_flag =
            file is written, no directory created, no service manager spoken \
            to.")
 
+let install_ingress_port_opt =
+  Arg.(
+    value
+    & opt (some int) None
+    & info [ "ingress-port" ] ~docv:"PORT"
+        ~doc:
+          "Bake $(b,--ingress-port)=$(docv) into the unit's exec line, so \
+           the resident daemon binds the webhook ingress at every start. \
+           The bound address is recorded in $(b,daemon.json) and the daemon \
+           log.")
+
+let install_github_base_url_opt =
+  Arg.(
+    value
+    & opt (some string) None
+    & info [ "github-base-url" ] ~docv:"URL"
+        ~doc:
+          "Bake $(b,--github-base-url)=$(docv) into the unit's exec line — \
+           the GitHub API base for the resident charter node's reads and \
+           its publication children, for GitHub Enterprise hosts.")
+
 let install_cmd =
   let doc = "Install mentatd as this user's resident service." in
   let man =
@@ -230,12 +251,21 @@ let install_cmd =
          $(b,mentatd stop) the spawned daemon to let the service take over. \
          A service manager call that fails is a loud error naming the \
          command to run manually; the written unit stays in place.";
+      `P
+        "$(b,--ingress-port) and $(b,--github-base-url) are the daemon's \
+         own serve flags, baked into the unit's exec line so the resident \
+         daemon starts with them at every boot. Re-running \
+         $(b,mentatd install) with different flags replaces the unit and \
+         restarts the service on the new exec line.";
     ]
   in
   Cmd.v
     (Cmd.info "install" ~doc ~man ~exits:Exit_status.exits)
     (Exit_status.term
-       Term.(const (fun print -> Service.install ~print) $ print_flag))
+       Term.(
+         const (fun print ingress_port github_base_url ->
+             Service.install ~print ~ingress_port ~github_base_url)
+         $ print_flag $ install_ingress_port_opt $ install_github_base_url_opt))
 
 let uninstall_cmd =
   let doc = "Remove the resident service installed by $(b,mentatd install)." in

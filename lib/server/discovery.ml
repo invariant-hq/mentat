@@ -11,6 +11,7 @@ type t = {
   config_home : string;
   started_at : int;
   web_url : string option;
+  ingress : string option;
 }
 
 (* The file-format version, distinct from the [protocol] member (the wire
@@ -19,12 +20,12 @@ let file_version = 1
 
 let jsont =
   Jsont.Object.map ~kind:"daemon discovery"
-    (fun v socket pid protocol binary config_home started_at web_url ->
+    (fun v socket pid protocol binary config_home started_at web_url ingress ->
       if not (Int.equal v file_version) then
         Jsont.Error.msg Jsont.Meta.none
           (Printf.sprintf "unsupported discovery file version %d (expected %d)"
              v file_version);
-      { socket; pid; protocol; binary; config_home; started_at; web_url })
+      { socket; pid; protocol; binary; config_home; started_at; web_url; ingress })
   |> Jsont.Object.mem "v" Jsont.int ~enc:(fun _ -> file_version)
   |> Jsont.Object.mem "socket" Jsont.string ~enc:(fun t -> t.socket)
   |> Jsont.Object.mem "pid" Jsont.int ~enc:(fun t -> t.pid)
@@ -37,6 +38,9 @@ let jsont =
      that does not know the field is the same binary that wrote it (the identity
      gate), so no [v] bump is owed. *)
   |> Jsont.Object.opt_mem "web_url" Jsont.string ~enc:(fun t -> t.web_url)
+  (* Optional and additive for the same reason: the webhook ingress
+     listener's bound loopback address, when the daemon runs one. *)
+  |> Jsont.Object.opt_mem "ingress" Jsont.string ~enc:(fun t -> t.ingress)
   |> Jsont.Object.error_unknown |> Jsont.Object.finish
 
 let daemon_json = "daemon.json"

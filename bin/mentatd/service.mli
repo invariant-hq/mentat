@@ -66,15 +66,20 @@ module Unit_file : sig
       override is ignored, as the XDG rules demand). *)
 
   val render :
-    Platform.t -> exec:string -> log:string -> (string, string) result
-  (** [render platform ~exec ~log] is the unit's exact bytes: run [exec] with
-      no arguments (the daemon's foreground serve), start at login, restart on
-      failure, append both output streams to [log], and pin the
-      child-survival setting. [Error message] when a path cannot be carried
-      by the unit syntax: any control character, and — under systemd, whose
-      quoting the render refuses to guess at — a double quote or backslash.
-      XML metacharacters in a launchd path and [%] under systemd are
-      escaped. *)
+    Platform.t ->
+    exec:string ->
+    args:string list ->
+    log:string ->
+    (string, string) result
+  (** [render platform ~exec ~args ~log] is the unit's exact bytes: run
+      [exec] with exactly [args] (the daemon's foreground serve, plus any
+      baked-in serve flags in [--flag=value] form), start at login, restart
+      on failure, append both output streams to [log], and pin the
+      child-survival setting. [Error message] when a path or argument
+      cannot be carried by the unit syntax: any control character, and —
+      under systemd, whose quoting the render refuses to guess at — a
+      double quote or backslash. XML metacharacters in a launchd value and
+      [%] under systemd are escaped. *)
 
   val ours : string -> bool
   (** [ours bytes] is whether [bytes] carries the ownership marker every
@@ -93,17 +98,25 @@ module Unit_file : sig
       unit path against the bytes an install would write. *)
 end
 
-val install : print:bool -> Exit_status.t
-(** [install ~print] resolves the unit for this host and, when [print] is
-    false, writes it (0644, atomically) and hands it to the service manager:
-    [launchctl bootout]/[bootstrap] into the user's [gui] domain on macOS,
-    [systemctl --user daemon-reload]/[enable]/[restart] on Linux. An
-    unchanged, already-loaded unit is a success-shaped no-op; a changed one
-    restarts the service on the new bytes. A manager call that fails is a
-    loud error naming the exact command to run manually — the written unit is
-    left in place, never silently half-installed. A foreign file at the unit
-    path, an unsupported platform, and an unresolvable home are all loud
-    refusals.
+val install :
+  print:bool ->
+  ingress_port:int option ->
+  github_base_url:string option ->
+  Exit_status.t
+(** [install ~print ~ingress_port ~github_base_url] resolves the unit for
+    this host and, when [print] is false, writes it (0644, atomically) and
+    hands it to the service manager: [launchctl bootout]/[bootstrap] into
+    the user's [gui] domain on macOS, [systemctl --user
+    daemon-reload]/[enable]/[restart] on Linux. [ingress_port] and
+    [github_base_url] are baked into the unit's exec line as the daemon's
+    own serve flags, so the resident daemon starts with them at every boot;
+    re-running install with different flags renders different bytes and
+    replaces the unit. An unchanged, already-loaded unit is a
+    success-shaped no-op; a changed one restarts the service on the new
+    bytes. A manager call that fails is a loud error naming the exact
+    command to run manually — the written unit is left in place, never
+    silently half-installed. A foreign file at the unit path, an
+    unsupported platform, and an unresolvable home are all loud refusals.
 
     With [print] the rendered unit goes to standard output and nothing on the
     system is touched — no directory is created, no file written, no manager

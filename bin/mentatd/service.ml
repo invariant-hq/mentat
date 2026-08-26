@@ -86,10 +86,26 @@ module Unit_file = struct
       Ok (Buffer.contents b)
     end
 
-  let launchd ~exec ~log =
+  (* Every argv token walks the same refusals the paths do: the tokens are
+     [--flag=value] lines the install verb itself forms, but the value half
+     is owner input. *)
+  let launchd ~exec ~args ~log =
     let* () = carriable ~what:"the executable path" exec in
+    let* () =
+      List.fold_left
+        (fun acc token ->
+          let* () = acc in
+          carriable ~what:"the argument" token)
+        (Ok ()) args
+    in
     let* () = carriable ~what:"the log path" log in
-    let exec = xml_escape exec and log = xml_escape log in
+    let log = xml_escape log in
+    let arguments =
+      String.concat "\n"
+        (List.map
+           (fun token -> Printf.sprintf "    <string>%s</string>" (xml_escape token))
+           (exec :: args))
+    in
     Ok
       (Printf.sprintf
          {|<?xml version="1.0" encoding="UTF-8"?>
@@ -106,7 +122,7 @@ module Unit_file = struct
   <string>%s</string>
   <key>ProgramArguments</key>
   <array>
-    <string>%s</string>
+%s
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -124,11 +140,24 @@ module Unit_file = struct
 </dict>
 </plist>
 |}
-         label exec log log)
+         label arguments log log)
 
-  let systemd ~exec ~log =
+  let systemd ~exec ~args ~log =
     let* exec = systemd_path ~what:"the executable path" exec in
+    let* args =
+      List.fold_left
+        (fun acc token ->
+          let* args = acc in
+          let* token = systemd_path ~what:"the argument" token in
+          Ok (token :: args))
+        (Ok []) args
+      |> Result.map List.rev
+    in
     let* log = systemd_path ~what:"the log path" log in
+    let exec_start =
+      String.concat " "
+        (List.map (Printf.sprintf {|"%s"|}) (exec :: args))
+    in
     Ok
       (Printf.sprintf
          {|# Written by `mentatd install`; `mentatd uninstall` removes it, and the
@@ -142,7 +171,7 @@ module Unit_file = struct
 Description=mentat daemon
 
 [Service]
-ExecStart="%s"
+ExecStart=%s
 KillMode=process
 Restart=on-failure
 StandardOutput=append:%s
@@ -151,12 +180,12 @@ StandardError=append:%s
 [Install]
 WantedBy=default.target
 |}
-         exec log log)
+         exec_start log log)
 
-  let render platform ~exec ~log =
+  let render platform ~exec ~args ~log =
     match (platform : Platform.t) with
-    | Platform.Macos -> launchd ~exec ~log
-    | Platform.Linux -> systemd ~exec ~log
+    | Platform.Macos -> launchd ~exec ~args ~log
+    | Platform.Linux -> systemd ~exec ~args ~log
 
   type standing = Fresh | Unchanged | Replaceable | Foreign
 
@@ -192,7 +221,7 @@ let executable () =
    error to the same file the client's find-or-spawn path does. *)
 let log_path dirs = Filename.concat (User_dirs.daemon_dir dirs) "daemon.log"
 
-let prepared platform =
+let prepared platform ~args =
   let* dirs = User_dirs.resolve ~getenv:Sys.getenv_opt in
   let* home = home () in
   let path =
@@ -200,7 +229,9 @@ let prepared platform =
       ~xdg_config_home:(Sys.getenv_opt "XDG_CONFIG_HOME")
   in
   let log = log_path dirs in
-  let* rendered = Unit_file.render platform ~exec:(executable ()) ~log in
+  let* rendered =
+    Unit_file.render platform ~exec:(executable ()) ~args ~log
+  in
   Ok (dirs, path, log, rendered)
 
 (* ---- Service-manager processes ---- *)
@@ -320,8 +351,8 @@ let activate_linux ~standing ~path ~log =
       Ok [ written ~standing ~path; restarted_line ~log ]
   | Unit_file.Foreign -> assert false
 
-let install_unit platform =
-  let* dirs, path, log, rendered = prepared platform in
+let install_unit platform ~args =
+  let* dirs, path, log, rendered = prepared platform ~args in
   let* existing = Fs.read_capped ~max_bytes:Fs.default_max_bytes path in
   let standing = Unit_file.standing ~existing ~rendered in
   match standing with
@@ -348,17 +379,31 @@ let unsupported =
   "no supported service manager: `mentatd install` needs launchd (macOS) or \
    a systemd user manager (Linux)"
 
-let install ~print =
+(* The exec-line pass-through: the daemon's own serve flags, baked into the
+   unit in [--flag=value] form so the resident daemon starts with them at
+   every boot. Re-running install with different flags renders different
+   bytes, which the standing classifies as replaceable. *)
+let exec_args ~ingress_port ~github_base_url =
+  (match ingress_port with
+  | Some port -> [ Printf.sprintf "--ingress-port=%d" port ]
+  | None -> [])
+  @
+  match github_base_url with
+  | Some url -> [ "--github-base-url=" ^ url ]
+  | None -> []
+
+let install ~print ~ingress_port ~github_base_url =
+  let args = exec_args ~ingress_port ~github_base_url in
   match Platform.detect () with
   | None -> Exit_status.runtime unsupported
   | Some platform when print -> (
-      match prepared platform with
+      match prepared platform ~args with
       | Error message -> Exit_status.runtime message
       | Ok (_, _, _, rendered) ->
           print_string rendered;
           Exit_status.Success)
   | Some platform -> (
-      match install_unit platform with
+      match install_unit platform ~args with
       | Error message -> Exit_status.runtime message
       | Ok lines ->
           List.iter print_endline lines;

@@ -38,6 +38,17 @@ daemon, which adopts them at its next boot.
   </dict>
   </plist>
 
+The daemon's serve flags bake into the exec line: --ingress-port and
+--github-base-url render as further ProgramArguments entries, so the
+resident daemon starts with them at every boot.
+
+  $ mentatd install --print --ingress-port 8080 --github-base-url https://ghe.example.test/api/v3 | sed -n '/<array>/,/<\/array>/p' | sed -E 's#<string>/[^<]*mentatd</string>#<string>MENTATD</string>#'
+    <array>
+      <string>MENTATD</string>
+      <string>--ingress-port=8080</string>
+      <string>--github-base-url=https://ghe.example.test/api/v3</string>
+    </array>
+
 --print touched nothing: no LaunchAgents directory, no daemon directory.
 
   $ test -e "$HOME/Library" || echo untouched

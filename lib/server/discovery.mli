@@ -34,6 +34,12 @@ type t = {
           the daemon runs [--web]; [None] otherwise. Optional and additive (no
           file-format [v] bump): recorded so a browser-open path can find the
           URL without parsing daemon stdout. *)
+  ingress : string option;
+      (** The loopback address ([127.0.0.1:port]) the webhook ingress listener
+          bound when the daemon was given an ingress port; [None] when no
+          ingress listener runs. Optional and additive like [web_url]:
+          recorded so status tooling and a dashboard can find the bound
+          port — which may be ephemeral — without parsing daemon stdout. *)
 }
 (** The discovery record. The concrete type is exposed
     (private-modules-have-mlis law); a reader threads it whole. *)

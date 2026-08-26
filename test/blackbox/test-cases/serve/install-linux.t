@@ -26,6 +26,13 @@ daemon, which adopts them at its next boot.
   [Install]
   WantedBy=default.target
 
+The daemon's serve flags bake into the exec line: --ingress-port and
+--github-base-url ride ExecStart as further quoted arguments, so the
+resident daemon starts with them at every boot.
+
+  $ mentatd install --print --ingress-port 8080 --github-base-url https://ghe.example.test/api/v3 | grep '^ExecStart=' | sed -E 's#^ExecStart="[^"]*"#ExecStart="MENTATD"#'
+  ExecStart="MENTATD" "--ingress-port=8080" "--github-base-url=https://ghe.example.test/api/v3"
+
 --print touched nothing: no unit directory, no daemon directory.
 
   $ test -e "$XDG_CONFIG_HOME/systemd" || echo untouched

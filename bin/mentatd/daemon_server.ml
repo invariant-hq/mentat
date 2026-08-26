@@ -758,8 +758,9 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                       let bound =
                         Option.value (Server.port ingress_listener) ~default:port
                       in
-                      Printf.printf "mentatd ingress: 127.0.0.1:%d\n%!" bound;
-                      Some ingress_listener
+                      let address = Printf.sprintf "127.0.0.1:%d" bound in
+                      Printf.printf "mentatd ingress: %s\n%!" address;
+                      Some (ingress_listener, address)
                   | _ -> None
                 in
                 (* The per-daemon bootstrap token: the wire has none for a unix bind
@@ -795,6 +796,7 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                     config_home = User_dirs.config_home dirs;
                     started_at = int_of_float (Unix.gettimeofday () *. 1000.);
                     web_url;
+                    ingress = Option.map snd ingress_listener;
                   }
                 in
                 (match Discovery.write ~dir:ddir record with
@@ -886,7 +888,7 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                     in
                     let branches =
                       match (ingress, ingress_listener) with
-                      | Some ingress, Some ingress_listener ->
+                      | Some ingress, Some (ingress_listener, _) ->
                           (fun () ->
                             Server.serve ~sw ~clock ~ingress
                               ~driver_for:(fun ~workspace:_ ~environment:_ ->

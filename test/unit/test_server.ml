@@ -2168,7 +2168,7 @@ let coverage_group =
 
 (* ---- W2: daemon discovery ---- *)
 
-let a_discovery ?web_url ~socket ~pid () =
+let a_discovery ?web_url ?ingress ~socket ~pid () =
   {
     Server.Discovery.socket;
     pid;
@@ -2177,6 +2177,7 @@ let a_discovery ?web_url ~socket ~pid () =
     config_home = "/home/u/.config/mentat";
     started_at = 1_753_000_000_000;
     web_url;
+    ingress;
   }
 
 (* A guaranteed-fresh 0700 directory. The discovery file has no sun_path limit
@@ -2201,7 +2202,9 @@ let discovery_group =
               equal int ~msg:"protocol" d.Server.Discovery.protocol
                 d'.Server.Discovery.protocol;
               is_true ~msg:"an absent web_url decodes to None"
-                (Option.is_none d'.Server.Discovery.web_url)
+                (Option.is_none d'.Server.Discovery.web_url);
+              is_true ~msg:"an absent ingress decodes to None"
+                (Option.is_none d'.Server.Discovery.ingress)
           | Error message -> failf "decode: %s" message);
       test "the optional web_url round-trips when present (additive field)"
         (fun () ->
@@ -2216,6 +2219,19 @@ let discovery_group =
               | Some u ->
                   equal string ~msg:"web_url survives the round-trip" url u
               | None -> fail "web_url was dropped on the round-trip")
+          | Error message -> failf "decode: %s" message);
+      test "the optional ingress address round-trips when present" (fun () ->
+          let address = "127.0.0.1:53412" in
+          let d = a_discovery ~ingress:address ~socket:"/s" ~pid:7 () in
+          match
+            Jsont_bytesrw.decode_string Server.Discovery.jsont
+              (enc Server.Discovery.jsont d)
+          with
+          | Ok d' -> (
+              match d'.Server.Discovery.ingress with
+              | Some a ->
+                  equal string ~msg:"ingress survives the round-trip" address a
+              | None -> fail "ingress was dropped on the round-trip")
           | Error message -> failf "decode: %s" message);
       test "an unknown file-format version is rejected on decode" (fun () ->
           match
