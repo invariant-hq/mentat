@@ -278,7 +278,10 @@ resident — so "the agent only" refers to what the process *is*, not to
 which binary carries the admin verbs for its neighbor.)
 
 `fire` is load-bearing twice over: `--event` exercises receipt, dedup,
-gate, fence, spawn, publish — the identical path — with no network, and
+gate, fence, spawn, publish — the identical path — with no listener and
+no tunnel (the gate's current-head check and the publish are GitHub
+calls like any other; "no network" in an earlier draft overstated it —
+what `--event` removes is residency, not the API), and
 `--sweep` performs one open-PR listing with the read token and
 synthesizes deliveries for heads without receipts (the same fold rung 1b
 later runs at boot). A crontab line `*/5 * * * * mentat charter fire
@@ -343,11 +346,21 @@ does not exist:
    replays and supersession races at one stroke.
 3. It derives the run session id — `"c-" ^ H(digest, event-identity)`
    under domain `mentat.charter.run.v1` — and prepares the ephemeral
-   checkout at `~/.local/state/mentat/charters/<name>/runs/<session-id>/`
+   checkout at `~/.cache/mentat/charters/<name>/runs/<session-id>/`
    (that directory is the run's workspace root, so store, journal, and
-   run log are discoverable from the receipt alone): in the slice, a
-   per-run shallow fetch of `refs/pull/N/head` verified to contain the
-   payload's `head_sha`, disposed with the worktree — no long-lived
+   run log are discoverable from the receipt alone). The run root lives
+   under the cache home, not the state home, and the placement is
+   load-bearing: the sandbox denies the config, data, and state homes to
+   every confined run — that denial is N9's enforcement — so a
+   workspace root inside the state home would refuse to boot, and
+   weakening the denial to admit it would gut N9. Receipts and markers
+   stay in the state home; nothing that authenticates may live under
+   the cache home. The fetch brings `refs/pull/N/head` plus the full
+   base-branch history — the merge-base diff the reviewer anchors to
+   cannot resolve from a shallow pair (an earlier draft said "shallow";
+   the Actions workflow fetches full base history for the same reason)
+   — verified to contain the payload's `head_sha` (non-containment is a
+   superseded receipt), disposed with the worktree — no long-lived
    mirror to create, authenticate, prune, or gc (the charter-side mirror
    is the named optimization, priced when clone latency measurably
    bites). The head is checked out **as data — never built, never
