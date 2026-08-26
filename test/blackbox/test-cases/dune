@@ -28,6 +28,7 @@
  (shell bash)
  (deps
   %{bin:mentat}
+  %{bin:mentatd}
   %{bin:mentat_cram}
   %{bin:fake_provider_server}
   %{bin:fake_dune_rpc_server})

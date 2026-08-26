@@ -57,7 +57,40 @@ let rotate_daemon_log dirs log =
         ~current:log
   | _ | (exception Unix.Unix_error _) -> ()
 
-let spawn dirs =
+(* The daemon lives in its own binary, [mentatd], shipped beside [mentat] in
+   every release artifact — so the spawn resolves the sibling of the running
+   executable. [Unix.create_process] cannot report a missing program (the exec
+   fails in the child), so an absent sibling must be refused here, loudly,
+   rather than surface as a spawn that never converges. [MENTATD_BIN] overrides
+   the sibling resolution for layouts where the two binaries do not share a
+   directory (a build tree, a test harness). *)
+let resolve_mentatd () =
+  (* [Sys.file_exists] alone would accept a directory — which a build tree has
+     at exactly this path ([bin/mentatd/] holding the executable) — and an
+     exec of a directory fails only in the forked child, invisibly. *)
+  let is_program path =
+    Sys.file_exists path && not (Sys.is_directory path)
+  in
+  match Sys.getenv_opt "MENTATD_BIN" with
+  | Some bin when not (String.equal bin "") ->
+      if is_program bin then Ok bin
+      else
+        Error
+          (Printf.sprintf "MENTATD_BIN names %s, which is not a program" bin)
+  | _ ->
+      let sibling =
+        Filename.concat (Filename.dirname Sys.executable_name) "mentatd"
+      in
+      if is_program sibling then Ok sibling
+      else
+        Error
+          (Printf.sprintf
+             "the mentatd binary is missing: expected %s (every release \
+              installs it beside mentat); reinstall, or set MENTATD_BIN to \
+              run one from elsewhere"
+             sibling)
+
+let spawn dirs ~bin =
   ensure_daemon_dir dirs;
   let log = daemon_log_path dirs in
   rotate_daemon_log dirs log;
@@ -77,8 +110,8 @@ let spawn dirs =
          process-table entry after a daemon crash — not worth the double-fork
          re-parent-to-init machinery for a single-user Stage 2. *)
       ignore
-        (Unix.create_process Sys.executable_name
-           [| "mentat"; "serve"; "--spawned" |]
+        (Unix.create_process bin
+           [| "mentatd"; "--spawned" |]
            Unix.stdin fd fd))
 
 (* Whether a per-user daemon is live for these dirs (a discovery file present
@@ -129,8 +162,20 @@ let find_or_spawn t =
     String.equal record.Discovery.binary binary_version
     && String.equal record.Discovery.config_home (User_dirs.config_home dirs)
   in
-  let spawn () = spawn dirs in
-  let sleep () = Eio.Time.sleep clock 0.05 in
+  (* A spawn that cannot resolve the daemon binary records its refusal instead
+     of launching anything; [sleep] then stops pacing so the poll budget burns
+     through at once and the [`Timeout] below surfaces the refusal — a loud,
+     immediate error, never a full poll cycle waiting for a daemon that was
+     never started. *)
+  let spawn_refusal = ref None in
+  let spawn () =
+    match resolve_mentatd () with
+    | Ok bin -> spawn dirs ~bin
+    | Error message -> spawn_refusal := Some message
+  in
+  let sleep () =
+    if Option.is_none !spawn_refusal then Eio.Time.sleep clock 0.05
+  in
   (* MENTAT_DAEMON_SOCKET beats discovery: connect straight to the named socket
      (its [mentat.sock] path), no daemon.json read and no spawn. A named socket
      that does not answer is a definite failure, not a fallback that spawns. *)
@@ -151,24 +196,27 @@ let find_or_spawn t =
       Error
         (Exit_status.runtime
            "the running mentat daemon was built from a different binary or \
-            config home; run `mentat serve --stop` to replace it")
+            config home; run `mentatd --stop` to replace it")
   | `Foreign_held ->
       Error
         (Exit_status.runtime
            "an unrecognized mentat daemon file is present and its claim is \
-            held; run `mentat serve --stop`")
+            held; run `mentatd --stop`")
   | `Timeout ->
       Error
         (Exit_status.runtime
-           (match Sys.getenv_opt "MENTAT_DAEMON_SOCKET" with
-           | Some socket when not (String.equal socket "") ->
-               Printf.sprintf
-                 "the mentat daemon named by MENTAT_DAEMON_SOCKET (%s) did not \
-                  answer"
-                 socket
-           | _ ->
-               Printf.sprintf "the mentat daemon did not come up; see %s"
-                 (daemon_log_path dirs)))
+           (match !spawn_refusal with
+           | Some message -> message
+           | None -> (
+               match Sys.getenv_opt "MENTAT_DAEMON_SOCKET" with
+               | Some socket when not (String.equal socket "") ->
+                   Printf.sprintf
+                     "the mentat daemon named by MENTAT_DAEMON_SOCKET (%s) \
+                      did not answer"
+                     socket
+               | _ ->
+                   Printf.sprintf "the mentat daemon did not come up; see %s"
+                     (daemon_log_path dirs))))
 
 (* ---- Stop ---- *)
 

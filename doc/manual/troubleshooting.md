@@ -33,7 +33,7 @@ because the interactive terminal owns the screen.
 | --- | --- | --- |
 | Interactive terminal | `info` | `<state_home>/logs/<run>.log`, newest 20 kept |
 | Headless (`run`, `session`, `config`, …) | off | standard error, only when `MENTAT_LOG` is set |
-| Daemon (`mentat serve`) | off | `<data_home>/daemon/daemon.log`, which captures the daemon's standard output and error |
+| Daemon (`mentatd`) | off | `<data_home>/daemon/daemon.log`, which captures the daemon's standard output and error |
 
 A spawned daemon inherits the environment of the command that started it, so
 setting `MENTAT_LOG` before a `--attach` run also raises the daemon's level.
@@ -169,5 +169,5 @@ daemon's standard output rather than only its diagnostics records, and it is not
 rotated, so it accumulates for the life of the data home. A daemon Mentat spawns
 for you withholds the browser frontend's bootstrap token from it — a URL printed
 to a log file no one reads would persist a live credential for nothing — but a
-daemon you started yourself with `mentat serve --web` prints that URL to its own
+daemon you started yourself with `mentatd --web` prints that URL to its own
 standard output, wherever you redirected it.

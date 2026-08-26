@@ -66,7 +66,6 @@ let root =
       Cli_tui.resume_cmd ~version;
       Cli_tui.review_cmd ~version;
       Cli_sandbox.cmd;
-      Cli_serve.cmd;
       Cli_doctor.cmd;
       Cli_skills.cmd;
       Cli_commands.cmd;

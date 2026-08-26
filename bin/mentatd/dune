@@ -1,0 +1,19 @@
+(executable
+ (name main)
+ (public_name mentatd)
+ (package mentat)
+ (flags (:standard -open Mentat_boot))
+ (modules daemon_server main)
+ (libraries
+  cmdliner
+  eio
+  eio_main
+  unix
+  lpath
+  mentat_boot
+  mentat_client
+  mentat_protocol
+  mentat_server
+  mentat_session
+  mentat_store
+  mentat_web))

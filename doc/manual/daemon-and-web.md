@@ -7,10 +7,11 @@ a hosted service.
 
 ## Daemon lifecycle
 
-Run the daemon in the foreground:
+The daemon is its own binary, `mentatd`, installed next to `mentat` by every
+release. Run it in the foreground:
 
 ```sh
-mentat serve
+mentatd
 ```
 
 In another terminal, add `--attach` to a command that advertises the flag:
@@ -21,15 +22,17 @@ mentat run --attach "Inspect the failing build"
 mentat session list --attach
 ```
 
-If no daemon is running, `--attach` starts `mentat serve` detached, inheriting
-the attaching process's current directory and environment, then connects to it.
+If no daemon is running, `--attach` starts `mentatd` detached, inheriting the
+attaching process's current directory and environment, then connects to it. The
+daemon binary is resolved next to the running `mentat`; set `MENTATD_BIN` to
+name one elsewhere.
 Without `--attach`, commands keep using their in-process client even while a
 daemon exists.
 
 Stop the daemon gracefully with:
 
 ```sh
-mentat serve --stop
+mentatd --stop
 ```
 
 Stopping when none is running is a successful no-op. A first SIGINT or SIGTERM
@@ -51,7 +54,7 @@ owner-only `0700` and the socket as `0600`. Use an absolute private directory
 when the default is unsuitable:
 
 ```sh
-mentat serve --socket /short/private/path
+mentatd --socket /short/private/path
 ```
 
 The override directory must be owned by the current user and mode `0700` and
@@ -98,7 +101,7 @@ Start an explicit foreground daemon from the project the browser should use:
 
 ```sh
 cd /path/to/project
-mentat serve --web
+mentatd --web
 ```
 
 `--web` binds IPv4 loopback only and prints a URL such as

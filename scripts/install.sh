@@ -300,8 +300,10 @@ main() {
   base="$GITHUB/$REPO/releases/download/$version"
 
   installed="$install_dir/mentat"
-  if [ -x "$installed" ] \
-    && [ "$("$installed" --version 2> /dev/null || true)" = "$version" ]; then
+  installed_d="$install_dir/mentatd"
+  if [ -x "$installed" ] && [ -x "$installed_d" ] \
+    && [ "$("$installed" --version 2> /dev/null || true)" = "$version" ] \
+    && [ "$("$installed_d" --version 2> /dev/null || true)" = "$version" ]; then
     say "mentat $version is already installed at $installed"
     exit 0
   fi
@@ -315,7 +317,8 @@ Pick another with --dir, or re-run under sudo with an explicit --dir."
 
   tmp="$(mktemp -d)"
   staged="$install_dir/.mentat.$$"
-  trap 'rm -rf "$tmp"; rm -f "$staged"' EXIT INT TERM
+  staged_d="$install_dir/.mentatd.$$"
+  trap 'rm -rf "$tmp"; rm -f "$staged" "$staged_d"' EXIT INT TERM
 
   fetch "$base/$archive" "$tmp/$archive" || err "cannot download $base/$archive
 Check that release $version exists and publishes a $target archive, and that
@@ -334,23 +337,36 @@ The download may be corrupted or tampered with; not installing."
   fi
 
   tar -xzf "$tmp/$archive" -C "$tmp"
-  [ -f "$tmp/mentat" ] || err "archive did not contain a mentat binary"
+  for b in mentat mentatd; do
+    [ -f "$tmp/$b" ] || err "archive did not contain a $b binary"
+  done
 
-  # Stage inside the destination directory first so the final rename is
+  # Stage inside the destination directory first so the final renames are
   # atomic even when $tmp is on another filesystem, and so a running mentat
   # keeps the executable it started from.
-  chmod 755 "$tmp/mentat"
+  chmod 755 "$tmp/mentat" "$tmp/mentatd"
   cp -f "$tmp/mentat" "$staged"
+  cp -f "$tmp/mentatd" "$staged_d"
 
-  # Run the staged copy before publishing it. It sits on the destination
+  # Run the staged copies before publishing them. They sit on the destination
   # filesystem, so this is the exec check the final path would get, and a
   # binary that cannot run here never replaces a working install.
   reported="$("$staged" --version 2> /dev/null || true)"
   [ -n "$reported" ] || err "the $target binary does not run on this machine
 Nothing was installed. Please report this with the output of: uname -sm"
+  reported_d="$("$staged_d" --version 2> /dev/null || true)"
+  [ -n "$reported_d" ] || err "the $target mentatd binary does not run on this machine
+Nothing was installed. Please report this with the output of: uname -sm"
 
+  # Two renames, not one: POSIX cannot publish a pair atomically. Each rename
+  # is itself atomic, and the window where a new mentat sits beside an old
+  # mentatd is harmless — the pair carries one version stamp, so a client
+  # catching the skew is refused loudly by the daemon identity check rather
+  # than silently attached to a mismatched daemon.
   mv -f "$staged" "$installed"
+  mv -f "$staged_d" "$installed_d"
   say "Installed $reported -> $installed"
+  say "Installed $reported_d -> $installed_d"
   modify_path
 
   say ""

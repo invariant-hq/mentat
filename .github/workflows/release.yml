@@ -130,12 +130,18 @@ jobs:
           steps: install-dune enable-pkg lazy-update-depexts install-gpatch install-depexts build
           workspace: dune-workspace-release
 
-      - name: Stage binary (macOS)
+      - name: Stage binaries (macOS)
         if: runner.os == 'macOS'
-        run: mkdir -p dist && cp _build/default/bin/main.exe dist/mentat
+        run: |
+          mkdir -p dist
+          cp _build/default/bin/main.exe dist/mentat
+          cp _build/default/bin/mentatd/main.exe dist/mentatd
 
       - name: Check portability, architecture, and version
-        run: scripts/release/check-portable.sh dist/mentat "$RELEASE_VERSION" "${{ matrix.target }}"
+        run: |
+          for b in mentat mentatd; do
+            scripts/release/check-portable.sh "dist/$b" "$RELEASE_VERSION" "${{ matrix.target }}"
+          done
 
       - name: Package
         run: |
@@ -144,7 +150,7 @@ jobs:
           TAR=tar
           command -v gtar > /dev/null && TAR=gtar
           "$TAR" --sort=name --owner=0 --group=0 --numeric-owner \
-            --mtime="@$epoch" -cf - -C dist mentat LICENSE THIRD_PARTY_NOTICES.md \
+            --mtime="@$epoch" -cf - -C dist mentat mentatd LICENSE THIRD_PARTY_NOTICES.md \
             | gzip -n > "mentat-${{ matrix.target }}.tar.gz"
 
       - name: Attest build provenance
@@ -182,12 +188,14 @@ jobs:
             --mtime="@$epoch" -cf - -C "$RUNNER_TEMP" "$root" \
             | gzip -n > "dist/$root.tar.gz"
 
-      # The musl binary running on this glibc host is the portability proof
+      # The musl binaries running on this glibc host are the portability proof
       # for the Linux artifacts.
-      - name: Smoke-test Linux binary on glibc host
+      - name: Smoke-test Linux binaries on glibc host
         run: |
           tar -xzf dist/mentat-linux-x64.tar.gz -C "$RUNNER_TEMP"
-          scripts/release/check-portable.sh "$RUNNER_TEMP/mentat" "$RELEASE_VERSION" linux-x64
+          for b in mentat mentatd; do
+            scripts/release/check-portable.sh "$RUNNER_TEMP/$b" "$RELEASE_VERSION" linux-x64
+          done
 
       - name: Generate checksums
         run: |

@@ -7,8 +7,8 @@
 #     alpine:3.21 sh /src/scripts/release/alpine-build.sh
 #
 # Requires dune.lock/ to exist in the checkout (run `dune pkg lock` first).
-# Leaves the binary at dist/mentat. The mounted checkout is written to
-# (_build, dist) — use a disposable checkout, not a working tree.
+# Leaves the binaries at dist/mentat and dist/mentatd. The mounted checkout is
+# written to (_build, dist) — use a disposable checkout, not a working tree.
 set -eux
 
 apk add --no-cache build-base ocaml git curl bash tar gzip unzip patch \
@@ -42,7 +42,9 @@ cd /src
 # include for every C compile until bytesrw fixes it upstream.
 export OCAMLPARAM="_,ccopt=-include unistd.h"
 sh scripts/release/link-workspace.sh > /tmp/dune-workspace-release
-dune build --workspace /tmp/dune-workspace-release _build/default/bin/main.exe
+dune build --workspace /tmp/dune-workspace-release \
+  _build/default/bin/main.exe _build/default/bin/mentatd/main.exe
 
 mkdir -p dist
 cp _build/default/bin/main.exe dist/mentat
+cp _build/default/bin/mentatd/main.exe dist/mentatd

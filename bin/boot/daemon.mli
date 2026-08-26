@@ -56,11 +56,18 @@ val find_or_spawn :
     workspace, spawning the daemon if none is reachable. It reads [daemon.json];
     a {b live} daemon (its socket answers a handshake) whose recorded binary or
     config home differs from [t]'s is a loud {!Exit_status.Runtime_error} naming
-    [mentat serve --stop] (never auto-killed); a matching live daemon is
-    attached. A stale file (free claim, dead socket) or an absent file spawns
-    [mentat serve --spawned] detached — stdio to [daemon.log], the current
+    [mentatd --stop] (never auto-killed); a matching live daemon is attached. A
+    stale file (free claim, dead socket) or an absent file spawns
+    [mentatd --spawned] detached — stdio to [daemon.log], the current
     environment inherited so the daemon opens the same store — then polls
     discovery on a fixed cadence (re-read + re-connect every ~50 ms up to a
     bounded budget, then one full retry) until it answers. The returned driver
     is handed to {!Mentat_client.make}; everything downstream is
-    transport-neutral. *)
+    transport-neutral.
+
+    The daemon binary is resolved as [mentatd] next to the running executable
+    (every release installs the pair side by side); the environment variable
+    [MENTATD_BIN] overrides the sibling resolution for layouts where the two
+    binaries do not share a directory. A resolution that finds no binary is an
+    immediate {!Exit_status.Runtime_error} naming the expected path — never a
+    poll that times out on a daemon that was never started. *)

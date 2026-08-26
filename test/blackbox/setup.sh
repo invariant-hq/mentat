@@ -1,7 +1,7 @@
 # Cram setup for the blackbox suite. Sourced before each test with
-# cwd = $TESTCASE_ROOT; mentat, mentat_cram, and fake_provider_server are all
-# on PATH (via the test-cases/dune (binaries) stanza) and are invoked BARE —
-# never `./…` — so they resolve regardless of the .t's depth.
+# cwd = $TESTCASE_ROOT; mentat, mentatd, mentat_cram, and fake_provider_server
+# are all on PATH (via the test-cases/dune (binaries) stanza) and are invoked
+# BARE — never `./…` — so they resolve regardless of the .t's depth.
 #
 # This sourcing establishes only a hermetic, host-independent *environment*. It
 # deliberately does NOT trust the workspace or open the store — workspace
@@ -207,7 +207,13 @@ wait_captured () { mentat_cram wait-file "capture/request-$1.json"; }
 # Reap $1 and echo its exit code.
 wait_exit () { wait "$1"; echo $?; }
 
-# --- daemon (mentat serve) -----------------------------------------------------
+# --- daemon (mentatd) ----------------------------------------------------------
+
+# find_or_spawn resolves mentatd as a sibling of the running mentat binary.
+# Under the cram harness that resolution is platform-dependent (Linux resolves
+# the install-tree symlink into the build tree, where mentatd is not a
+# sibling), so the daemon binary is named explicitly from PATH.
+export MENTATD_BIN="$(command -v mentatd)"
 
 # Start the per-user daemon foreground-backgrounded on its default per-store
 # socket under /tmp (short, and keyed by the hermetic data home so it never
@@ -216,7 +222,7 @@ wait_exit () { wait "$1"; echo $?; }
 # and waits until its discovery file exists.
 start_daemon () {
   export MENTAT_DAEMON_MAX_IDLE="${MENTAT_DAEMON_MAX_IDLE:-300}"
-  mentat serve >daemon-serve.out 2>&1 &
+  mentatd >daemon-serve.out 2>&1 &
   MENTAT_DAEMON_PID=$!
   wait_for_file "$XDG_DATA_HOME/mentat/daemon/daemon.json"
 }
@@ -224,7 +230,7 @@ start_daemon () {
 # Stop the daemon: the graceful --stop, then a belt-and-suspenders kill of the
 # recorded pid. A trap in the .t pairs with this so a failing test never leaks.
 stop_daemon () {
-  mentat serve --stop >/dev/null 2>&1 || true
+  mentatd --stop >/dev/null 2>&1 || true
   if [ -n "${MENTAT_DAEMON_PID:-}" ]; then
     kill "$MENTAT_DAEMON_PID" 2>/dev/null || true
     wait "$MENTAT_DAEMON_PID" 2>/dev/null || true

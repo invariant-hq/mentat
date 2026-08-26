@@ -100,6 +100,8 @@ jobs:
 
       # An attestation nobody verifies is half a guarantee: the tarball is
       # checked against the repo's build provenance before anything runs.
+      # Both binaries are extracted by name — naming only one would silently
+      # install a mentat whose find-or-spawn has no mentatd sibling.
       - name: Install the pinned mentat release and verify provenance
         env:
           GH_TOKEN: ${{ github.token }}
@@ -109,9 +111,10 @@ jobs:
             --pattern mentat-linux-x64.tar.gz
           gh attestation verify mentat-linux-x64.tar.gz \
             --repo invariant-hq/mentat
-          tar -xzf mentat-linux-x64.tar.gz mentat
+          tar -xzf mentat-linux-x64.tar.gz mentat mentatd
           sudo install -m 0755 mentat /usr/local/bin/mentat
-          rm mentat mentat-linux-x64.tar.gz
+          sudo install -m 0755 mentatd /usr/local/bin/mentatd
+          rm mentat mentatd mentat-linux-x64.tar.gz
 
       # The review subcommand computes the same merge-base diff itself, runs
       # the headless review turn, and emits the findings document through the
@@ -185,9 +188,10 @@ jobs:
             --pattern mentat-linux-x64.tar.gz
           gh attestation verify mentat-linux-x64.tar.gz \
             --repo invariant-hq/mentat
-          tar -xzf mentat-linux-x64.tar.gz mentat
+          tar -xzf mentat-linux-x64.tar.gz mentat mentatd
           sudo install -m 0755 mentat /usr/local/bin/mentat
-          rm mentat mentat-linux-x64.tar.gz
+          sudo install -m 0755 mentatd /usr/local/bin/mentatd
+          rm mentat mentatd mentat-linux-x64.tar.gz
 
       # Both comment families: review comments carry the threads, issue
       # comments carry the summary. Filtered to the workflow token's own bot

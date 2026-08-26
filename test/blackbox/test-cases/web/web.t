@@ -1,4 +1,4 @@
-Browser frontend mounting: `mentat serve --web` binds a
+Browser frontend mounting: `mentatd --web` binds a
 loopback listener that serves the html-over-the-wire frontend behind the daemon's
 one shared network edge — the single-use-token → cookie exchange, the
 unconditional Origin/Host allowlist, and the strict CSP. This drives the real
@@ -13,7 +13,7 @@ frozen render snapshots cannot reach end to end.
 The daemon starts with the browser frontend and prints its URL — the bootstrap
 token in the query — to standard output, on an ephemeral loopback port.
 
-  $ mentat serve --web >web.out 2>&1 &
+  $ mentatd --web >web.out 2>&1 &
   $ MENTAT_DAEMON_PID=$!
   $ wait_for_file "$XDG_DATA_HOME/mentat/daemon/daemon.json"
   $ for _ in $(seq 1 100); do grep -q 'mentat web: open' web.out && break; sleep 0.1; done
@@ -89,7 +89,7 @@ The daemon holds a live web-pinned instance, so a {e single} signal must settle
 it durable-first and exit: teardown resolves every booted instance's release
 (the boot fiber's one shutdown path) rather than calling shutdown around it —
 the first-signal wedge that needed a second Ctrl+C. [serve.t] owns the
-[mentat serve --stop] coverage; this pins the raw one-signal contract.
+[mentatd --stop] coverage; this pins the raw one-signal contract.
 
   $ kill -TERM $MENTAT_DAEMON_PID
   $ for _ in $(seq 1 100); do kill -0 $MENTAT_DAEMON_PID 2>/dev/null || break; sleep 0.1; done

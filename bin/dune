@@ -4,7 +4,6 @@
  (package mentat)
  (flags (:standard -open Mentat_boot))
  (modules
-  daemon_server
   auto_title
   session_locate
   session_html
@@ -12,7 +11,6 @@
   cli_common
   cli_trust
   cli_sandbox
-  cli_serve
   cli_doctor
   cli_config
   cli_permission
@@ -58,8 +56,6 @@
   mentat_agent
   mentat_client
   mentat_connector
-  mentat_server
-  mentat_web
   mentat_provider_runtime
   mentat_provider
   mentat_config

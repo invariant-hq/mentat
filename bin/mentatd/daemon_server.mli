@@ -5,7 +5,7 @@
 
 (** The mentat daemon's serve body: registry, instancing, and the wire.
 
-    The foreground machinery behind [mentat serve], consumed by [cli_serve]. It
+    The foreground machinery behind [mentatd], consumed by its [main]. It
     sequences {!Composition.stage_shared} once, then one
     {!Composition.instance} per workspace over it (the per-user vs
     per-workspace split); [mentat.server] provides the wire, [composition] the

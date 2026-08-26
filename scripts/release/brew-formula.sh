@@ -57,7 +57,7 @@ class Mentat < Formula
   end
 
   def install
-    bin.install "mentat"
+    bin.install "mentat", "mentatd"
     pkgshare.install "LICENSE", "THIRD_PARTY_NOTICES.md"
     generate_completions_from_executable(bin/"mentat", "completion",
                                          shells: [:bash, :zsh])
@@ -65,6 +65,7 @@ class Mentat < Formula
 
   test do
     assert_equal version.to_s, shell_output("#{bin}/mentat --version").strip
+    assert_equal version.to_s, shell_output("#{bin}/mentatd --version").strip
   end
 end
 EOF

@@ -607,7 +607,7 @@ let serve ~socket_override ~spawned ~web ~web_port =
               (match Discovery.write ~dir:ddir record with
               | Ok () -> ()
               | Error message ->
-                  Eio.traceln "mentat serve: writing discovery failed: %s"
+                  Eio.traceln "mentatd: writing discovery failed: %s"
                     message);
               (* Consume-and-rotate: each exchange invalidates the presented
                  token and mints a successor, and republishing the successor's
@@ -622,7 +622,7 @@ let serve ~socket_override ~spawned ~web ~web_port =
                 with
                 | Ok () -> ()
                 | Error message ->
-                    Eio.traceln "mentat serve: rewriting discovery failed: %s"
+                    Eio.traceln "mentatd: rewriting discovery failed: %s"
                       message
               in
               let stop_requested = Atomic.make false in
