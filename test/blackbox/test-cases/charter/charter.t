@@ -1,0 +1,70 @@
+The charter cone round-trips: `add` validates a proposal and installs it under
+the charter's own name, minting the webhook identity once; `list`, `status`,
+and `runs` render the roster and the (empty) durable record; `remove` deletes
+the configuration. No workspace, store, or network is touched.
+
+  $ mkdir proposal
+  $ cat > proposal/charter.json <<'EOF'
+  > { "charter": 1, "name": "pr-review",
+  >   "workspace": { "repo": "acme/widgets" },
+  >   "trigger": [
+  >     { "kind": "github_webhook", "events": ["pull_request.opened"] },
+  >     { "kind": "cli" } ],
+  >   "run": { "mode": "review", "prompt": "prompt.md",
+  >            "output_schema": "findings.schema.json" },
+  >   "budget": { "per_run": { "wall_clock": "15m" },
+  >               "per_charter": { "usd_per_day": 15.0, "runs_per_hour": 6 } },
+  >   "publish": { "github": "review-threads" } }
+  > EOF
+  $ printf 'Review the diff.\n' > proposal/prompt.md
+  $ printf '{"type":"object"}\n' > proposal/findings.schema.json
+
+The first add mints the ingress URL and the webhook secret.
+
+  $ mentat charter add proposal | censor
+  added pr-review ($TESTCASE_ROOT/config/mentat/charters/pr-review)
+  digest $DIGEST1
+  webhook POST /ingress/github/$DIGEST2 (fresh URL; update GitHub settings)
+  webhook secret minted at $TESTCASE_ROOT/config/mentat/charters/pr-review/secrets/webhook; set it on the GitHub hook
+
+Re-adding replaces the policy files and keeps the identity: the URL is not
+fresh and the secret is not re-minted, so owner edits never move the webhook
+URL.
+
+  $ mentat charter add proposal | censor
+  added pr-review ($TESTCASE_ROOT/config/mentat/charters/pr-review)
+  digest $DIGEST1
+  webhook POST /ingress/github/$DIGEST2
+
+  $ mentat charter list | censor
+  NAME       DIGEST            STATE    LAST
+  pr-review  $DIGEST  enabled  -
+
+  $ mentat charter status | censor
+  pr-review
+    state: enabled
+    digest: $DIGEST
+    spend 24h: 0.00 usd of 15.00
+    runs 1h: 0 of 6
+    last: no receipts
+
+On empty state a charter has no runs to show.
+
+  $ mentat charter runs pr-review
+
+`fire` is registered so the surface is visible, but the pipeline is not in
+this build.
+
+  $ mentat charter fire pr-review 2>&1
+  mentat: charter fire pr-review: not implemented in this build (--event and --sweep land with the fire pipeline)
+  [1]
+
+`remove` deletes the configuration — secrets and webhook identity included.
+No state was recorded here, so nothing is named as kept.
+
+  $ mentat charter remove pr-review
+  removed pr-review ($TESTCASE_ROOT/config/mentat/charters/pr-review)
+  $ mentat charter list
+  $ mentat charter runs pr-review 2>&1
+  mentat: $TESTCASE_ROOT/config/mentat/charters/pr-review: no charter named pr-review
+  [1]

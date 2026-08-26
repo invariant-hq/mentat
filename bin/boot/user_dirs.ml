@@ -50,6 +50,11 @@ let config_file t = Filename.concat t.config_home "config.json"
 let auth_file t = Filename.concat t.config_home "auth.json"
 let trust_file t = Filename.concat t.config_home "trust.json"
 let daemon_dir t = Filename.concat t.data_home "daemon"
+let charters_dir t = Filename.concat t.config_home "charters"
+let charter_dir t name = Filename.concat (charters_dir t) name
+
+let charter_state_dir t name =
+  Filename.concat (Filename.concat t.state_home "charters") name
 
 (* The socket lives under literal [/tmp], not the daemon dir, so a deep checkout
    or a relocated home cannot overflow [sun_path] (~104 bytes). It is per-user

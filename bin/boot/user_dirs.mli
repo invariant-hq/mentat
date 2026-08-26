@@ -47,6 +47,23 @@ val daemon_dir : t -> string
     data home so a [MENTAT_DATA_HOME] override isolates a daemon per store. The
     socket does not live here — it lives under [/tmp] to fit [sun_path]. *)
 
+val charters_dir : t -> string
+(** [charters_dir t] is [config_home / "charters"] — the root under which each
+    charter owns one directory. Homed under the config home because a charter
+    is owner-written policy, never workspace or session state. *)
+
+val charter_dir : t -> string -> string
+(** [charter_dir t name] is [charters_dir / name] — the directory holding
+    [name]'s [charter.json], prompt and schema files, [ingress.id], and
+    [secrets/]. *)
+
+val charter_state_dir : t -> string -> string
+(** [charter_state_dir t name] is [state_home / "charters" / name] — the
+    charter's durable record: its receipt log, its per-event-identity claim
+    markers, and its run roots. Homed under the state home, apart from the
+    config-home policy, so removing a charter's configuration can leave its
+    audit trail in place. *)
+
 val daemon_socket_dir : t -> string
 (** [daemon_socket_dir t] is [/tmp/mentat-<uid>-<key>], the directory the
     per-user daemon binds its socket in — under [/tmp] so a deep checkout cannot

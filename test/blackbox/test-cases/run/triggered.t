@@ -20,3 +20,10 @@ A malformed --triggered value is a usage error before any run.
   $ mentat run start --triggered "not-a-provenance" --cwd "$PWD" --id trigbad "x" 2>&1
   mentat: invalid --triggered value not-a-provenance: expected <charter>@<digest>:<key>
   [2]
+
+The digest is pinned to the charter policy digest's 16 lowercase hex
+characters; any other length is refused the same way.
+
+  $ mentat run start --triggered "nightly-review@0f9a4c1d:delivery-42" --cwd "$PWD" --id trigshort "x" 2>&1
+  mentat: invalid --triggered value nightly-review@0f9a4c1d:delivery-42: expected <charter>@<digest>:<key>
+  [2]

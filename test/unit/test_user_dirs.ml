@@ -75,6 +75,23 @@ let child_socket_derivation () =
        (socket_path (User_dirs.child_socket_dir dirs ~session:(String.make 200 'x')))
     < 104)
 
+(* The charter estate splits by home: policy under config, durable record
+   under state, so removing the configuration can keep the audit trail. *)
+let charter_paths () =
+  let dirs = dirs () in
+  equal string ~msg:"charters_dir lives under the config home"
+    "/home/u/.config/mentat/charters"
+    (User_dirs.charters_dir dirs);
+  equal string ~msg:"charter_dir is the named charter's directory"
+    "/home/u/.config/mentat/charters/pr-review"
+    (User_dirs.charter_dir dirs "pr-review");
+  equal string ~msg:"charter_state_dir lives under the state home"
+    "/home/u/.local/state/mentat/charters/pr-review"
+    (User_dirs.charter_state_dir dirs "pr-review")
+
 let () =
   run "mentat.user_dirs"
-    [ test "child socket derivation" child_socket_derivation ]
+    [
+      test "child socket derivation" child_socket_derivation;
+      test "charter paths" charter_paths;
+    ]

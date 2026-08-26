@@ -63,10 +63,18 @@ val triggered :
   string -> (Mentat_protocol.Command.triggered, Exit_status.t) result
 (** [triggered raw] parses the [run start] [--triggered] value as
     [<charter>@<digest>:<key>]: a charter name of letters, digits, ['.'],
-    ['_'], or ['-']; a non-empty lowercase-hex charter-content digest; and a
-    non-empty trigger key. The key may itself contain ['@'] or [':'] — the
-    first ['@'] and the first [':'] after it delimit the parts. Anything else
-    is a {!Exit_status.Usage_error} naming the grammar. *)
+    ['_'], or ['-']; the charter policy digest — exactly 16 lowercase
+    hexadecimal characters, the length {!Mentat_charter.Charter.policy_digest}
+    renders (the two must move together); and a non-empty trigger key. The
+    key may itself contain ['@'] or [':'] — the first ['@'] and the first
+    [':'] after it delimit the parts. Anything else is a
+    {!Exit_status.Usage_error} naming the grammar. *)
+
+val charter_name : string -> (string, Exit_status.t) result
+(** [charter_name raw] validates [raw] as an installed charter's name:
+    non-empty, only letters, digits, ['.'], ['_'], ['-'], and not opening
+    with a dot — so a name is always a plain directory component, never a
+    path. Returns [raw]. *)
 
 val config_key : string -> (Mentat_config.Field.any, Exit_status.t) result
 (** [config_key raw] parses [raw] as a supported config key, returning the field
