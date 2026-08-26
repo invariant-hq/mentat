@@ -211,3 +211,13 @@ val install : User_dirs.t -> src:string -> (Installed.t, Error.t) result
     a {e proposal} — a source other than the installed directory — carrying
     [secrets/] or [ingress.id], since secrets never ride a proposal and a
     webhook identity is minted here, never imported. *)
+
+val rotate_webhook_secret : Loaded.t -> (string, Error.t) result
+(** [rotate_webhook_secret loaded] replaces [loaded]'s webhook HMAC secret
+    with a fresh 256-bit key, written atomically [0o600] over
+    [secrets/webhook], and is the secret file's absolute path. The ingress
+    id is untouched — rotation never moves the webhook URL — and the old
+    secret stops verifying the moment the write lands: deliveries signed
+    with it answer 401 until the owner sets the new secret on the GitHub
+    hook. A charter with no webhook arm has no secret to rotate and is
+    refused. *)

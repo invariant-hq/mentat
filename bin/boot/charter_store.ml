@@ -396,3 +396,18 @@ let install dirs ~src =
   in
   let* loaded = load dirs ~name in
   Ok { Installed.loaded; webhook }
+
+let rotate_webhook_secret (loaded : Loaded.t) =
+  let operation = "secret rotate" in
+  let path =
+    Filename.concat
+      (Filename.concat loaded.Loaded.dir secrets_dir_name)
+      webhook_secret_name
+  in
+  if not (Option.is_some (Charter.webhook_arm loaded.Loaded.charter)) then
+    error ~operation ~path
+      "the charter has no github_webhook trigger, so there is no webhook \
+       secret to rotate"
+  else
+    let* () = atomic_write_wrapped ~operation path (csprng_hex 32 ^ "\n") in
+    Ok path

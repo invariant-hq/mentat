@@ -52,6 +52,37 @@ let add src =
    Ok Exit_status.Success)
   |> Exit_status.of_result
 
+(* rotate-secret *)
+
+let rotate_secret name =
+  (let* name = Argv.charter_name name in
+   let* dirs = resolve_dirs () in
+   let* loaded = load dirs ~name in
+   let* () =
+     match Charter.webhook_arm loaded.Charter_store.Loaded.charter with
+     | Some _ -> Ok ()
+     | None ->
+         Error
+           (Exit_status.usage
+              (Printf.sprintf
+                 "charter %s has no github_webhook trigger, so there is no \
+                  webhook secret to rotate"
+                 name))
+   in
+   let* path =
+     Result.map_error store_error (Charter_store.rotate_webhook_secret loaded)
+   in
+   Output.stdout_printf "rotated webhook secret at %s\n" path;
+   (match loaded.Charter_store.Loaded.ingress_id with
+   | Some id ->
+       Output.stdout_printf
+         "webhook POST /ingress/github/%s (URL unchanged; set the new secret \
+          on the GitHub hook now — the old one no longer verifies)\n"
+         id
+   | None -> ());
+   Ok Exit_status.Success)
+  |> Exit_status.of_result
+
 (* list *)
 
 let disposition_label disposition =
@@ -444,6 +475,28 @@ let add_cmd =
     (Cmd.info "add" ~doc ~docs ~man ~exits:Cli_common.exits)
     (Exit_status.term Term.(const add $ src_arg))
 
+let rotate_secret_cmd =
+  let doc = "Re-mint a webhook charter's HMAC secret; the URL never moves." in
+  let man =
+    [
+      `S Manpage.s_description;
+      `P
+        "Replaces the secret at $(b,secrets/webhook) with a fresh 256-bit \
+         key, atomically. The ingress URL is untouched — rotation changes \
+         what signs deliveries, never where they land — and the old secret \
+         stops verifying the moment the verb returns: deliveries still \
+         signed with it answer 401 until the new secret is set on the \
+         repository's webhook settings, and the reconcile sweep covers \
+         whatever the gap misses.";
+      `P
+        "A charter without a $(b,github_webhook) trigger has no webhook \
+         secret and is refused.";
+    ]
+  in
+  Cmd.v
+    (Cmd.info "rotate-secret" ~doc ~docs ~man ~exits:Cli_common.exits)
+    (Exit_status.term Term.(const rotate_secret $ name_arg))
+
 let list_cmd =
   let doc = "List installed charters." in
   Cmd.v
@@ -537,4 +590,12 @@ let cmd =
   let doc = "Manage standing, unattended review charters." in
   Cmd.group
     (Cmd.info "charter" ~doc ~docs ~exits:Cli_common.exits)
-    [ add_cmd; list_cmd; fire_cmd; runs_cmd; status_cmd; remove_cmd ]
+    [
+      add_cmd;
+      list_cmd;
+      fire_cmd;
+      runs_cmd;
+      status_cmd;
+      remove_cmd;
+      rotate_secret_cmd;
+    ]

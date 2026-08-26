@@ -136,6 +136,41 @@ let install_and_reinstall () =
   is_true ~msg:"a cli charter has no webhook outcome"
     (Option.is_none cli.Charter_store.Installed.webhook)
 
+let rotate_secret () =
+  let root = temp_root () in
+  let dirs = make_dirs root in
+  let src = proposal root ~name:"hook" (webhook_json ~name:"hook") in
+  let installed = ok ~msg:"install" (Charter_store.install dirs ~src) in
+  let loaded = installed.Charter_store.Installed.loaded in
+  let secret ~msg =
+    match Charter_store.read_secret loaded ~file:"webhook" with
+    | Ok (Some secret) -> secret
+    | Ok None -> failf "%s: no webhook secret" msg
+    | Error e -> failf "%s: %s" msg (Charter_store.Error.message e)
+  in
+  let before = secret ~msg:"before" in
+  let path = ok ~msg:"rotate" (Charter_store.rotate_webhook_secret loaded) in
+  let after = secret ~msg:"after" in
+  is_true ~msg:"the fresh secret is a 64-hex key" (is_hex ~length:64 after);
+  is_true ~msg:"the old secret is replaced, invalid immediately"
+    (not (String.equal before after));
+  is_true ~msg:"the rotated secret stays owner-only"
+    ((Unix.stat path).Unix.st_perm land 0o077 = 0);
+  (* Rotation never moves the webhook URL. *)
+  let reloaded = ok ~msg:"reload" (Charter_store.load dirs ~name:"hook") in
+  is_true ~msg:"the ingress id is untouched"
+    (match
+       (loaded.Charter_store.Loaded.ingress_id,
+        reloaded.Charter_store.Loaded.ingress_id)
+     with
+    | Some before, Some after -> String.equal before after
+    | _ -> false);
+  (* A charter with no webhook arm has no secret to rotate. *)
+  let cli_src = proposal root ~name:"clionly" (cli_json ~name:"clionly") in
+  let cli = ok ~msg:"cli install" (Charter_store.install dirs ~src:cli_src) in
+  err ~msg:"a non-webhook charter is refused" ~holds:[ "github_webhook" ]
+    (Charter_store.rotate_webhook_secret cli.Charter_store.Installed.loaded)
+
 let install_refusals () =
   let root = temp_root () in
   let dirs = make_dirs root in
@@ -325,6 +360,7 @@ let () =
     [
       test "install and reinstall" install_and_reinstall;
       test "install refusals" install_refusals;
+      test "rotate the webhook secret" rotate_secret;
       test "load mismatch" load_mismatch;
       test "roster and index" roster_and_index;
       test "receipts roundtrip" receipts_roundtrip;
