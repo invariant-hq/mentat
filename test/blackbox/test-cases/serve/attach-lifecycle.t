@@ -8,11 +8,11 @@ evict a live turn out from under it (the three-zeros guard).
 The two proofs run sequentially against one hermetic store. Only one daemon may
 claim a store at a time, so each proof stops its daemon before the next starts;
 this shared cleanup is the EXIT backstop that reaps any daemon (store-scoped
-`mentatd --stop`) and the long-lived orphan child a failing A8 could otherwise
+`mentatd stop`) and the long-lived orphan child a failing A8 could otherwise
 leak.
 
   $ cleanup_all () {
-  >   mentatd --stop >/dev/null 2>&1 || true
+  >   mentatd stop >/dev/null 2>&1 || true
   >   [ -n "${MENTAT_DAEMON_PID:-}" ] && kill "$MENTAT_DAEMON_PID" 2>/dev/null
   >   [ -f succ.pid ] && kill -9 "$(cat succ.pid)" 2>/dev/null
   >   [ -f child.pid ] && kill -9 "$(cat child.pid)" 2>/dev/null
@@ -95,13 +95,13 @@ pid, so a genuinely new process claimed the store.
   $ [ -n "$NEW_PID" ] && [ "$OLD_PID" != "$NEW_PID" ] && echo reclaimed-by-fresh-daemon
   reclaimed-by-fresh-daemon
 
-Tear A8 down completely so A1 opens a free claim: `mentatd --stop` unlinks the
+Tear A8 down completely so A1 opens a free claim: `mentatd stop` unlinks the
 discovery file, but a find-or-spawn'd successor is detached and does not always
 stop on that alone, so the successor pid is killed directly (SIGKILL releases the
 claim on death). The orphan sleep is reaped the same way. Bounded polls confirm
 both are gone before the next proof — nothing leaks.
 
-  $ mentatd --stop >/dev/null 2>&1
+  $ mentatd stop >/dev/null 2>&1
   $ kill -9 "$NEW_PID" 2>/dev/null; kill -9 "$(cat child.pid)" 2>/dev/null; wait "$NEW_PID" 2>/dev/null; true
   $ for i in 1 2 3 4 5 6 7 8 9 10; do ps -p "$NEW_PID" >/dev/null 2>&1 || break; sleep 0.2; done
   $ ps -p "$NEW_PID" >/dev/null 2>&1 && echo daemon-leaked || echo daemon-stopped

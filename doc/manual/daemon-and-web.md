@@ -32,7 +32,7 @@ daemon exists.
 Stop the daemon gracefully with:
 
 ```sh
-mentatd --stop
+mentatd stop
 ```
 
 Stopping when none is running is a successful no-op. A first SIGINT or SIGTERM

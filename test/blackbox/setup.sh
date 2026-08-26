@@ -230,7 +230,7 @@ start_daemon () {
 # Stop the daemon: the graceful --stop, then a belt-and-suspenders kill of the
 # recorded pid. A trap in the .t pairs with this so a failing test never leaks.
 stop_daemon () {
-  mentatd --stop >/dev/null 2>&1 || true
+  mentatd stop >/dev/null 2>&1 || true
   if [ -n "${MENTAT_DAEMON_PID:-}" ]; then
     kill "$MENTAT_DAEMON_PID" 2>/dev/null || true
     wait "$MENTAT_DAEMON_PID" 2>/dev/null || true
