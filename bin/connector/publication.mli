@@ -177,6 +177,47 @@ module Request : sig
     body : Jsont.json;  (** The request's JSON body. *)
   }
   (** The type for publication requests. *)
+
+  val to_json : t -> Jsont.json
+  (** [to_json t] is [t] as the wire object {!Envelope.to_json} embeds: the
+      members [label] (string or null), [method], [path], and [body]. *)
+
+  val of_json : context:string -> Jsont.json -> (t, Error.t) result
+  (** [of_json ~context json] reads a request back from its {!to_json}
+      shape; [context] prefixes error diagnostics. The read is strict where
+      it matters: [method] must be [POST] or [PATCH], and [path] must be a
+      [/]-leading string of [/]-separated segments drawn from
+      [A-Za-z0-9._~%-], none of them empty, ["."], or [".."] — the paths
+      GitHub's REST surface needs, and nothing a tampered envelope could
+      use to point the caller's credential outside them (GitHub's edge
+      normalizes dot-segments) or to cut the path short with [?] or
+      [#]. *)
+end
+
+(** The review envelope — the one wire format between [github review] and
+    [github publish]. Encode and decode live together here so the pipe's two
+    ends cannot drift. *)
+module Envelope : sig
+  type t = {
+    threads : Request.t list;
+        (** The thread requests, in posting order. *)
+    summary : Request.t;  (** The single sticky summary request. *)
+    threads_safe : bool;
+        (** Whether the thread requests are safe to send; see
+            {!threads_safe}. *)
+  }
+  (** The type for review envelopes. *)
+
+  val to_json : t -> Jsont.json
+  (** [to_json t] is the envelope object: [schema_version] (always [1]),
+      [type] (always ["github.review"]), [review] (the thread requests),
+      [summary], and [threads_safe], in that order. *)
+
+  val decode : string -> (t, Error.t) result
+  (** [decode bytes] reads an envelope back from [bytes]. A missing or
+      foreign [type], a malformed member, or a request that fails
+      {!Request.of_json} is an [Error] naming the offending part; unknown
+      members are ignored. *)
 end
 
 type t

@@ -134,6 +134,32 @@ request is sent — no server is listening here, and none is needed.
   mentat: request summary targets /repos/acme/widgets/issues/comments/4242, outside other/repo#7
   [1]
 
+A tampered envelope cannot point the token outside the repository: a
+dot-segment path is refused at decode (GitHub's edge would normalize it past
+the prefix check), and a control-byte label is flattened to printable ASCII
+before it reaches the terminal. Neither needs a server.
+
+  $ cat > traversal.json <<'JSON'
+  > {"type": "github.review", "review": [],
+  >  "summary": {"label": "bad\u001b[2Jlabel", "method": "POST",
+  >              "path": "/repos/acme/widgets/../../orgs/evil/x",
+  >              "body": {"body": "s"}},
+  >  "threads_safe": true}
+  > JSON
+  $ mentat github publish --pr acme/widgets#7 < traversal.json
+  mentat: envelope.summary.path: must not contain empty, ".", or ".." segments
+  [1]
+  $ cat > hostile-label.json <<'JSON'
+  > {"type": "github.review", "review": [],
+  >  "summary": {"label": "bad\u001b[2Jlabel", "method": "POST",
+  >              "path": "/repos/acme/widgets/issues/7/comments",
+  >              "body": {"body": "s"}},
+  >  "threads_safe": true}
+  > JSON
+  $ mentat github publish --pr other/repo#7 < hostile-label.json
+  mentat: request bad [2Jlabel targets /repos/acme/widgets/issues/7/comments, outside other/repo#7
+  [1]
+
 A transport failure aborts with the offending request named; nothing listens
 on the dead port.
 

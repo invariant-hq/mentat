@@ -5,6 +5,7 @@
 
 open! Cmdliner
 open Mentat_connector
+open Mentat_github
 
 let docs = Cli_common.s_run
 let ( let* ) = Result.bind
@@ -123,19 +124,6 @@ let read_stdin_capped () =
   in
   loop ()
 
-let method_string = function `POST -> "POST" | `PATCH -> "PATCH"
-
-let request_json (request : Publication.Request.t) =
-  Output.Json.obj
-    [
-      ("label", Output.Json.string_or_null request.Publication.Request.label);
-      ( "method",
-        Output.Json.string
-          (method_string request.Publication.Request.method_) );
-      ("path", Output.Json.string request.Publication.Request.path);
-      ("body", request.Publication.Request.body);
-    ]
-
 let review pr at diff posted base_label origin =
   (let* pr_raw = require "--pr" pr in
    let* at_raw = require "--at" at in
@@ -169,107 +157,26 @@ let review pr at diff posted base_label origin =
    in
    let { Publication.threads; summary } = Publication.requests publication in
    let envelope =
-     Output.Json.envelope ~type_:"github.review"
-       [
-         ("review", Output.Json.list (List.map request_json threads));
-         ("summary", request_json summary);
-         ( "threads_safe",
-           Output.Json.bool (Publication.threads_safe publication) );
-       ]
+     {
+       Publication.Envelope.threads;
+       summary;
+       threads_safe = Publication.threads_safe publication;
+     }
    in
-   Output.stdout_printf "%s\n" (Output.Json.to_string envelope);
+   Output.stdout_printf "%s\n"
+     (Output.Json.to_string (Publication.Envelope.to_json envelope));
    Ok Exit_status.Success)
   |> Exit_status.of_result
 
-(* The review envelope, decoded back from the bytes [github review] emits:
-   thread requests, the summary request, and the threads-safe flag. The
-   member shapes are pinned by [request_json]; anything else is a broken
-   pipe, refused before any request is sent. *)
-let decode_request ~context json =
-  let error member reason =
-    Error (Printf.sprintf "%s.%s: %s" context member reason)
-  in
-  let member name mems = Option.map snd (Jsont.Json.find_mem name mems) in
-  match json with
-  | Jsont.Object (mems, _) ->
-      let* label =
-        match member "label" mems with
-        | Some (Jsont.String (label, _)) -> Ok (Some label)
-        | Some (Jsont.Null _) -> Ok None
-        | Some _ -> error "label" "must be a string or null"
-        | None -> error "label" "missing"
-      in
-      let* method_ =
-        match member "method" mems with
-        | Some (Jsont.String ("POST", _)) -> Ok `POST
-        | Some (Jsont.String ("PATCH", _)) -> Ok `PATCH
-        | Some _ -> error "method" "must be POST or PATCH"
-        | None -> error "method" "missing"
-      in
-      let* path =
-        match member "path" mems with
-        | Some (Jsont.String (path, _))
-          when String.length path > 0 && path.[0] = '/' ->
-            Ok path
-        | Some _ -> error "path" "must be a /-leading string"
-        | None -> error "path" "missing"
-      in
-      let* body =
-        match member "body" mems with
-        | Some body -> Ok body
-        | None -> error "body" "missing"
-      in
-      Ok { Publication.Request.label; method_; path; body }
-  | _ -> Error (context ^ ": must be an object")
-
-let decode_envelope bytes =
-  let error context reason = Error (context ^ ": " ^ reason) in
-  let member name mems = Option.map snd (Jsont.Json.find_mem name mems) in
-  match Jsont_bytesrw.decode_string Jsont.json bytes with
-  | Error reason -> error "envelope" reason
-  | Ok (Jsont.Object (mems, _)) ->
-      let* () =
-        match member "type" mems with
-        | Some (Jsont.String ("github.review", _)) -> Ok ()
-        | Some (Jsont.String (other, _)) ->
-            error "envelope.type"
-              (Printf.sprintf "expected github.review, got %s" other)
-        | Some _ -> error "envelope.type" "must be a string"
-        | None -> error "envelope" {|missing member "type"|}
-      in
-      let* threads =
-        match member "review" mems with
-        | Some (Jsont.Array (items, _)) ->
-            let* _, threads =
-              List.fold_left
-                (fun acc item ->
-                  let* index, threads = acc in
-                  let context = Printf.sprintf "envelope.review[%d]" index in
-                  let* request = decode_request ~context item in
-                  Ok (index + 1, request :: threads))
-                (Ok (0, []))
-                items
-            in
-            Ok (List.rev threads)
-        | Some _ -> error "envelope.review" "must be an array"
-        | None -> error "envelope" {|missing member "review"|}
-      in
-      let* summary =
-        match member "summary" mems with
-        | Some json -> decode_request ~context:"envelope.summary" json
-        | None -> error "envelope" {|missing member "summary"|}
-      in
-      let* threads_safe =
-        match member "threads_safe" mems with
-        | Some (Jsont.Bool (safe, _)) -> Ok safe
-        | Some _ -> error "envelope.threads_safe" "must be a boolean"
-        | None -> error "envelope" {|missing member "threads_safe"|}
-      in
-      Ok (threads, summary, threads_safe)
-  | Ok _ -> error "envelope" "must be a JSON object"
-
+(* The label is decoded model-adjacent input on the publish side; it reaches
+   [Printf] on stderr, so anything outside printable ASCII flattens to a
+   space before display. The JSONL outcome lines carry it raw — the JSON
+   encoder escapes there. *)
 let request_name (request : Publication.Request.t) =
-  Option.value request.Publication.Request.label ~default:"summary"
+  match request.Publication.Request.label with
+  | None -> "summary"
+  | Some label ->
+      String.map (fun c -> if c >= ' ' && c <= '~' then c else ' ') label
 
 (* One request, one JSONL outcome line. A reply from GitHub — 2xx or not — is
    a per-line outcome and the run continues, so one refused thread cannot
@@ -322,8 +229,10 @@ let publish pr =
                the environment, never from the command line")
    in
    let* stdin_bytes = read_stdin_capped () in
-   let* threads, summary, threads_safe =
-     Result.map_error Exit_status.runtime (decode_envelope stdin_bytes)
+   let* { Publication.Envelope.threads; summary; threads_safe } =
+     Result.map_error
+       (fun e -> Exit_status.runtime (Publication.Error.message e))
+       (Publication.Envelope.decode stdin_bytes)
    in
    let requests = (if threads_safe then threads else []) @ [ summary ] in
    let* () =

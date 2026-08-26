@@ -10,10 +10,11 @@
    no network. The production requester [make] wires (TLS, one connection per
    request) is exercised by the github crams, not here.
 
-   The module lives in [bin/boot] and is copied into this test executable by
-   the [copy_files] rule in [dune]. *)
+   The module lives in the private [mentat_github] library under
+   [bin/github/], linked directly. *)
 
 open Windtrap
+open Mentat_github
 
 type call = {
   meth : [ `GET | `PATCH | `POST ];

@@ -370,6 +370,157 @@ module Request = struct
     path : string;
     body : Jsont.json;
   }
+
+  let ( let* ) = Result.bind
+  let error ~context reason = Error (Error.make ~context reason)
+
+  (* The one charset a GitHub REST path on this surface needs. Closed at
+     decode so a tampered envelope cannot smuggle dot-segments (GitHub's edge
+     normalizes them, so [/repos/o/r/../../x] would carry the Bearer token
+     outside the repository), query or fragment cuts, or terminal-hostile
+     bytes into a request line. *)
+  let path_byte c =
+    (c >= 'A' && c <= 'Z')
+    || (c >= 'a' && c <= 'z')
+    || (c >= '0' && c <= '9')
+    || Char.equal c '.' || Char.equal c '_' || Char.equal c '~'
+    || Char.equal c '%' || Char.equal c '-' || Char.equal c '/'
+
+  let valid_path ~context path =
+    if String.length path = 0 || not (Char.equal path.[0] '/') then
+      error ~context "must be a /-leading string"
+    else if not (String.for_all path_byte path) then
+      error ~context "contains a byte outside [A-Za-z0-9._~%-]"
+    else
+      let segments = List.tl (String.split_on_char '/' path) in
+      if
+        List.exists
+          (fun s ->
+            String.equal s "" || String.equal s "." || String.equal s "..")
+          segments
+      then error ~context "must not contain empty, \".\", or \"..\" segments"
+      else Ok path
+
+  let mem name value = Jsont.Json.mem (Jsont.Json.name name) value
+
+  let to_json t =
+    Jsont.Json.object'
+      [
+        mem "label"
+          (match t.label with
+          | Some label -> Jsont.Json.string label
+          | None -> Jsont.Json.null ());
+        mem "method"
+          (Jsont.Json.string
+             (match t.method_ with `POST -> "POST" | `PATCH -> "PATCH"));
+        mem "path" (Jsont.Json.string t.path);
+        mem "body" t.body;
+      ]
+
+  let of_json ~context json =
+    let err member reason = error ~context:(context ^ "." ^ member) reason in
+    let member name mems = Option.map snd (Jsont.Json.find_mem name mems) in
+    match json with
+    | Jsont.Object (mems, _) ->
+        let* label =
+          match member "label" mems with
+          | Some (Jsont.String (label, _)) -> Ok (Some label)
+          | Some (Jsont.Null _) -> Ok None
+          | Some _ -> err "label" "must be a string or null"
+          | None -> err "label" "missing"
+        in
+        let* method_ =
+          match member "method" mems with
+          | Some (Jsont.String ("POST", _)) -> Ok `POST
+          | Some (Jsont.String ("PATCH", _)) -> Ok `PATCH
+          | Some _ -> err "method" "must be POST or PATCH"
+          | None -> err "method" "missing"
+        in
+        let* path =
+          match member "path" mems with
+          | Some (Jsont.String (path, _)) ->
+              valid_path ~context:(context ^ ".path") path
+          | Some _ -> err "path" "must be a /-leading string"
+          | None -> err "path" "missing"
+        in
+        let* body =
+          match member "body" mems with
+          | Some body -> Ok body
+          | None -> err "body" "missing"
+        in
+        Ok { label; method_; path; body }
+    | _ -> error ~context "must be an object"
+end
+
+(* The wire envelope [github review] emits and [github publish] reads back.
+   Encode and decode live together on the type, so the pipe's two ends can
+   never drift; the CLI owns only flags, IO, and the outcome lines. *)
+module Envelope = struct
+  type t = {
+    threads : Request.t list;
+    summary : Request.t;
+    threads_safe : bool;
+  }
+
+  let ( let* ) = Result.bind
+  let error ~context reason = Error (Error.make ~context reason)
+
+  let to_json t =
+    let mem name value = Jsont.Json.mem (Jsont.Json.name name) value in
+    Jsont.Json.object'
+      [
+        mem "schema_version" (Jsont.Json.int 1);
+        mem "type" (Jsont.Json.string "github.review");
+        mem "review" (Jsont.Json.list (List.map Request.to_json t.threads));
+        mem "summary" (Request.to_json t.summary);
+        mem "threads_safe" (Jsont.Json.bool t.threads_safe);
+      ]
+
+  let decode bytes =
+    match Jsont_bytesrw.decode_string Jsont.json bytes with
+    | Error reason -> error ~context:"envelope" reason
+    | Ok (Jsont.Object (mems, _)) -> (
+        let member name = Option.map snd (Jsont.Json.find_mem name mems) in
+        let* () =
+          match member "type" with
+          | Some (Jsont.String ("github.review", _)) -> Ok ()
+          | Some (Jsont.String (other, _)) ->
+              error ~context:"envelope.type"
+                (Printf.sprintf "expected github.review, got %s" other)
+          | Some _ -> error ~context:"envelope.type" "must be a string"
+          | None -> error ~context:"envelope" {|missing member "type"|}
+        in
+        let* threads =
+          match member "review" with
+          | Some (Jsont.Array (items, _)) ->
+              let* _, threads =
+                List.fold_left
+                  (fun acc item ->
+                    let* index, threads = acc in
+                    let context = Printf.sprintf "envelope.review[%d]" index in
+                    let* request = Request.of_json ~context item in
+                    Ok (index + 1, request :: threads))
+                  (Ok (0, []))
+                  items
+              in
+              Ok (List.rev threads)
+          | Some _ -> error ~context:"envelope.review" "must be an array"
+          | None -> error ~context:"envelope" {|missing member "review"|}
+        in
+        let* summary =
+          match member "summary" with
+          | Some json -> Request.of_json ~context:"envelope.summary" json
+          | None -> error ~context:"envelope" {|missing member "summary"|}
+        in
+        let* threads_safe =
+          match member "threads_safe" with
+          | Some (Jsont.Bool (safe, _)) -> Ok safe
+          | Some _ ->
+              error ~context:"envelope.threads_safe" "must be a boolean"
+          | None -> error ~context:"envelope" {|missing member "threads_safe"|}
+        in
+        Ok { threads; summary; threads_safe })
+    | Ok _ -> error ~context:"envelope" "must be a JSON object"
 end
 
 (* Model-authored text reaches a rendered comment only through [neutral], so

@@ -1,0 +1,12 @@
+(library
+ (name mentat_github)
+ (modules github_api)
+ (libraries
+  cohttp
+  cohttp-eio
+  oauth2_eio
+  uri
+  eio
+  jsont
+  jsont.bytesrw
+  mentat_llm_http))

@@ -136,11 +136,14 @@ let get_paginated t ~path ~max_pages =
     | None -> Ok (List.rev acc)
     | Some target ->
         if not (same_origin t target) then
+          (* The link target is server-controlled and lands in terminal-bound
+             error text, so it rides the same excerpt discipline as response
+             bodies. *)
           Error
             (Error.transport
                (Printf.sprintf "%s: pagination link leaves the API origin: %s"
                   url
-                  (Uri.to_string target)))
+                  (excerpt (Uri.to_string target))))
         else if remaining <= 1 then
           Error
             (Error.transport

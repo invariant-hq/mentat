@@ -768,6 +768,96 @@ let hostile_path_escapes_in_the_summary () =
   is_true ~msg:"the hostile path is escaped in the row and the permalink"
     (str_contains expected (summary_body_of p))
 
+(* Envelope codec. *)
+
+let sample_request ?(label = Some "0123456789abcdef") ?(method_ = `POST)
+    ?(path = "/repos/acme/widget/pulls/5/comments") () =
+  {
+    Publication.Request.label;
+    method_;
+    path;
+    body =
+      Jsont.Json.object'
+        [ Jsont.Json.mem (Jsont.Json.name "body") (Jsont.Json.string "b") ];
+  }
+
+let encoded envelope =
+  match
+    Jsont_bytesrw.encode_string Jsont.json
+      (Publication.Envelope.to_json envelope)
+  with
+  | Ok bytes -> bytes
+  | Error message -> failf "encode: %s" message
+
+let summary_request =
+  sample_request ~label:None ~path:"/repos/acme/widget/issues/5/comments" ()
+
+let envelope_round_trips () =
+  let envelope =
+    {
+      Publication.Envelope.threads =
+        [
+          sample_request ();
+          sample_request ~label:None ~method_:`PATCH
+            ~path:"/repos/acme/widget/issues/comments/9" ();
+        ];
+      summary = summary_request;
+      threads_safe = true;
+    }
+  in
+  let bytes = encoded envelope in
+  is_true ~msg:"the envelope carries its type"
+    (str_contains {|"schema_version":1,"type":"github.review"|} bytes);
+  match Publication.Envelope.decode bytes with
+  | Error e -> failf "decode: %s" (Publication.Error.message e)
+  | Ok read ->
+      equal int ~msg:"threads survive" 2
+        (List.length read.Publication.Envelope.threads);
+      is_true ~msg:"threads_safe survives"
+        read.Publication.Envelope.threads_safe;
+      equal (option string) ~msg:"labels survive" (Some "0123456789abcdef")
+        (List.hd read.Publication.Envelope.threads).Publication.Request.label;
+      equal string ~msg:"summary path survives"
+        "/repos/acme/widget/issues/5/comments"
+        read.Publication.Envelope.summary.Publication.Request.path
+
+let envelope_refuses_hostile_paths () =
+  let refuses ~msg ?expect path =
+    let envelope =
+      {
+        Publication.Envelope.threads = [ sample_request ~path () ];
+        summary = summary_request;
+        threads_safe = true;
+      }
+    in
+    match Publication.Envelope.decode (encoded envelope) with
+    | Ok _ -> failf "%s: decode accepted path %s" msg path
+    | Error e -> (
+        let message = Publication.Error.message e in
+        match expect with
+        | None -> ()
+        | Some needle ->
+            if not (str_contains needle message) then
+              failf "%s: message %S does not name %S" msg message needle)
+  in
+  refuses ~msg:"dot-segment traversal" ~expect:"envelope.review[0].path"
+    "/repos/acme/widget/../../../orgs/evil/x";
+  refuses ~msg:"a lone dot segment" "/repos/acme/./widget";
+  refuses ~msg:"an empty segment" "/repos//widget";
+  refuses ~msg:"a trailing slash" "/repos/acme/widget/";
+  refuses ~msg:"a query cut" "/repos/acme/widget/pulls?per_page=1";
+  refuses ~msg:"a fragment cut" "/repos/acme/widget#f";
+  refuses ~msg:"a control byte" "/repos/acme/widget/\x1b[2Jpulls";
+  refuses ~msg:"a relative path" "repos/acme/widget";
+  match
+    Publication.Request.of_json ~context:"r"
+      (Publication.Request.to_json (sample_request ()))
+  with
+  | Ok read ->
+      equal string ~msg:"a conforming path survives"
+        "/repos/acme/widget/pulls/5/comments" read.Publication.Request.path
+  | Error e -> failf "of_json: %s" (Publication.Error.message e)
+
 (* Suite. *)
 
 let () =
@@ -809,4 +899,8 @@ let () =
       test "table cells escape pipes" table_cells_escape_pipes;
       test "a hostile path escapes in the summary row and permalink"
         hostile_path_escapes_in_the_summary;
+      test "the review envelope round-trips through its codec"
+        envelope_round_trips;
+      test "envelope decode refuses paths that could escape the repository"
+        envelope_refuses_hostile_paths;
     ]

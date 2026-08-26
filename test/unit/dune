@@ -376,26 +376,10 @@
  (modules test_user_dirs user_dirs)
  (libraries windtrap mentat_digest unix))
 
-; The GitHub REST client lives in bin/boot (executable-side adapter); its
-; HTTP effect is one injected closure, so its source is copied in and the
-; suite runs offline without linking the boot library's engine closure.
-
-(copy_files
- (files ../../bin/boot/github_api.{ml,mli}))
-
 (test
  (name test_github_api)
- (modules test_github_api github_api)
- (libraries
-  windtrap
-  jsont
-  jsont.bytesrw
-  cohttp
-  cohttp-eio
-  oauth2_eio
-  mentat_llm_http
-  uri
-  eio))
+ (modules test_github_api)
+ (libraries windtrap mentat_github jsont jsont.bytesrw))
 
 (test
  (name test_review_finding)
