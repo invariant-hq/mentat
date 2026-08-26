@@ -2593,7 +2593,7 @@ let submit_command (fixture : fixture) = function
         ~mode:(Option.value mode ~default:Session.Contract.Mode.Build)
         ~origin:Session.Turn.Origin.User;
       Ok ()
-  | Protocol.Command.Queue_next { session; input } ->
+  | Protocol.Command.Queue_next { session; input; _ } ->
       let entry =
         Session.Queue.Entry.make
           ~id:(mint_queue_id fixture.queue_runtime)

@@ -8,6 +8,7 @@ module Server = Mentat_server
 module Store = Mentat_store
 module Session = Mentat_session
 module Command = Mentat_protocol.Command
+module Driver = Mentat_client.Driver
 
 (* How long a settled child lingers before its clean exit, so a follow-up
    delivery landing just after settlement still finds a live server.
@@ -86,61 +87,79 @@ let resolve_edge store ~root child =
            (Session.Id.to_string parent)
            (Session.Delegation.Id.to_string delegation))
 
+(* One cached, stamp-elided, fence-free read of a session's durable head:
+   whether it is settled with an empty queue, and its recorded delegation
+   children. [None] when the stamp or the journal cannot be read —
+   outstanding work is presumed. The stamp elision means the polls built on
+   this decode a journal only when its persisted bytes have changed. *)
+let head_summary store cache child =
+  let id = Session.Id.to_string child in
+  match Store.Session.stamp store child with
+  | None -> None
+  | Some stamp -> (
+      match Hashtbl.find_opt cache id with
+      | Some (cached, settled, children) when String.equal cached stamp ->
+          Some (settled, children)
+      | Some _ | None -> (
+          match Store.Session.load store child with
+          | Error _ -> None
+          | Ok doc ->
+              let state = Session.state (Store.Session.Document.session doc) in
+              let settled =
+                Option.is_some (Session.State.settled_head state)
+                && Session.State.pending_queue state = []
+              in
+              let children =
+                List.map Session.Delegation.child
+                  (Session.State.delegations state)
+              in
+              Hashtbl.replace cache id (stamp, settled, children);
+              Some (settled, children)))
+
 (* The child idle predicate over durable heads, read fence-free so observation
    never contends with this process's own driver. It builds on the shared
    settled-head judgment ({!Mentat_session.State.settled_head}) and is
    deliberately stronger: the head must be settled, nothing may be queued, and
    every delegation edge the session recorded must name a session idle by the
-   same measure — exiting abandons no obligation. Reads are elided by the
-   document stamp, so the poll decodes a journal only when its persisted
-   bytes have changed. The [seen] set bounds the walk: ids are parent-minted,
-   so an uncorrupted tree is finite, and a corrupt journal naming an ancestor
-   edge must not recurse forever. *)
+   same measure — exiting abandons no obligation. The [seen] set bounds the
+   walk: ids are parent-minted, so an uncorrupted tree is finite, and a
+   corrupt journal naming an ancestor edge must not recurse forever. *)
 let idle store cache child =
   let rec go seen child =
     let id = Session.Id.to_string child in
     if Hashtbl.mem seen id then true
     else begin
       Hashtbl.replace seen id ();
-      let local =
-        match Store.Session.stamp store child with
-        | None -> None
-        | Some stamp -> (
-            match Hashtbl.find_opt cache id with
-            | Some (cached, settled, children) when String.equal cached stamp
-              ->
-                Some (settled, children)
-            | Some _ | None -> (
-                match Store.Session.load store child with
-                | Error _ -> None
-                | Ok doc ->
-                    let state =
-                      Session.state (Store.Session.Document.session doc)
-                    in
-                    let settled =
-                      Option.is_some (Session.State.settled_head state)
-                      && Session.State.pending_queue state = []
-                    in
-                    let children =
-                      List.map Session.Delegation.child
-                        (Session.State.delegations state)
-                    in
-                    Hashtbl.replace cache id (stamp, settled, children);
-                    Some (settled, children)))
-      in
-      match local with
+      match head_summary store cache child with
       | None -> false
       | Some (settled, children) -> settled && List.for_all (go seen) children
     end
   in
   go (Hashtbl.create 8) child
 
+(* Whether [target] lies in the served child's delegation subtree: [root]
+   itself, or a session reachable from it through recorded delegation edges.
+   Journal truth decides — an edge not yet durable is not yet served, and the
+   caller retries once it is. The [seen] set bounds the walk as [idle]'s
+   does. *)
+let member store cache ~root target =
+  let rec go seen id =
+    Session.Id.equal id target
+    || (not (Hashtbl.mem seen (Session.Id.to_string id))
+       && begin
+            Hashtbl.replace seen (Session.Id.to_string id) ();
+            match head_summary store cache id with
+            | None -> false
+            | Some (_, children) -> List.exists (go seen) children
+          end)
+  in
+  go (Hashtbl.create 8) root
+
 (* Stop once the child has been continuously idle — and every connection closed
    — for the linger window. A fresh boot on an unstarted child is never idle
    (no turn yet), so the watchdog cannot fire before the first-turn submit
    lands. *)
-let idle_watchdog clock ~linger store child active stop =
-  let cache = Hashtbl.create 8 in
+let idle_watchdog clock ~linger store cache child active stop =
   let idle_since = ref None in
   let rec loop () =
     Eio.Time.sleep clock 0.25;
@@ -155,6 +174,135 @@ let idle_watchdog clock ~linger store child active stop =
     if Stop_signal.requested stop then () else loop ()
   in
   loop ()
+
+(* The one-session confinement, making the man page's claim a code fact. The
+   session cone answers only for the served child's own delegation subtree —
+   the only sessions this process can speak for, and the only ones its two
+   legitimate peers (the daemon's broker and its child-routing proxy) ever ask
+   about; a foreign session id is refused, never resolved against the shared
+   store. Every other cone — accounts, settings, lifecycle, review, workspace
+   — is refused whole: this endpoint exists to drive one delegated session,
+   not to reach the user's accounts, configuration, or session index. *)
+let confined ~store ~cache ~child (driver : Driver.t) : Driver.t =
+  let foreign session =
+    Mentat_protocol.Error.unavailable
+      (Printf.sprintf "this server serves session %s and its delegation \
+                       subtree, not %s"
+         (Session.Id.to_string child)
+         (Session.Id.to_string session))
+  in
+  let admit session k =
+    if member store cache ~root:child session then k () else Error (foreign session)
+  in
+  let cone_refused () =
+    Error
+      (Mentat_protocol.Error.unavailable
+         "this server serves one delegated session; accounts, settings, \
+          lifecycle, review, and workspace operations belong to the daemon")
+  in
+  let s = driver.Driver.session in
+  let session : Driver.Session.t =
+    {
+      Driver.Session.submit =
+        (fun command ->
+          let session = Command.session command in
+          admit session (fun () -> s.Driver.Session.submit command));
+      follow =
+        (fun session ~from ->
+          admit session (fun () -> s.Driver.Session.follow session ~from));
+      answer_unattended =
+        (fun ~session ~decision ->
+          admit session (fun () ->
+              s.Driver.Session.answer_unattended ~session ~decision));
+      possibly_mutating =
+        (fun ~session ->
+          member store cache ~root:child session
+          && s.Driver.Session.possibly_mutating ~session);
+      faulted =
+        (fun ~session ->
+          if member store cache ~root:child session then
+            s.Driver.Session.faulted ~session
+          else None);
+      fork =
+        (fun ~session ~into ->
+          admit session (fun () -> s.Driver.Session.fork ~session ~into));
+      rewind =
+        (fun ~session ~into ~anchor ->
+          admit session (fun () ->
+              s.Driver.Session.rewind ~session ~into ~anchor));
+      compact =
+        (fun ~session ~turn ->
+          admit session (fun () -> s.Driver.Session.compact ~session ~turn));
+      pending_decision =
+        (fun session ->
+          admit session (fun () -> s.Driver.Session.pending_decision session));
+      running_processes =
+        (fun session ->
+          admit session (fun () -> s.Driver.Session.running_processes session));
+      change_diff =
+        (fun ~session ~change ->
+          admit session (fun () ->
+              s.Driver.Session.change_diff ~session ~change));
+      tail =
+        (fun ?n session ->
+          admit session (fun () -> s.Driver.Session.tail ?n session));
+      page =
+        (fun ?n session ~before ->
+          admit session (fun () -> s.Driver.Session.page ?n session ~before));
+      revert =
+        (fun ~session ~scope ->
+          admit session (fun () -> s.Driver.Session.revert ~session ~scope));
+      undo =
+        (fun ~session ~op ->
+          admit session (fun () -> s.Driver.Session.undo ~session ~op));
+      export =
+        (fun ~session ->
+          admit session (fun () -> s.Driver.Session.export ~session));
+    }
+  in
+  let accounts : Driver.Accounts.t =
+    {
+      Driver.Accounts.login = (fun ~provider:_ ~method_:_ -> cone_refused ());
+      save_api_key = (fun ~provider:_ ~key:_ -> cone_refused ());
+      logout = (fun ?revoke:_ _ -> cone_refused ());
+      account_readiness = (fun () -> cone_refused ());
+      model_readiness = (fun ?refresh:_ () -> cone_refused ());
+    }
+  in
+  let settings : Driver.Settings.t =
+    {
+      Driver.Settings.set_model =
+        (fun ~session:_ ?reasoning_effort:_ _ -> cone_refused ());
+      set_permission_review = (fun ~session:_ _ -> cone_refused ());
+      configuration = (fun () -> cone_refused ());
+      set_default_model = (fun ?reasoning_effort:_ _ -> cone_refused ());
+      set_ui_theme = (fun ~theme:_ -> cone_refused ());
+    }
+  in
+  let lifecycle : Driver.Lifecycle.t =
+    {
+      Driver.Lifecycle.create = (fun ~id:_ ~title:_ -> cone_refused ());
+      rename = (fun ~session:_ ~title:_ -> cone_refused ());
+      archive = (fun ~session:_ -> cone_refused ());
+      restore = (fun ~session:_ -> cone_refused ());
+      delete = (fun ~session:_ -> cone_refused ());
+      sessions = (fun ~listing:_ -> cone_refused ());
+      session = (fun _ -> cone_refused ());
+    }
+  in
+  let review : Driver.Review.t =
+    {
+      Driver.Review.apply = (fun _ -> cone_refused ());
+      state = (fun ~scope:_ -> cone_refused ());
+      diff = (fun ~path:_ -> cone_refused ());
+      crs = (fun () -> cone_refused ());
+      compose = (fun _ -> cone_refused ());
+    }
+  in
+  let workspace : Driver.Workspace.t =
+    { Driver.Workspace.glance = (fun () -> cone_refused ()) }
+  in
+  { Driver.session; accounts; settings; lifecycle; review; workspace }
 
 (* One session, one workspace: a handshake binds only this instance's root, and
    the offered environment is ignored — the instance keeps the environment it
@@ -196,7 +344,8 @@ let ensure_socket_parents dir =
 let remove_socket dir =
   Server.Bind.remove_endpoint ~dir:(Lpath.Abs.of_string_exn dir)
 
-let serve_run ~session ~socket_dir_override ~spawned ~cwd ~bound_socket_dir =
+let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
+    ~bound_socket_dir =
   Eio_main.run @@ fun stdenv ->
   Eio.Switch.run @@ fun sw ->
   match Composition.stage_shared ~stdenv ~sw () with
@@ -219,6 +368,11 @@ let serve_run ~session ~socket_dir_override ~spawned ~cwd ~bound_socket_dir =
               match Composition.driver instance with
               | Error status -> status
               | Ok driver ->
+                  (* One durable-head cache behind both consumers of the
+                     subtree walk — the idle watchdog and the confinement's
+                     membership — so each journal decodes once per stamp. *)
+                  let heads = Hashtbl.create 8 in
+                  let driver = confined ~store ~cache:heads ~child driver in
                   let socket_dir =
                     match socket_dir_override with
                     | Some dir -> dir
@@ -256,6 +410,7 @@ let serve_run ~session ~socket_dir_override ~spawned ~cwd ~bound_socket_dir =
                   let turn =
                     Mentat_agent.child_first_turn (Session.Delegation.id edge)
                   in
+                  let cone = driver.Driver.session in
                   let submit =
                     match
                       Command.prompt ~session:child ~turn
@@ -263,10 +418,7 @@ let serve_run ~session ~socket_dir_override ~spawned ~cwd ~bound_socket_dir =
                     with
                     | Error invalid -> Error (Command.Invalid.message invalid)
                     | Ok command -> (
-                        let cone = driver.Mentat_client.Driver.session in
-                        match
-                          cone.Mentat_client.Driver.Session.submit command
-                        with
+                        match cone.Driver.Session.submit command with
                         | Ok () -> Ok ()
                         | Error e ->
                             Error
@@ -278,6 +430,23 @@ let serve_run ~session ~socket_dir_override ~spawned ~cwd ~bound_socket_dir =
                         (Printf.sprintf "session %s: first turn: %s" session
                            message)
                   | Ok () ->
+                      (* A carried interrupt intent (a cancelled child killed
+                         at the escalation's final rung and re-materialized):
+                         interrupt right behind the idempotent first-turn
+                         submit, before the recovered work gets anywhere, so
+                         the journal ends in its own terminal interrupted
+                         fact. On a child that already settled, or never
+                         started a turn the prompt admission refused, the
+                         interrupt finds no active turn and is refused —
+                         exactly the no-op it should be. *)
+                      (if interrupted then
+                         match
+                           Command.interrupt ~session:child
+                             ~reason:"parent interrupted" ()
+                         with
+                         | Error _ -> ()
+                         | Ok command ->
+                             ignore (cone.Driver.Session.submit command));
                       (* The shared stop seam: a first SIGTERM/SIGINT requests
                          a graceful stop; a second — while a wedged teardown
                          holds — forces immediate exit and the OS releases
@@ -308,8 +477,8 @@ let serve_run ~session ~socket_dir_override ~spawned ~cwd ~bound_socket_dir =
                                   listener);
                               (fun () -> Stop_signal.wait ~clock stop);
                               (fun () ->
-                                idle_watchdog clock ~linger store child active
-                                  stop);
+                                idle_watchdog clock ~linger store heads child
+                                  active stop);
                             ];
                           (* Durable-first close; the endpoint itself is
                              removed by {!serve} once the Eio run — whose
@@ -318,13 +487,14 @@ let serve_run ~session ~socket_dir_override ~spawned ~cwd ~bound_socket_dir =
                           Composition.shutdown instance);
                       Exit_status.Success))))
 
-let serve ~session ~socket_dir_override ~spawned ~cwd =
+let serve ~session ~socket_dir_override ~spawned ~interrupted ~cwd =
   if String.length session = 0 then
     Exit_status.usage "serve-session requires a non-empty --session id"
   else (
     let bound_socket_dir = ref None in
     let status =
-      serve_run ~session ~socket_dir_override ~spawned ~cwd ~bound_socket_dir
+      serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
+        ~bound_socket_dir
     in
     (* A gone socket directory is the visible sign of a cleanly exited child. *)
     Option.iter remove_socket !bound_socket_dir;
@@ -356,6 +526,17 @@ let spawned_flag =
            $(b,setsid) at startup to survive its spawner. Set by the broker; \
            not for direct use.")
 
+let interrupted_flag =
+  Arg.(
+    value & flag
+    & info [ "interrupted" ]
+        ~doc:
+          "Internal: carry a standing interrupt intent across the spawn — the \
+           boot submits an interrupt right after its idempotent first-turn \
+           submit, so a cancelled child re-materialized after a kill mints \
+           its terminal interrupted fact instead of resuming the cancelled \
+           work. Set by the broker; not for direct use.")
+
 let man =
   [
     `S "DESCRIPTION";
@@ -372,6 +553,11 @@ let man =
        while the work runs, and exits cleanly once the session has settled \
        idle with an empty queue, after a short linger for follow-up \
        deliveries.";
+    `P
+      "The endpoint is confined to its one purpose: the session cone answers \
+       only for the served session and its own delegation subtree, and the \
+       accounts, settings, lifecycle, review, and workspace cones are \
+       refused whole.";
   ]
 
 let cmd =
@@ -382,6 +568,7 @@ let cmd =
     (Cmd.info "serve-session" ~doc ~man ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
-         const (fun session socket_dir_override spawned cwd ->
-             serve ~session ~socket_dir_override ~spawned ~cwd)
-         $ session_opt $ socket_dir_opt $ spawned_flag $ Cli_common.cwd))
+         const (fun session socket_dir_override spawned interrupted cwd ->
+             serve ~session ~socket_dir_override ~spawned ~interrupted ~cwd)
+         $ session_opt $ socket_dir_opt $ spawned_flag $ interrupted_flag
+         $ Cli_common.cwd))

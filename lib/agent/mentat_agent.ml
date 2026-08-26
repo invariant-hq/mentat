@@ -582,7 +582,18 @@ and rebuild_children t ~parent session =
    entry of that id, deduplicated against the child journal's [Enqueued] facts
    (a consumed entry's fact persists; the session's own [Queue.Duplicate]
    rejection covers only the still-pending window). A delivery this leg drops
-   is re-driven by the next attach's recovery scan. *)
+   is re-driven by the next attach's recovery scan.
+
+   Under [Brokered], a child this runtime does not drive is the broker's
+   first: while it holds the child — a live process, or one still booting —
+   the message crosses the wire and lands in the running driver, kinds and
+   fallbacks exactly as in-process ([`Follow_up] prompts, a refusal parks the
+   derived-id queue entry). Only [`Gone] — the broker holds no
+   materialization, so the child settled and exited or never crossed the seam
+   — falls back to attaching here: the fence is free, and this is the same
+   in-process delivery the exit-time and attach-time re-drives perform. An
+   attach against a fence some other process holds stays a silent drop, as
+   ever covered by the durable receipt. *)
 and deliver_child_message t ~edges
     (message : Mentat_agent_step.Step.Child_message.t) =
   let { Mentat_agent_step.Step.Child_message.kind; child; message = text; _ } =
@@ -599,42 +610,78 @@ and deliver_child_message t ~edges
   | None -> ()
   | Some edge -> (
       let child_session = Mentat_session.Delegation.child edge in
-      match attach t child_session with
-      | Error _ -> ()
-      | Ok driver -> (
-          let derived = derived_message_id message in
-          let enqueue () =
-            ignore
-              (Driver.enqueue driver
-                 (Mentat_session.Queue.Entry.make
-                    ~id:(Mentat_session.Queue.Id.of_string derived)
-                    ~input:[ Mentat_llm.Content.text text ]))
-          in
-          match kind with
-          | `Context -> Eio.Fiber.fork ~sw:t.sw (fun () -> enqueue ())
-          | `Follow_up -> (
-              match
-                Mentat_protocol.Command.prompt ~session:child_session
-                  ~turn:(Mentat_session.Turn.Id.of_string derived)
-                  ~input:[ Mentat_llm.Content.text text ]
-                  ()
-              with
-              | Error _ -> ()
-              | Ok command ->
-                  Eio.Fiber.fork ~sw:t.sw (fun () ->
-                      match Driver.submit driver command with
-                      | Ok () -> ()
-                      | Error _ ->
-                          (* The immediate turn did not take: a busy child
-                             ([Active_turn_exists]) admits the parked entry at
-                             its next idle boundary; a faulted or shutting-down
-                             child ([Unavailable]) leaves the parent's durable
-                             receipt to re-drive it on the next attach. The
-                             receipt already promised delivery, so no submit
-                             error may drop the message on the floor. The queue
-                             entry carries the same derived id, so this park is
-                             idempotent with that recovery. *)
-                          enqueue ()))))
+      let derived = derived_message_id message in
+      let input = [ Mentat_llm.Content.text text ] in
+      let deliver_in_process () =
+        match attach t child_session with
+        | Error _ -> ()
+        | Ok driver -> (
+            let enqueue () =
+              ignore
+                (Driver.enqueue driver
+                   (Mentat_session.Queue.Entry.make
+                      ~id:(Mentat_session.Queue.Id.of_string derived)
+                      ~input))
+            in
+            match kind with
+            | `Context -> Eio.Fiber.fork ~sw:t.sw (fun () -> enqueue ())
+            | `Follow_up -> (
+                match
+                  Mentat_protocol.Command.prompt ~session:child_session
+                    ~turn:(Mentat_session.Turn.Id.of_string derived)
+                    ~input ()
+                with
+                | Error _ -> ()
+                | Ok command ->
+                    Eio.Fiber.fork ~sw:t.sw (fun () ->
+                        match Driver.submit driver command with
+                        | Ok () -> ()
+                        | Error _ ->
+                            (* The immediate turn did not take: a busy child
+                               ([Active_turn_exists]) admits the parked entry at
+                               its next idle boundary; a faulted or shutting-down
+                               child ([Unavailable]) leaves the parent's durable
+                               receipt to re-drive it on the next attach. The
+                               receipt already promised delivery, so no submit
+                               error may drop the message on the floor. The queue
+                               entry carries the same derived id, so this park is
+                               idempotent with that recovery. *)
+                            enqueue ())))
+      in
+      match t.child_backend with
+      | Ports.In_process -> deliver_in_process ()
+      | Ports.Brokered ops ->
+          if Option.is_some (find_driver t child_session) then
+            deliver_in_process ()
+          else
+            Eio.Fiber.fork ~sw:t.sw (fun () ->
+                let queued () =
+                  match
+                    Mentat_protocol.Command.queue_next
+                      ~id:(Mentat_session.Queue.Id.of_string derived)
+                      ~session:child_session ~input ()
+                  with
+                  | Error _ -> `Refused
+                  | Ok command -> ops.Ports.deliver ~command
+                in
+                let wire =
+                  match kind with
+                  | `Context -> queued ()
+                  | `Follow_up -> (
+                      match
+                        Mentat_protocol.Command.prompt ~session:child_session
+                          ~turn:(Mentat_session.Turn.Id.of_string derived)
+                          ~input ()
+                      with
+                      | Error _ -> `Delivered (* malformed: mirror the drop *)
+                      | Ok command -> (
+                          match ops.Ports.deliver ~command with
+                          | `Refused -> queued ()
+                          | (`Delivered | `Gone) as outcome -> outcome))
+                in
+                match wire with
+                | `Delivered | `Refused -> ()
+                | `Gone -> deliver_in_process ()))
 
 (* Recovery's message re-drive (the idempotent pattern): a settled receipt
    whose derived id reached neither a child turn nor a child queue fact was

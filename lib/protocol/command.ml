@@ -69,6 +69,7 @@ type t =
   | Interrupt of { session : Mentat_session.Id.t; reason : string option }
   | Queue_next of {
       session : Mentat_session.Id.t;
+      id : Mentat_session.Queue.Id.t option;
       input : Mentat_llm.Content.t list;
     }
   | Replace_queued of {
@@ -117,9 +118,9 @@ let interrupt ~session ?reason () =
       Error Invalid.Empty_interrupt_reason
   | Some _ | None -> Ok (Interrupt { session; reason })
 
-let queue_next ~session ~input =
+let queue_next ?id ~session ~input () =
   if List.is_empty input then Error Invalid.Empty_queue_input
-  else Ok (Queue_next { session; input })
+  else Ok (Queue_next { session; id; input })
 
 let replace_queued ~session ~inputs =
   let rec first_empty index = function
@@ -236,20 +237,21 @@ let jsont =
     |> Jsont.Object.error_unknown |> Jsont.Object.finish
     |> Jsont.Object.Case.map "interrupt" ~dec:Fun.id
   in
-  let queue_case kind tag make proj =
-    Jsont.Object.map ~kind (fun session input ->
-        decode_result (make ~session ~input))
-    |> Jsont.Object.mem "session" Mentat_session.Id.jsont ~enc:(fun t ->
-        fst (proj t))
-    |> Jsont.Object.mem "input" (Jsont.list Mentat_llm.Content.jsont)
-         ~enc:(fun t -> snd (proj t))
-    |> Jsont.Object.error_unknown |> Jsont.Object.finish
-    |> Jsont.Object.Case.map tag ~dec:Fun.id
-  in
   let queue_next_case =
-    queue_case "queue-next command" "queue_next" queue_next (function
-      | Queue_next { session; input } -> (session, input)
+    Jsont.Object.map ~kind:"queue-next command" (fun session id input ->
+        decode_result (queue_next ?id ~session ~input ()))
+    |> Jsont.Object.mem "session" Mentat_session.Id.jsont ~enc:(function
+      | Queue_next { session; _ } -> session
       | _ -> assert false)
+    |> Jsont.Object.opt_mem "id" Mentat_session.Queue.Id.jsont ~enc:(function
+      | Queue_next { id; _ } -> id
+      | _ -> assert false)
+    |> Jsont.Object.mem "input" (Jsont.list Mentat_llm.Content.jsont)
+         ~enc:(function
+         | Queue_next { input; _ } -> input
+         | _ -> assert false)
+    |> Jsont.Object.error_unknown |> Jsont.Object.finish
+    |> Jsont.Object.Case.map "queue_next" ~dec:Fun.id
   in
   let replace_queued_case =
     Jsont.Object.map ~kind:"replace-queued command" (fun session inputs ->

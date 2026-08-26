@@ -18,14 +18,14 @@ let log_path dirs ~session =
     (Printf.sprintf "child-%s.log"
        (Filename.basename (User_dirs.child_socket_dir dirs ~session)))
 
-let spawn dirs ~environment ~session ~cwd =
+let spawn dirs ~environment ~session ~interrupted ~cwd =
   match resolve_mentat () with
   | Error _ as e -> e
   | Ok bin ->
       Daemon.ensure_daemon_dir dirs;
       let session = Mentat_session.Id.to_string session in
       let argv =
-        [|
+        [
           "mentat";
           "serve-session";
           "--session";
@@ -33,8 +33,10 @@ let spawn dirs ~environment ~session ~cwd =
           "--cwd";
           Lpath.Abs.to_string cwd;
           "--spawned";
-        |]
+        ]
+        @ (if interrupted then [ "--interrupted" ] else [])
       in
+      let argv = Array.of_list argv in
       (* Identity only crosses the spawn: the child re-reads its task and role
          from the durable delegation edge. The environment is the instance's
          snapshot — the shell that asked for the run — rendered whole, so the

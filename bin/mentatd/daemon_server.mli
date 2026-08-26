@@ -26,7 +26,11 @@ val serve :
     overridden by [socket_override] = the [--socket] flag), writes [daemon.json]
     atomically, and serves. The registry get-or-boots a workspace instance per
     connection and hands the wire a composite driver whose session-cone calls
-    route by session id to the owning instance, evicting idle instances by the
+    route by session id: a delegated child whose derived endpoint answers a
+    handshake is proxied to the live driver in its own server — the
+    session-keyed child arm; a followed child feed is a live tail whose
+    connection lives only as long as the caller's own — and every other
+    session reaches its owning instance, with idle instances evicted by the
     three-zeros rule.
 
     [web] additionally binds a loopback listener serving the [mentat.web]

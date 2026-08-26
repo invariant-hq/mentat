@@ -1584,7 +1584,7 @@ let all_commands =
     ( "queue_next",
       ok_or "queue_next"
         (Protocol.Command.queue_next ~session:fix_session_id
-           ~input:[ Llm.Content.text "Next." ]) );
+           ~input:[ Llm.Content.text "Next." ] ()) );
     ( "replace_queued",
       ok_or "replace_queued"
         (Protocol.Command.replace_queued ~session:fix_session_id
@@ -1849,6 +1849,22 @@ let command_codec_group =
               equal command_value ~msg:(tag ^ ": round-trip") command
                 (decode Protocol.Command.jsont json))
             all_commands);
+      test "queue_next round-trips its client-minted id" (fun () ->
+          (* The optional [id] member: present it survives the round trip
+             (the delivery paths' idempotency key), absent it stays absent —
+             the corpus entry above pins the id-less shape. *)
+          let command =
+            ok_or "queue_next with id"
+              (Protocol.Command.queue_next
+                 ~id:(Session.Queue.Id.of_string "q-derived")
+                 ~session:fix_session_id
+                 ~input:[ Llm.Content.text "Next." ]
+                 ())
+          in
+          let json = encode Protocol.Command.jsont command in
+          assert_v_and_tag ~msg:"queue_next with id" "queue_next" json;
+          equal command_value ~msg:"queue_next with id: round-trip" command
+            (decode Protocol.Command.jsont json));
       test "retired goal vocabulary is a loud decode error" (fun () ->
           (* Goals were retired outright: the tags never decode again, and a
              payload that carries them stops loading rather than being
@@ -2001,7 +2017,7 @@ let command_parity_group =
       test "queue_next rejects empty input" (fun () ->
           parity ~msg:"empty queue input"
             ~constructor:(fun () ->
-              Protocol.Command.queue_next ~session:fix_session_id ~input:[])
+              Protocol.Command.queue_next ~session:fix_session_id ~input:[] ())
             ~tag:"queue_next"
             ~corrupt:(set_member "input" (json_array [])));
       test "replace_queued rejects an empty replacement" (fun () ->

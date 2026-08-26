@@ -268,25 +268,37 @@ let ladder_foreign t entry pid =
     await_free 0.
   end
 
+(* One bounded, short-lived wire submission over the child's endpoint: its own
+   switch, one connect, one submit, everything torn down before returning — a
+   delivery must never pin the child's connection count. [`Unreachable] is a
+   transport that never answered: a refused connect, or the whole exchange
+   outrunning the grace bound — a frozen child must not park the calling fiber
+   (the escalation ladder's signals, not a longer wait, are the remedy there). *)
+let submit_wire t entry command =
+  match
+    Eio.Time.with_timeout (clock t) grace_s @@ fun () ->
+    Eio.Switch.run @@ fun sw ->
+    match connect_child t entry ~sw with
+    | Error _ -> Ok `Unreachable
+    | Ok driver -> (
+        match
+          driver.Client.Driver.session.Client.Driver.Session.submit command
+        with
+        | Ok () -> Ok `Submitted
+        | Error _ -> Ok `Refused)
+  with
+  | Ok outcome -> outcome
+  | Error `Timeout -> `Unreachable
+  | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
+  | exception _ -> `Unreachable
+
 (* Best-effort semantic interrupt over the child's endpoint. *)
 let wire_interrupt t entry =
   match
     Command.interrupt ~session:entry.child ~reason:"parent interrupted" ()
   with
   | Error _ -> ()
-  | Ok command -> (
-      match
-        Eio.Switch.run @@ fun sw ->
-        match connect_child t entry ~sw with
-        | Error _ -> ()
-        | Ok driver ->
-            ignore
-              (driver.Client.Driver.session.Client.Driver.Session.submit
-                 command)
-      with
-      | () -> ()
-      | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
-      | exception _ -> ())
+  | Ok command -> ignore (submit_wire t entry command)
 
 (* One connect-and-follow pass over the child's feed, ending — connection and
    all — as soon as one settlement has integrated: the child's server lingers
@@ -420,7 +432,7 @@ and spawn_child t entry =
   match
     Child_spawn.spawn t.shared.Composition.dirs
       ~environment:(Composition.environment entry.instance)
-      ~session:entry.child
+      ~session:entry.child ~interrupted:entry.cancelled
       ~cwd:(Composition.root entry.instance)
   with
   | Error message -> give_up t entry message
@@ -577,9 +589,36 @@ let cancel t ~child =
                 | `Held (Some pid) -> ignore (ladder_foreign t entry pid)
                 | `Free | `Held_self | `Held None | `Io _ -> ()))
 
+(* Wire delivery of a parent-recorded message to a child this broker holds.
+   The command carries its own derived idempotency ids, so a repeat is
+   harmless; each attempt re-reads the table, so a superseded entry rebinds to
+   its successor and a removed one answers [`Gone] — the engine's in-process
+   story. A held entry whose endpoint does not answer yet (a booting child) is
+   retried within the boot budget; past it the delivery is refused and the
+   parent's durable receipt re-drives it at the child's exit. *)
+let deliver t ~command =
+  let child = Command.session command in
+  let rec attempt elapsed =
+    match Hashtbl.find_opt t.entries (key child) with
+    | None -> `Gone
+    | Some _ when t.stopped -> `Refused
+    | Some entry -> (
+        match submit_wire t entry command with
+        | `Submitted -> `Delivered
+        | `Refused -> `Refused
+        | `Unreachable ->
+            if elapsed >= boot_wait_s then `Refused
+            else begin
+              sleep t 0.25;
+              attempt (elapsed +. 0.25)
+            end)
+  in
+  attempt 0.
+
 let ops t instance =
   {
     Mentat_agent.Ports.materialize = (fun ~child -> materialize t instance ~child);
+    deliver = (fun ~command -> deliver t ~command);
     cancel = (fun ~child -> cancel t ~child);
   }
 

@@ -119,6 +119,14 @@ type t = private
   | Interrupt of { session : Mentat_session.Id.t; reason : string option }
   | Queue_next of {
       session : Mentat_session.Id.t;
+      id : Mentat_session.Queue.Id.t option;
+          (** An optional client-minted entry id. When present, the engine
+              records the entry under it and an entry already recorded under it
+              — pending or consumed — makes the resubmission an idempotent
+              [Ok]; absent, the engine mints a position-keyed id, so identical
+              inputs stay distinct entries. Carried by delivery paths whose
+              at-least-once re-drives must not duplicate the entry (a parent's
+              recorded child message, delivered over the wire). *)
       input : Mentat_llm.Content.t list;
     }
   | Replace_queued of {
@@ -165,11 +173,14 @@ val interrupt :
 *)
 
 val queue_next :
+  ?id:Mentat_session.Queue.Id.t ->
   session:Mentat_session.Id.t ->
   input:Mentat_llm.Content.t list ->
+  unit ->
   (t, Invalid.t) result
-(** [queue_next ~session ~input] appends [input] to the next-turn queue, or
-    {!Invalid.Empty_queue_input} if [input] is empty. *)
+(** [queue_next ?id ~session ~input ()] appends [input] to the next-turn queue,
+    or {!Invalid.Empty_queue_input} if [input] is empty. [id] is the optional
+    client-minted entry id; see {!Queue_next}. *)
 
 val replace_queued :
   session:Mentat_session.Id.t ->

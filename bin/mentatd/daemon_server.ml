@@ -213,6 +213,112 @@ let route_session registry ~environment session ~on_error f =
               sweep registry)
             (fun () -> f entry.driver))
 
+(* The session-keyed child arm — RFC 0018's registration rule made literal: a
+   delegated child's endpoint is derived from its session id, so "registered"
+   means "the socket answers a handshake". A session-cone call routed here
+   reaches the live driver inside the child's own server — a live tail, a
+   Busy that tells the truth — instead of the frozen fence-free view the
+   root-keyed lookup would resolve (the child's recorded cwd is its parent's,
+   so that lookup lands on the parent's instance, which drives no child).
+   Only the session cone routes here: the lifecycle and settings writes keep
+   their owner-instance routing (the child server refuses those cones), and a
+   grandchild — delegated by a brokered child and driven in-process inside
+   that child's server — answers no endpoint of its own and falls through to
+   the root-keyed view. *)
+let child_endpoint registry session =
+  match Store.Session.load registry.store session with
+  | Error _ -> None
+  | Ok doc -> (
+      let metadata =
+        Session.metadata (Store.Session.Document.session doc)
+      in
+      match Session.Metadata.delegated_from metadata with
+      | None -> None
+      | Some _ ->
+          let dir =
+            User_dirs.child_socket_dir registry.shared.Composition.dirs
+              ~session:(Session.Id.to_string session)
+          in
+          Some
+            ( Lpath.Abs.of_string_exn dir,
+              Lpath.Abs.to_string (Session.Metadata.cwd metadata) ))
+
+(* One handshaked connection to a child endpoint, bounded so a wedged child
+   costs the caller a short probe, not a park: an endpoint that does not
+   answer within the bound is treated as absent and the caller falls back. *)
+let connect_child registry ~sw (dir, root) =
+  let stdenv = registry.shared.Composition.stdenv in
+  match
+    Eio.Time.with_timeout (Eio.Stdenv.clock stdenv) 2.0 @@ fun () ->
+    Ok
+      (Server.connect ~sw ~net:(Eio.Stdenv.net stdenv)
+         ~clock:(Eio.Stdenv.clock stdenv) ~workspace:root
+         (Server.Bind.unix ~dir))
+  with
+  | Ok (Ok driver) -> Some driver
+  | Ok (Error _) | Error `Timeout -> None
+  | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
+  | exception _ -> None
+
+(* A single-shot session-cone call against a live child endpoint, falling back
+   to the ordinary root-keyed routing when the session is not a delegated
+   child or its endpoint does not answer. The connection lives exactly as long
+   as the call — a delivery-shaped exchange, never a held stream. *)
+let route_child_session registry ~environment session ~on_error f =
+  let fallback () = route_session registry ~environment session ~on_error f in
+  match child_endpoint registry session with
+  | None -> fallback ()
+  | Some target -> (
+      match
+        Eio.Switch.run @@ fun sw ->
+        match connect_child registry ~sw target with
+        | None -> None
+        | Some driver -> Some (f driver)
+      with
+      | Some result -> result
+      | None -> fallback ()
+      | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
+      | exception _ ->
+          on_error
+            (Error.unavailable "the child session's server failed mid-call"))
+
+(* A followed child feed must outlive its routing call: the connection is held
+   open by a fiber under the registry's switch and torn down when the seam
+   closes — the wire layer releases a mid-stream disconnect's seam promptly,
+   so the child's connection never outlives the caller's own, and a child
+   that exits mid-stream surfaces as the seam's own error, never a hang.
+   [None] — no endpoint answered — sends the caller to the root-keyed view. *)
+let follow_child registry target session ~from =
+  let ready, set_ready = Eio.Promise.create () in
+  Eio.Fiber.fork ~sw:registry.parent_sw (fun () ->
+      try
+        Eio.Switch.run @@ fun sw ->
+        match connect_child registry ~sw target with
+        | None -> ignore (Eio.Promise.try_resolve set_ready None)
+        | Some driver -> (
+            match
+              driver.Driver.session.Driver.Session.follow session ~from
+            with
+            | Error _ as refused ->
+                ignore (Eio.Promise.try_resolve set_ready (Some refused))
+            | Ok seam ->
+                let closed, set_closed = Eio.Promise.create () in
+                let wrapped =
+                  {
+                    Client.Feed.next = seam.Client.Feed.next;
+                    close =
+                      (fun () ->
+                        seam.Client.Feed.close ();
+                        ignore (Eio.Promise.try_resolve set_closed ()));
+                  }
+                in
+                ignore (Eio.Promise.try_resolve set_ready (Some (Ok wrapped)));
+                Eio.Promise.await closed)
+      with
+      | Eio.Cancel.Cancelled _ as exn -> raise exn
+      | _ -> ignore (Eio.Promise.try_resolve set_ready None));
+  Eio.Promise.await ready
+
 (* The composite driver a connection binds to: the Global cones come from
    the bound instance's driver; every session-carrying call — the session cone,
    and the lifecycle and settings entries labelled [~session] — routes per call
@@ -226,91 +332,104 @@ let composite_driver registry ~environment (bound : Driver.t) : Driver.t =
   let route_session registry session ~on_error f =
     route_session registry ~environment session ~on_error f
   in
+  (* The session cone tries the session-keyed child arm first; the follow
+     entry routes through the stream-holding variant of the same arm. *)
+  let route_live registry session ~on_error f =
+    route_child_session registry ~environment session ~on_error f
+  in
   let session : Driver.Session.t =
     {
       Driver.Session.submit =
         (fun command ->
-          route_session registry (Command.session command)
+          route_live registry (Command.session command)
             ~on_error:(fun e -> Error e)
             (fun d -> d.Driver.session.Driver.Session.submit command));
       follow =
         (fun session ~from ->
-          route_session registry session
-            ~on_error:(fun e -> Error e)
-            (fun d -> d.Driver.session.Driver.Session.follow session ~from));
+          let fallback () =
+            route_session registry session
+              ~on_error:(fun e -> Error e)
+              (fun d -> d.Driver.session.Driver.Session.follow session ~from)
+          in
+          match child_endpoint registry session with
+          | None -> fallback ()
+          | Some target -> (
+              match follow_child registry target session ~from with
+              | Some result -> result
+              | None -> fallback ()));
       answer_unattended =
         (fun ~session ~decision ->
-          route_session registry session
+          route_live registry session
             ~on_error:(fun e -> Error e)
             (fun d ->
               d.Driver.session.Driver.Session.answer_unattended ~session
                 ~decision));
       possibly_mutating =
         (fun ~session ->
-          route_session registry session
+          route_live registry session
             ~on_error:(fun _ -> false)
             (fun d ->
               d.Driver.session.Driver.Session.possibly_mutating ~session));
       faulted =
         (fun ~session ->
-          route_session registry session
+          route_live registry session
             ~on_error:(fun _ -> None)
             (fun d -> d.Driver.session.Driver.Session.faulted ~session));
       fork =
         (fun ~session ~into ->
-          route_session registry session
+          route_live registry session
             ~on_error:(fun e -> Error e)
             (fun d -> d.Driver.session.Driver.Session.fork ~session ~into));
       rewind =
         (fun ~session ~into ~anchor ->
-          route_session registry session
+          route_live registry session
             ~on_error:(fun e -> Error e)
             (fun d ->
               d.Driver.session.Driver.Session.rewind ~session ~into ~anchor));
       compact =
         (fun ~session ~turn ->
-          route_session registry session
+          route_live registry session
             ~on_error:(fun e -> Error e)
             (fun d -> d.Driver.session.Driver.Session.compact ~session ~turn));
       pending_decision =
         (fun session ->
-          route_session registry session
+          route_live registry session
             ~on_error:(fun e -> Error e)
             (fun d -> d.Driver.session.Driver.Session.pending_decision session));
       change_diff =
         (fun ~session ~change ->
-          route_session registry session
+          route_live registry session
             ~on_error:(fun e -> Error e)
             (fun d ->
               d.Driver.session.Driver.Session.change_diff ~session ~change));
       tail =
         (fun ?n session ->
-          route_session registry session
+          route_live registry session
             ~on_error:(fun e -> Error e)
             (fun d -> d.Driver.session.Driver.Session.tail ?n session));
       page =
         (fun ?n session ~before ->
-          route_session registry session
+          route_live registry session
             ~on_error:(fun e -> Error e)
             (fun d -> d.Driver.session.Driver.Session.page ?n session ~before));
       running_processes =
         (fun session ->
-          route_session registry session
+          route_live registry session
             ~on_error:(fun e -> Error e)
             (fun d -> d.Driver.session.Driver.Session.running_processes session));
       revert =
         (fun ~session ~scope ->
-          route_session registry session
+          route_live registry session
             ~on_error:(fun e -> Error e)
             (fun d -> d.Driver.session.Driver.Session.revert ~session ~scope));
       undo =
         (fun ~session ~op ->
-          route_session registry session
+          route_live registry session
             ~on_error:(fun e -> Error e)
             (fun d -> d.Driver.session.Driver.Session.undo ~session ~op));
       export =
         (fun ~session ->
-          route_session registry session
+          route_live registry session
             ~on_error:(fun e -> Error e)
             (fun d -> d.Driver.session.Driver.Session.export ~session));
     }

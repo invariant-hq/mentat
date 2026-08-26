@@ -2504,7 +2504,7 @@ let a_queue_entry_is_admitted_at_the_idle_boundary () =
       let cmd =
         match
           Protocol.Command.queue_next ~session:(sid "root")
-            ~input:[ Llm.Content.text "later" ]
+            ~input:[ Llm.Content.text "later" ] ()
         with
         | Ok c -> c
         | Error e -> failf "queue_next: %s" (Protocol.Command.Invalid.message e)
@@ -2598,7 +2598,7 @@ let an_interrupt_admits_the_queued_correction () =
       let correction =
         match
           Protocol.Command.queue_next ~session:(sid "root")
-            ~input:[ Llm.Content.text "correct now" ]
+            ~input:[ Llm.Content.text "correct now" ] ()
         with
         | Ok command -> command
         | Error error ->
@@ -4128,7 +4128,7 @@ let a_raising_admission_faults_only_its_own_driver () =
          idle-boundary admission (outside [handle_any]'s guard). *)
       (match
          Protocol.Command.queue_next ~session:(sid "root")
-           ~input:[ Llm.Content.text "PLEASE_SPAWN" ]
+           ~input:[ Llm.Content.text "PLEASE_SPAWN" ] ()
        with
       | Ok c -> submit_ok client c
       | Error e -> failf "queue_next: %s" (Protocol.Command.Invalid.message e));
@@ -4645,11 +4645,12 @@ let an_observation_made_while_waiting_reaches_the_parent () =
    the out-of-process child server (the exact serve-session topology — shared
    journals, separate runtimes), and the seam calls play the observer. *)
 
-let brokered_spy () =
+let brokered_spy ?(deliver = fun ~command:_ -> `Gone) () =
   let materialized = ref [] in
   let ops =
     {
       Ports.materialize = (fun ~child -> materialized := child :: !materialized);
+      deliver;
       cancel = (fun ~child:_ -> ());
     }
   in
@@ -4838,6 +4839,148 @@ let a_reaped_brokered_child_releases_capacity () =
         (List.length (children ()));
       equal Testable.int ~msg:"the next spawn was handed over" 2
         (List.length !materialized))
+
+(* The parent journey behind the delivery-seam tests: spawn, then one
+   [send_message] and/or [follow_up] addressed by the receipt handle, then
+   done. Parent requests carry "PLEASE_SPAWN" for the turn's life. *)
+let message_script ~verbs =
+  let child_id = ref None in
+  let step = ref 0 in
+  Ports.script @@ fun request ->
+  if request_contains request "PLEASE_SPAWN" then begin
+    (match !child_id with
+    | Some _ -> ()
+    | None -> child_id := receipt_child_of request);
+    match !child_id with
+    | None ->
+        Ok
+          (tool_call_response ~name:"spawn"
+             ~input:(json_object [ ("task", Json.string "child works") ])
+             "spawning")
+    | Some id -> (
+        let n = !step in
+        incr step;
+        match List.nth_opt verbs n with
+        | Some (name, message) ->
+            Ok
+              (tool_call_response ~name
+                 ~input:
+                   (json_object
+                      [
+                        ("child", Json.string id);
+                        ("message", Json.string message);
+                      ])
+                 "messaging")
+        | None -> Ok (plain_response "PARENT_DONE"))
+  end
+  else Ok (plain_response "CHILD_SEEN")
+
+(* Under [Brokered], a message for a child this runtime does not drive crosses
+   the deliver seam, never an in-process attach: the spy plays a live broker —
+   it captures the wire commands and answers [`Delivered] — so the child
+   journal must stay untouched by this process. The [`Context] crosses as a
+   queue command carrying its derived client-minted id; the [`Follow_up] as a
+   prompt of the derived turn id. *)
+let a_brokered_live_delivery_crosses_the_deliver_seam () =
+  let delivered = ref [] in
+  let deliver ~command =
+    delivered := command :: !delivered;
+    `Delivered
+  in
+  let _materialized, child_backend = brokered_spy ~deliver () in
+  let script =
+    message_script
+      ~verbs:
+        [ ("send_message", "extra context"); ("follow_up", "one more thing") ]
+  in
+  with_engine ~script:(capped_script ~cap:20 script) ~child_backend
+    (fun ~sw:_ ~client ~store ~engine:_ ->
+      submit_ok client
+        (prompt ~session:(sid "root") ~turn:(tid "t-msg") "PLEASE_SPAWN");
+      ignore (drain_committed (follow_ok client (sid "root")));
+      await_yield (fun () -> List.length !delivered >= 2);
+      let edge = root_edge store in
+      let child = Session.Delegation.child edge in
+      (match
+         List.find_opt
+           (function Protocol.Command.Queue_next _ -> true | _ -> false)
+           !delivered
+       with
+      | Some (Protocol.Command.Queue_next { session; id; _ }) ->
+          is_true ~msg:"the queue command targets the child session"
+            (Session.Id.equal session child);
+          is_true ~msg:"the wire queue entry carries its derived id"
+            (Option.is_some id)
+      | _ -> fail "no queue command crossed the deliver seam");
+      (match
+         List.find_opt
+           (function Protocol.Command.Prompt _ -> true | _ -> false)
+           !delivered
+       with
+      | Some (Protocol.Command.Prompt { session; _ }) ->
+          is_true ~msg:"the follow-up prompt targets the child session"
+            (Session.Id.equal session child)
+      | _ -> fail "no follow-up prompt crossed the deliver seam");
+      match Hashtbl.find_opt store.sessions (Session.Id.to_string child) with
+      | None -> fail "the child document is missing"
+      | Some session ->
+          equal Testable.int
+            ~msg:"a delivered message writes nothing to the child journal here"
+            0
+            (List.length (Session.events session)))
+
+(* A busy child refuses the immediate follow-up turn over the wire; the engine
+   then parks the derived-id queue entry over the same seam — the wire twin of
+   the in-process busy-child fallback. *)
+let a_refused_wire_follow_up_parks_the_queue_entry () =
+  let delivered = ref [] in
+  let deliver ~command =
+    delivered := command :: !delivered;
+    match command with
+    | Protocol.Command.Prompt _ -> `Refused
+    | _ -> `Delivered
+  in
+  let _materialized, child_backend = brokered_spy ~deliver () in
+  let script = message_script ~verbs:[ ("follow_up", "one more thing") ] in
+  with_engine ~script:(capped_script ~cap:20 script) ~child_backend
+    (fun ~sw:_ ~client ~store ~engine:_ ->
+      submit_ok client
+        (prompt ~session:(sid "root") ~turn:(tid "t-fu") "PLEASE_SPAWN");
+      ignore (drain_committed (follow_ok client (sid "root")));
+      await_yield (fun () -> List.length !delivered >= 2);
+      let edge = root_edge store in
+      let child = Session.Delegation.child edge in
+      match List.rev !delivered with
+      | [
+       Protocol.Command.Prompt { session = first; _ };
+       Protocol.Command.Queue_next { session = second; id; _ };
+      ] ->
+          is_true ~msg:"both legs target the child session"
+            (Session.Id.equal first child && Session.Id.equal second child);
+          is_true ~msg:"the parked entry carries its derived id"
+            (Option.is_some id)
+      | _ -> fail "expected a refused prompt then its queue-entry fallback")
+
+(* [`Gone] — the broker no longer holds the child — falls back to the
+   in-process delivery the exit-time re-drive performs: the message lands in
+   the child journal and the idle admission runs it as the child's own turn. *)
+let a_gone_brokered_delivery_falls_back_in_process () =
+  let _materialized, child_backend = brokered_spy () in
+  let script = message_script ~verbs:[ ("send_message", "extra context") ] in
+  with_engine ~script:(capped_script ~cap:20 script) ~child_backend
+    (fun ~sw:_ ~client ~store ~engine:_ ->
+      submit_ok client
+        (prompt ~session:(sid "root") ~turn:(tid "t-gone") "PLEASE_SPAWN");
+      ignore (drain_committed (follow_ok client (sid "root")));
+      let edge = root_edge store in
+      let child = Session.Delegation.child edge in
+      await_yield (fun () ->
+          match
+            Hashtbl.find_opt store.sessions (Session.Id.to_string child)
+          with
+          | None -> false
+          | Some session ->
+              Session.State.turns (Session.state session) <> []))
 
 let mutation_event_value =
   Testable.make ~pp:Mutation.Event.pp ~equal:Mutation.Event.equal
@@ -6413,6 +6556,12 @@ let () =
             a_brokered_failure_settles_the_parked_wait;
           test "a reaped brokered child releases capacity"
             a_reaped_brokered_child_releases_capacity;
+          test "a brokered live delivery crosses the deliver seam"
+            a_brokered_live_delivery_crosses_the_deliver_seam;
+          test "a refused wire follow-up parks the queue entry"
+            a_refused_wire_follow_up_parks_the_queue_entry;
+          test "a gone brokered delivery falls back in-process"
+            a_gone_brokered_delivery_falls_back_in_process;
         ];
       group "online metadata cone (4a)"
         [

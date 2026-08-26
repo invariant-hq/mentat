@@ -573,6 +573,7 @@ let run ~stdenv ~client ~(startup : Startup.t) ~(local : Local.t)
               match
                 Protocol.Command.queue_next ~session
                   ~input:(prompt_input ~media ~prompt)
+                  ()
               with
               | Error invalid ->
                   deliver

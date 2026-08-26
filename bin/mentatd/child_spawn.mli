@@ -18,13 +18,19 @@ val spawn :
   User_dirs.t ->
   environment:(string * string) list ->
   session:Mentat_session.Id.t ->
+  interrupted:bool ->
   cwd:Lpath.Abs.t ->
   (int, string) result
-(** [spawn dirs ~environment ~session ~cwd] launches [mentat serve-session]
-    for the delegated child [session] recorded under the workspace root [cwd],
-    with [environment] as its whole environment, and returns the child pid.
-    [Error message] when no [mentat] binary resolves — beside this executable,
-    or named by [MENTAT_BIN] — so a spawn that could never converge is refused
-    before it launches anything. Spawning carries no idempotence of its own;
-    the serve-session boot supplies it (a child that already ran is re-attached
+(** [spawn dirs ~environment ~session ~interrupted ~cwd] launches
+    [mentat serve-session] for the delegated child [session] recorded under
+    the workspace root [cwd], with [environment] as its whole environment, and
+    returns the child pid. [interrupted] carries a standing interrupt intent
+    across the spawn (the internal [--interrupted] flag): the boot submits an
+    interrupt right after its idempotent first-turn submit, so a cancelled
+    child killed at the escalation's final rung ends in its own terminal
+    interrupted fact instead of resuming the cancelled work. [Error message]
+    when no [mentat] binary resolves — beside this executable, or named by
+    [MENTAT_BIN] — so a spawn that could never converge is refused before it
+    launches anything. Spawning carries no idempotence of its own; the
+    serve-session boot supplies it (a child that already ran is re-attached
     and mints nothing), so a redundant spawn converges to a clean exit. *)

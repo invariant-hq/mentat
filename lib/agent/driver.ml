@@ -1161,16 +1161,28 @@ and handle_command t command ~mid_effect ~ack =
       (* Mid-effect interrupts are consumed by [supervise]; this is the
          parked path. *)
       parked_interrupt t ~reason ~ack
-  | Mentat_protocol.Command.Queue_next { input; _ } -> (
+  | Mentat_protocol.Command.Queue_next { id; input; _ } -> (
       match externalize_content t input with
       | Error e -> ack (Error e)
-      | Ok input ->
-          journal_commit t ~ack
-            [
-              Mentat_session.Event.queue_updated
-                (Mentat_session.Queue.Update.enqueued
-                   (Mentat_session.Queue.Entry.make ~id:(mint_queue_id t) ~input));
-            ])
+      | Ok input -> (
+          match id with
+          | Some id
+            when Mentat_session.State.enqueue_recorded id
+                   (Mentat_session.state t.session) ->
+              (* A consumed entry's [Enqueued] fact still proves delivery: a
+                 client-minted id makes the at-least-once resubmission
+                 idempotent, exactly as the in-process enqueue op's dedup. *)
+              ack (Ok ())
+          | Some _ | None ->
+              let id =
+                match id with Some id -> id | None -> mint_queue_id t
+              in
+              journal_commit t ~ack
+                [
+                  Mentat_session.Event.queue_updated
+                    (Mentat_session.Queue.Update.enqueued
+                       (Mentat_session.Queue.Entry.make ~id ~input));
+                ]))
   | Mentat_protocol.Command.Replace_queued { inputs; _ } -> (
       let rec externalize_all acc = function
         | [] -> Ok (List.rev acc)

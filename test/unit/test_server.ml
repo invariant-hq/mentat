@@ -678,7 +678,7 @@ let commands_group =
               let command =
                 match
                   Protocol.Command.queue_next ~session:session_id
-                    ~input:[ Llm.Content.text "again" ]
+                    ~input:[ Llm.Content.text "again" ] ()
                 with
                 | Ok c -> c
                 | Error _ -> fail "queue_next build"
@@ -1664,7 +1664,7 @@ let request_id_of body =
 let queue_next command_session =
   match
     Protocol.Command.queue_next ~session:command_session
-      ~input:[ Llm.Content.text "again" ]
+      ~input:[ Llm.Content.text "again" ] ()
   with
   | Ok c -> c
   | Error _ -> fail "queue_next build"

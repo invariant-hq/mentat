@@ -52,10 +52,17 @@ val ops : t -> Composition.t -> Mentat_agent.Ports.child_ops
     the probe-spawn-observe work runs on a forked fiber. A child found already
     fenced by a live per-session server is observed rather than re-spawned; a
     child whose fence holder cannot be identified or signalled fails the
-    delegation loudly through the engine seam. [cancel] delivers the semantic
-    interrupt over the child's endpoint first and escalates — SIGTERM, a
-    bounded grace, SIGKILL, to the child's own process only, never a process
-    group — when the child cannot hear it. *)
+    delegation loudly through the engine seam. [deliver] submits a
+    parent-recorded message over the held child's endpoint on short-lived,
+    grace-bounded connections — retrying a booting child's endpoint within the
+    boot budget, answering [`Gone] for a child this broker no longer holds —
+    and never follows the feed or pins the child's connection count. [cancel]
+    delivers the semantic interrupt over the child's endpoint first and
+    escalates — SIGTERM, a bounded grace, SIGKILL, to the child's own process
+    only, never a process group — when the child cannot hear it; a cancelled
+    child re-materialized after a kill is spawned with the interrupt intent
+    carried, so its successor mints the terminal interrupted fact instead of
+    resuming the cancelled work. *)
 
 val rediscover :
   t ->

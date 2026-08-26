@@ -323,6 +323,25 @@ type child_ops = {
           seam. It is idempotent on [child]: re-materializing a child that is
           already running is a no-op, and a re-drive after a crash re-issues
           the same identity. *)
+  deliver :
+    command:Mentat_protocol.Command.t -> [ `Delivered | `Refused | `Gone ];
+      (** [deliver ~command] submits [command] — a parent-recorded message,
+          already carrying its derived idempotency id — to the live child the
+          command's own session id names, over the broker's connection to that
+          child's endpoint. Blocking, but bounded: a child whose materialized
+          process has not yet bound its endpoint is retried within the
+          broker's boot budget, over short-lived connections that never pin
+          the child's connection count. [`Delivered] means the child durably
+          admitted the command; the ids it carries make a repeat delivery
+          idempotent. [`Refused] means the child answered and refused (a busy
+          child refusing an immediate turn), or could not be reached within
+          the budget — the caller decides whether a refusal has a fallback
+          (a queue entry), and an undeliverable message stays covered by the
+          parent's durable receipt, which re-drives at the child's exit or
+          the parent's next attach. [`Gone] means the broker holds no
+          materialization for the child — it settled and its process exited,
+          or it was never handed over — and delivery is the caller's own
+          in-process story. *)
   cancel : child:Mentat_session.Id.t -> unit;
       (** [cancel ~child] asks the broker to stop [child]'s work: a semantic
           interrupt delivered to the child first, with a bounded escalation to
@@ -336,11 +355,10 @@ type child_ops = {
     The record is narrower than the whole cross-backend contract. The child's
     own boot submits the child's first turn under the deterministic id of
     {!Mentat_agent.child_first_turn} — the broker submits nothing, it only
-    makes the process exist. The runtime's child-cancellation cascade
-    ([cancel_children]) and parent-to-child message delivery
-    ([deliver_child_message], which attaches an in-process driver) today
-    resolve in-process drivers only; they are the dispatch sites a brokered
-    backend reaches through [cancel] and a future delivery call. And a
+    makes the process exist. A parent-recorded message for a child the broker
+    currently holds crosses through [deliver]; one for a child it does not —
+    settled, exited, fence free — is delivered by the runtime's own in-process
+    attach, the same path that re-drives it at the parent's next attach. And a
     brokered child's settlement never crosses this record at all: it is the
     broker's own observation of the child journal that reports the settled
     result back into the parent's scheduler. *)

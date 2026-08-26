@@ -288,7 +288,7 @@ let post_queue env session body =
   match form_field "prompt" body with
   | Some text when nonempty text -> (
       match
-        Command.queue_next ~session ~input:[ Mentat_llm.Content.text text ]
+        Command.queue_next ~session ~input:[ Mentat_llm.Content.text text ] ()
       with
       | Error invalid -> Bad_request (Command.Invalid.message invalid)
       | Ok command -> redirect_of_submit env command (session_path session))
