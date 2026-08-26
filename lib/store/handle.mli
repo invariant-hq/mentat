@@ -71,6 +71,14 @@ module Registry : sig
   val holds : t -> string -> token -> bool
   (** [holds t key token] is [true] iff [key]'s current reservation is the one
       [token] witnessed and it has been confirmed. *)
+
+  val holder : t -> string -> Owner.t option
+  (** [holder t key] is the owner of [key]'s current reservation — pending or
+      confirmed — when this process is acquiring or holding the session's
+      fence, and [None] otherwise. The read-only fence probe consults it before
+      touching any descriptor: a probe descriptor opened while this process
+      holds the fence would, on close, drop every record lock the process holds
+      on the inode. *)
 end
 
 type t

@@ -71,6 +71,10 @@ module Registry = struct
         match Hashtbl.find_opt t.reservations key with
         | Some (current, _) -> current == token && !current
         | None -> false)
+
+  let holder t key =
+    Mutex.protect t.guard (fun () ->
+        Option.map snd (Hashtbl.find_opt t.reservations key))
 end
 
 (* The process-local intern table: physical root identity to registry, scoped to

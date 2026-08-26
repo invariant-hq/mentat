@@ -78,6 +78,27 @@ val release : guard -> unit
     conflict within one process), and closing either descriptor would then
     silently drop the fence. *)
 
+val holder :
+  Handle.t ->
+  session:Mentat_session.Id.t ->
+  [ `Free | `Held of Owner.t option | `Io of Io.t ]
+(** [holder root ~session] probes the fence for [session] without contending
+    for it: it never creates [run.lock], never writes the owner line, and never
+    acquires anything — the observation {!try_acquire} cannot make, because a
+    free fence would be created and rewritten by it. [`Held display] names the
+    holder from the owner line when it is readable ([None] when it is not — the
+    exclusion is real, only the display is absent); [`Free] means no lock is
+    held on the file, or the file does not exist. The lock, not the file, is
+    the truth: a [run.lock] left behind by a crashed driver reads [`Free].
+
+    {b Same-process visibility.} A fence held or being acquired by {e this}
+    process is answered from the root's reservation registry, before any
+    descriptor is opened — POSIX record locks never conflict within one
+    process, so the OS probe cannot see them, and a probe descriptor opened
+    onto an inode this process holds locked would drop the lock at close. What
+    the OS probe then observes is exactly the cross-process contract: [`Held]
+    iff {e another} process holds the lock. *)
+
 val session : guard -> Mentat_session.Id.t
 (** [session guard] is the fenced session. *)
 

@@ -754,6 +754,50 @@ let fence_excludes_and_names_the_holder () =
        [ observed_event ~claim:"claim-succ" [ "a.ml" ] ]);
   Store.Run_lock.release successor
 
+(* The read-only fence probe: it never creates run.lock, answers a
+   same-process hold from the registry (POSIX record locks are invisible to a
+   same-process OS probe), and reads the lock — not the file — as the truth.
+   The cross-process Held arm needs a second process and is exercised by the
+   daemon's blackbox suite. *)
+let holder_probes_without_contending () =
+  with_store "holder" @@ fun ~sw ~base ~session:store ~mutation:_ ->
+  let _document =
+    ok_store "create"
+      (Store.Session.create store
+         (session_fixture ~id:"s-holder" ~at:1_000
+            ~events:(open_claim_events ()) ()))
+  in
+  let lock_path = Filename.concat base "sessions/s-holder/run.lock" in
+  (match Store.Run_lock.holder store ~session:(sid "s-holder") with
+  | `Free -> ()
+  | `Held _ -> fail "an unfenced session must probe Free"
+  | `Io io -> failf "holder io: %a" Store.Io.pp io);
+  is_false ~msg:"the probe must not create run.lock"
+    (Sys.file_exists lock_path);
+  let holder_owner = owner "probe-holder" in
+  let guard =
+    match
+      Store.Run_lock.try_acquire ~sw store ~session:(sid "s-holder")
+        ~owner:holder_owner
+    with
+    | Ok guard -> guard
+    | Error _ -> fail "acquisition must succeed"
+  in
+  (match Store.Run_lock.holder store ~session:(sid "s-holder") with
+  | `Held (Some reported) ->
+      equal owner_value ~msg:"the same-process probe names the holder"
+        holder_owner reported
+  | `Held None -> fail "the same-process probe must name the holder"
+  | `Free -> fail "a held fence must probe Free"
+  | `Io io -> failf "holder io: %a" Store.Io.pp io);
+  Store.Run_lock.release guard;
+  is_true ~msg:"release leaves the owner-line file behind"
+    (Sys.file_exists lock_path);
+  match Store.Run_lock.holder store ~session:(sid "s-holder") with
+  | `Free -> ()
+  | `Held _ -> fail "a released fence must probe Free"
+  | `Io io -> failf "holder io: %a" Store.Io.pp io
+
 let released_guards_are_refused_by_appends () =
   with_fenced "released"
   @@ fun ~sw:_ ~base:_ ~session:_ ~mutation ~id:_ ~guard ~document ->
@@ -3101,6 +3145,8 @@ let () =
       (* Run lock *)
       test "the fence excludes a second acquisition and names the holder"
         fence_excludes_and_names_the_holder;
+      test "the fence probe observes without contending"
+        holder_probes_without_contending;
       test "released guards are refused by every mutation append"
         released_guards_are_refused_by_appends;
       test "a guard never passes against another root's registry"

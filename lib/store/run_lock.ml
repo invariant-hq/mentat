@@ -50,6 +50,49 @@ let read_holder fd =
           | Ok owner -> Some owner
           | Error _ -> None))
 
+(* The registry answers for this process before any descriptor opens: the OS
+   probe below cannot see same-process locks (POSIX record locks never conflict
+   within one process), and a probe descriptor opened onto an inode this
+   process holds locked would drop the lock at close. With the registry clear,
+   this process holds no lock on the inode, so the probe descriptor is safe to
+   open and close. [F_TEST] observes other-process locks only — exactly the
+   cross-process contract. *)
+let holder root ~session =
+  let registry = Handle.registry root in
+  let key = Mentat_session.Id.to_string session in
+  match Handle.Registry.holder registry key with
+  | Some owner -> `Held (Some owner)
+  | None -> (
+      let path = Layout.run_lock session in
+      let cap = Handle.path root path in
+      let probe () =
+        Eio.Path.with_open_in cap @@ fun resource ->
+        Eio_unix.Fd.use_exn "run-lock holder" (Disk.fd_of resource)
+          (fun ufd ->
+            let rec test () =
+              match Unix.lockf ufd Unix.F_TEST 0 with
+              | () -> `Free
+              | exception Unix.Unix_error (Unix.EINTR, _, _) -> test ()
+              | exception Unix.Unix_error ((Unix.EACCES | Unix.EAGAIN), _, _) ->
+                  `Held (read_holder ufd)
+              | exception Unix.Unix_error (code, _, _) ->
+                  `Io
+                    {
+                      Io.op = Io.Lock;
+                      path;
+                      cause = Io.Message (Unix.error_message code);
+                    }
+            in
+            test ())
+      in
+      match probe () with
+      | outcome -> outcome
+      | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
+      | exception Eio.Io (Eio.Fs.E (Eio.Fs.Not_found _), _) -> `Free
+      | exception exn -> (
+          try Disk.raise_io ~op:Io.Open ~path exn
+          with Disk.Io_error payload -> `Io payload))
+
 let try_acquire ~sw root ~session ~owner =
   let registry = Handle.registry root in
   let key = Mentat_session.Id.to_string session in
