@@ -46,13 +46,6 @@ let child_first_turn delegation =
 let create ~sw ~store ~provider ~config ~now ?(max_children = 4)
     ?(child_backend = Ports.In_process) ~execution_for_mode ~delegated_execution
     () =
-  (match child_backend with
-  | Ports.In_process -> ()
-  | Ports.Brokered _ ->
-      (* No broker consumes the ops yet. Refusing at boot beats raising from
-         a driver hook mid-session, after a durable edge and child document
-         exist. *)
-      raise (Invalid_argument "no process backend wired"));
   {
     sw;
     store;
@@ -135,20 +128,35 @@ let child_result session turn outcome =
   let usage = (Mentat_session.metrics session).Mentat_session.Metrics.usage in
   ([ Mentat_llm.Content.text text ], Some usage)
 
+(* The one settlement tail every wake shares: buffer the result, return the
+   capacity permit, and nudge the parent's parked wait. The parent driver may
+   be absent (its process half is elsewhere, or it has shut down) — the buffered
+   result then waits for its next attach, whose recovery rebuild re-derives it
+   from the child journal anyway. *)
+let settle_delegation t ~parent ~delegation result =
+  Scheduler.note_settled t.scheduler delegation result;
+  Scheduler.release t.scheduler ~delegation;
+  match find_driver t parent with
+  | Some parent_driver -> Driver.deliver parent_driver
+  | None -> ()
+
 let on_turn_settled t ~session ~turn outcome =
   match Scheduler.parent_of t.scheduler session with
   | None -> ()
   | Some (parent, delegation) -> (
-      (match find_driver t session with
+      match find_driver t session with
       | Some driver ->
           let head = Feed.Hub.head (Driver.hub driver) in
-          Scheduler.note_settled t.scheduler delegation
+          settle_delegation t ~parent ~delegation
             (child_result head turn outcome)
-      | None -> ());
-      Scheduler.release t.scheduler ~delegation;
-      match find_driver t parent with
-      | Some parent_driver -> Driver.deliver parent_driver
-      | None -> ())
+      | None ->
+          (* The settling driver is unregistered (a shutdown race): release the
+             permit and nudge the parent; the result re-derives from the child
+             journal at the parent's next rebuild. *)
+          Scheduler.release t.scheduler ~delegation;
+          (match find_driver t parent with
+          | Some parent_driver -> Driver.deliver parent_driver
+          | None -> ()))
 
 (* The delivery idempotency key: stable across re-drives because it derives
    from the recording turn and call, never from time or sequence. *)
@@ -465,24 +473,23 @@ and observe_delegation t ~parent ~parent_cwd edge =
   Scheduler.bind t.scheduler ~child ~parent ~delegation;
   let fail_spawn message =
     (* The child cannot exist; a parked wait must still complete. *)
-    Scheduler.note_settled t.scheduler delegation
-      ([ Mentat_llm.Content.text ("spawn failed: " ^ message) ], None);
-    Scheduler.release t.scheduler ~delegation;
-    match find_driver t parent with
-    | Some parent_driver -> Driver.deliver parent_driver
-    | None -> ()
+    settle_delegation t ~parent ~delegation
+      ([ Mentat_llm.Content.text ("spawn failed: " ^ message) ], None)
   in
   match ensure_child_session t ~parent ~delegation ~cwd:parent_cwd child with
   | Error e -> fail_spawn (Ports.Store_error.message e)
   | Ok () -> (
       match t.child_backend with
       | Ports.In_process -> materialize_in_process t ~fail_spawn edge
-      | Ports.Brokered _ ->
-          (* Unreachable defense: [create] already refuses a brokered
-             backend at boot. A broker must replace this arm with a real
-             materialize, never inherit the raise — from here it would
-             re-fire on every recovery re-drive of a durable edge. *)
-          raise (Invalid_argument "no process backend wired"))
+      | Ports.Brokered ops ->
+          (* Identity only crosses: the broker re-reads the task and role from
+             the durable edge. A child this runtime already drives in-process
+             (a message delivery attached it) is skipped — its own driver and
+             fence are the materialization, and handing its identity to the
+             broker would race a second process against a fence this process
+             holds. *)
+          if Option.is_none (find_driver t child) then
+            ops.Ports.materialize ~child ~delegation)
 
 (* In-process materialization: attach a child driver as a sibling and submit
    its first turn. The started guard makes a re-drive idempotent — a child
@@ -630,44 +637,64 @@ and deliver_child_message t ~edges
 (* Recovery's message re-drive (the idempotent pattern): a settled receipt
    whose derived id reached neither a child turn nor a child queue fact was
    never delivered — the process died between the receipt commit and the
-   routing. Re-drive it; the derived id makes the replay safe. *)
-and redrive_messages t session =
+   routing. Re-drive it; the derived id makes the replay safe. [only] narrows
+   the sweep to one delegation edge — the brokered wake re-drives a child's
+   messages the moment its process exits and frees the fence, without touching
+   its siblings. *)
+and redrive_messages ?only t session =
   let module S = (val t.store : Ports.STORE) in
   let edges = Mentat_session.State.delegations (Mentat_session.state session) in
+  let relevant (message : Mentat_agent_step.Step.Child_message.t) =
+    match only with
+    | None -> true
+    | Some delegation ->
+        Mentat_session.Delegation.Id.equal
+          message.Mentat_agent_step.Step.Child_message.child delegation
+  in
   List.iter
     (fun (message : Mentat_agent_step.Step.Child_message.t) ->
-      let child_edge =
-        List.find_opt
-          (fun edge ->
-            Mentat_session.Delegation.Id.equal
-              (Mentat_session.Delegation.id edge)
-              message.Mentat_agent_step.Step.Child_message.child)
-          edges
-      in
-      let delivered =
-        match child_edge with
-        | None -> true (* no edge: nothing to deliver to *)
-        | Some edge -> (
-            let derived = derived_message_id message in
-            match S.view (Mentat_session.Delegation.child edge) with
-            | Error _ -> false
-            | Ok loaded ->
-                let child_session = S.session_of loaded in
-                let state = Mentat_session.state child_session in
-                Option.is_some
-                  (Mentat_session.State.turn
-                     (Mentat_session.Turn.Id.of_string derived)
-                     state)
-                || Mentat_session.State.enqueue_recorded
-                     (Mentat_session.Queue.Id.of_string derived)
-                     state)
-      in
-      if not delivered then deliver_child_message t ~edges message)
+      if relevant message then begin
+        let child_edge =
+          List.find_opt
+            (fun edge ->
+              Mentat_session.Delegation.Id.equal
+                (Mentat_session.Delegation.id edge)
+                message.Mentat_agent_step.Step.Child_message.child)
+            edges
+        in
+        let delivered =
+          match child_edge with
+          | None -> true (* no edge: nothing to deliver to *)
+          | Some edge -> (
+              let derived = derived_message_id message in
+              match S.view (Mentat_session.Delegation.child edge) with
+              | Error _ -> false
+              | Ok loaded ->
+                  let child_session = S.session_of loaded in
+                  let state = Mentat_session.state child_session in
+                  Option.is_some
+                    (Mentat_session.State.turn
+                       (Mentat_session.Turn.Id.of_string derived)
+                       state)
+                  || Mentat_session.State.enqueue_recorded
+                       (Mentat_session.Queue.Id.of_string derived)
+                       state)
+        in
+        if not delivered then deliver_child_message t ~edges message
+      end)
     (Mentat_agent_step.settled_messages session)
 
 (* Semantic cascade: interrupt each named child's driver and await
    its committed terminal fact — never by failing switches across sessions.
-   A stuck descendant leaves the cascade visibly pending. *)
+   A stuck descendant leaves the cascade visibly pending.
+
+   A brokered child with no sibling driver runs in another process: the cascade
+   hands its interrupt to the broker and returns without awaiting quiescence —
+   this process has no event for a foreign driver's settlement short of polling
+   a clock the engine does not hold, and a wedged foreign child must never
+   wedge the parent's own interrupt. Its committed terminal fact arrives
+   through the broker's observation and settles into the scheduler buffer as
+   any brokered settlement does. *)
 and cancel_children t ~parent children =
   let edges =
     match find_driver t parent with
@@ -690,7 +717,20 @@ and cancel_children t ~parent children =
       | Some edge -> (
           let child = Mentat_session.Delegation.child edge in
           match find_driver t child with
-          | None -> ()
+          | None -> (
+              match t.child_backend with
+              | Ports.In_process -> ()
+              | Ports.Brokered ops ->
+                  let module S = (val t.store : Ports.STORE) in
+                  let active =
+                    match S.view child with
+                    | Error _ -> false
+                    | Ok loaded ->
+                        Option.is_some
+                          (Mentat_session.State.active_turn
+                             (Mentat_session.state (S.session_of loaded)))
+                  in
+                  if active then ops.Ports.cancel ~child)
           | Some child_driver ->
               let hub = Driver.hub child_driver in
               let quiescent () =
@@ -746,6 +786,64 @@ let protocol_error ~session (e : Error.t) : Mentat_protocol.Error.t =
 let route t session =
   if t.shutting_down then Error (protocol_error ~session Error.Shutting_down)
   else Result.map_error (protocol_error ~session) (attach t session)
+
+let adopt t session =
+  Result.map (fun (_ : Driver.t) -> ()) (route t session)
+
+(* The brokered observation seam.
+
+   A brokered child's driver lives in another process; what this runtime holds
+   is the durable child journal and the parent's scheduler bookkeeping. The
+   broker observes the child — its feed, its process exit — and reports here;
+   both reports resolve entirely against journals, so a spurious or repeated
+   call converges to the same state. *)
+
+let integrate_brokered_child t ~child =
+  match Scheduler.parent_of t.scheduler child with
+  | None -> `Unbound
+  | Some (parent, delegation) -> (
+      let module S = (val t.store : Ports.STORE) in
+      let head =
+        match find_driver t child with
+        | Some driver -> Ok (Feed.Hub.head (Driver.hub driver))
+        | None -> Result.map S.session_of (S.view child)
+      in
+      match head with
+      | Error _ -> `Not_settled
+      | Ok child_session -> (
+          let state = Mentat_session.state child_session in
+          match Mentat_session.State.turns state with
+          | [] -> `Not_settled
+          | turns -> (
+              match Mentat_session.State.active_turn state with
+              | Some _ -> `Not_settled
+              | None ->
+                  let last = List.nth turns (List.length turns - 1) in
+                  let turn = Mentat_session.Turn.id last in
+                  let outcome =
+                    Option.value
+                      (Mentat_session.State.turn_outcome turn state)
+                      ~default:
+                        (Mentat_session.Turn.Outcome.failed
+                           ~message:"child outcome unknown")
+                  in
+                  settle_delegation t ~parent ~delegation
+                    (child_result child_session turn outcome);
+                  (* The child's fence is free once its process exits, so a
+                     message its lifetime shadowed is deliverable now; the
+                     derived-id dedup makes a repeat sweep harmless. *)
+                  (match S.view parent with
+                  | Error _ -> ()
+                  | Ok loaded ->
+                      redrive_messages ~only:delegation t (S.session_of loaded));
+                  `Integrated)))
+
+let fail_brokered_child t ~child ~message =
+  match Scheduler.parent_of t.scheduler child with
+  | None -> ()
+  | Some (parent, delegation) ->
+      settle_delegation t ~parent ~delegation
+        ([ Mentat_llm.Content.text ("spawn failed: " ^ message) ], None)
 
 let submit t command =
   let session = Mentat_protocol.Command.session command in

@@ -530,7 +530,7 @@ let capped_script ~cap f =
 (* Runtime harness. *)
 
 let mk_engine ~sw ~store ?(script = default_script) ?(config = default_config)
-    ?max_children ?(catalog = catalog) ?(workspace = workspace)
+    ?max_children ?child_backend ?(catalog = catalog) ?(workspace = workspace)
     ?execution_for_mode ?background_probe ?running_view ?delegated_execution
     ?delegated_role_spy () =
   let now =
@@ -604,22 +604,22 @@ let mk_engine ~sw ~store ?(script = default_script) ?(config = default_config)
     (select, Option.value running_view ~default:(fun () -> []))
   in
   Agent.create ~sw ~store:(store_of store) ~provider:script ~config ~now
-    ?max_children ~execution_for_mode ~delegated_execution ()
+    ?max_children ?child_backend ~execution_for_mode ~delegated_execution ()
 
 (* One engine over a freshly-seeded [root] session, torn down (shutdown, then
    switch cancellation) inside a real-clock deadlock guard. *)
-let with_engine ?script ?config ?max_children ?catalog ?workspace
-    ?execution_for_mode ?background_probe ?running_view ?delegated_execution
-    ?delegated_role_spy f =
+let with_engine ?script ?config ?max_children ?child_backend ?catalog
+    ?workspace ?execution_for_mode ?background_probe ?running_view
+    ?delegated_execution ?delegated_role_spy f =
   Eio_main.run @@ fun env ->
   let clock = Eio.Stdenv.clock env in
   Eio.Switch.run @@ fun sw ->
   let store = fresh_store () in
   seed_session store ~id:"root";
   let engine =
-    mk_engine ~sw ~store ?script ?config ?max_children ?catalog ?workspace
-      ?background_probe ?running_view ?execution_for_mode ?delegated_execution
-      ?delegated_role_spy ()
+    mk_engine ~sw ~store ?script ?config ?max_children ?child_backend ?catalog
+      ?workspace ?background_probe ?running_view ?execution_for_mode
+      ?delegated_execution ?delegated_role_spy ()
   in
   let client = { c = make_client engine; sw } in
   match
@@ -4636,6 +4636,213 @@ let an_observation_made_while_waiting_reaches_the_parent () =
       | requests ->
           failf "expected three parent requests, got %d" (List.length requests))
 
+(* Runtime: the brokered child backend.
+
+   Under [Brokered] the engine records the edge, creates the child document,
+   and holds the permit, then hands identity to the ops record; settlement
+   arrives through the observation seam. The fixtures play the broker: a spy
+   ops record captures the handoff, a second engine over the same store plays
+   the out-of-process child server (the exact serve-session topology — shared
+   journals, separate runtimes), and the seam calls play the observer. *)
+
+let brokered_spy () =
+  let materialized = ref [] in
+  let ops =
+    {
+      Ports.materialize =
+        (fun ~child ~delegation ->
+          materialized := (child, delegation) :: !materialized);
+      cancel = (fun ~child:_ -> ());
+    }
+  in
+  (materialized, Ports.Brokered ops)
+
+(* The parent's whole journey: spawn, then wait on the receipt handle, then a
+   final answer once the wait delivers. *)
+let spawn_wait_script requests =
+  let child = ref None in
+  let waited = ref false in
+  Ports.script @@ fun request ->
+  requests := request :: !requests;
+  (match !child with
+  | Some _ -> ()
+  | None -> child := receipt_child_of request);
+  match !child with
+  | None ->
+      Ok
+        (tool_call_response ~name:"spawn"
+           ~input:(json_object [ ("task", Json.string "child works") ])
+           "spawning")
+  | Some id ->
+      if !waited then Ok (plain_response "PARENT_DONE")
+      else begin
+        waited := true;
+        Ok
+          (tool_call_response ~name:"wait"
+             ~input:(json_object [ ("children", json_array [ Json.string id ]) ])
+             "waiting")
+      end
+
+let is_edge_fact = function
+  | Protocol.Fact.Journal_delegation _ -> true
+  | _ -> false
+
+let root_edge store =
+  match Hashtbl.find_opt store.sessions "root" with
+  | None -> fail "the root session is missing"
+  | Some session -> (
+      match Session.State.delegations (Session.state session) with
+      | [ edge ] -> edge
+      | edges -> failf "expected one edge, got %d" (List.length edges))
+
+let a_brokered_spawn_hands_identity_and_integrates_on_the_wake () =
+  let requests = ref [] in
+  let materialized, child_backend = brokered_spy () in
+  with_engine ~script:(spawn_wait_script requests) ~child_backend
+    (fun ~sw ~client ~store ~engine ->
+      let feed = follow_ok client (sid "root") in
+      submit_ok client
+        (prompt ~session:(sid "root") ~turn:(tid "t-spawn") "PLEASE_SPAWN");
+      (* The edge fact publishes only after the child document is resolvable
+         and the handoff has fired (register-before-publish), so this is the
+         rendezvous. *)
+      ignore (drain_committed ~stop:is_edge_fact feed);
+      let edge = root_edge store in
+      let child = Session.Delegation.child edge in
+      let delegation = Session.Delegation.id edge in
+      (match !materialized with
+      | [ (handed_child, handed_delegation) ] ->
+          is_true ~msg:"the handoff names the child"
+            (Session.Id.equal handed_child child);
+          is_true ~msg:"the handoff names the delegation"
+            (Session.Delegation.Id.equal handed_delegation delegation)
+      | handed -> failf "expected one handoff, got %d" (List.length handed));
+      (* No sibling driver was attached: the child materializes elsewhere. *)
+      is_true ~msg:"an unstarted brokered child probes Not_settled"
+        (Agent.integrate_brokered_child engine ~child = `Not_settled);
+      (* The child server: a second engine over the same store submits the
+         deterministic first turn, exactly as serve-session does. *)
+      let engine2 =
+        mk_engine ~sw ~store
+          ~script:(Ports.script (fun _ -> Ok (plain_response "CHILD_DONE")))
+          ()
+      in
+      let client2 = { c = make_client engine2; sw } in
+      (match
+         Protocol.Command.prompt ~session:child
+           ~turn:(Agent.child_first_turn delegation)
+           ~input:(Session.Delegation.task edge) ()
+       with
+      | Ok command -> submit_ok client2 command
+      | Error e -> failf "child prompt: %s" (Protocol.Command.Invalid.message e));
+      ignore (drain_committed (follow_ok client2 child));
+      Agent.shutdown engine2;
+      (* The observer's wake: derive from the child journal, wake the wait. *)
+      is_true ~msg:"the settled child integrates"
+        (Agent.integrate_brokered_child engine ~child = `Integrated);
+      (match settled_outcome (drain_committed (follow_ok client (sid "root")))
+       with
+      | Some Session.Turn.Outcome.Completed -> ()
+      | Some other ->
+          failf "the parent turn settled %a" Session.Turn.Outcome.pp other
+      | None -> fail "the parent turn never settled");
+      match !requests with
+      | last :: _ ->
+          is_true ~msg:"the request answering the wait carries the child result"
+            (request_contains last "CHILD_DONE")
+      | [] -> fail "no parent requests were recorded")
+
+let a_brokered_failure_settles_the_parked_wait () =
+  let requests = ref [] in
+  let _materialized, child_backend = brokered_spy () in
+  with_engine ~script:(spawn_wait_script requests) ~child_backend
+    (fun ~sw:_ ~client ~store ~engine ->
+      let feed = follow_ok client (sid "root") in
+      submit_ok client
+        (prompt ~session:(sid "root") ~turn:(tid "t-spawn") "PLEASE_SPAWN");
+      ignore (drain_committed ~stop:is_edge_fact feed);
+      let edge = root_edge store in
+      let child = Session.Delegation.child edge in
+      is_true ~msg:"a session this engine never delegated is Unbound"
+        (Agent.integrate_brokered_child engine ~child:(sid "elsewhere")
+        = `Unbound);
+      (* The broker's bounded-fail floor: the parked wait completes with the
+         spawn-failure text instead of parking forever. *)
+      Agent.fail_brokered_child engine ~child
+        ~message:"the child process died before settling";
+      (match settled_outcome (drain_committed (follow_ok client (sid "root")))
+       with
+      | Some Session.Turn.Outcome.Completed -> ()
+      | Some other ->
+          failf "the parent turn settled %a" Session.Turn.Outcome.pp other
+      | None -> fail "the parent turn never settled");
+      match !requests with
+      | last :: _ ->
+          is_true ~msg:"the wait's answer names the failure"
+            (request_contains last
+               "spawn failed: the child process died before settling")
+      | [] -> fail "no parent requests were recorded")
+
+(* Capacity is a permit per edge, and a reaped child's integration or failure
+   returns it: with one slot, the second spawn of a turn is refused while the
+   first child holds the permit, and a follow-up turn spawns again once the
+   broker reported the first child gone. *)
+let a_reaped_brokered_child_releases_capacity () =
+  let materialized, child_backend = brokered_spy () in
+  (* Distinct call ids: two spawns of one turn must be two delegations, not a
+     re-issue of one. *)
+  let spawn_call ~id ~task =
+    let call =
+      Llm.Tool.Call.make ~id ~name:"spawn"
+        ~input:(json_object [ ("task", Json.string task) ])
+        ()
+    in
+    let assistant =
+      Llm.Message.Assistant.make
+        [
+          Llm.Message.Assistant.text_part "spawning";
+          Llm.Message.Assistant.tool_call call;
+        ]
+    in
+    Llm.Response.make ~model ~stop:Llm.Response.Stop.tool_call assistant
+  in
+  let step = ref 0 in
+  let script =
+    Ports.script @@ fun _request ->
+    incr step;
+    match !step with
+    | 1 -> Ok (spawn_call ~id:"sp-first" ~task:"first")
+    | 2 -> Ok (spawn_call ~id:"sp-second" ~task:"second")
+    | 3 -> Ok (plain_response "TURN_ONE_DONE")
+    | 4 -> Ok (spawn_call ~id:"sp-third" ~task:"third")
+    | _ -> Ok (plain_response "TURN_TWO_DONE")
+  in
+  with_engine ~script ~max_children:1 ~child_backend
+    (fun ~sw:_ ~client ~store ~engine ->
+      submit_ok client
+        (prompt ~session:(sid "root") ~turn:(tid "t-one") "PLEASE_SPAWN");
+      ignore (drain_committed (follow_ok client (sid "root")));
+      let children () =
+        List.filter (fun k -> not (String.equal k "root")) (session_keys store)
+      in
+      equal Testable.int ~msg:"one slot admits one child" 1
+        (List.length (children ()));
+      equal Testable.int ~msg:"the refused spawn was never handed over" 1
+        (List.length !materialized);
+      (* The reaper's report frees the permit. *)
+      (match children () with
+      | [ child ] ->
+          Agent.fail_brokered_child engine ~child:(sid child)
+            ~message:"reaped"
+      | _ -> fail "expected exactly one child");
+      submit_ok client
+        (prompt ~session:(sid "root") ~turn:(tid "t-two") "PLEASE_SPAWN_MORE");
+      ignore (drain_n_settled 2 (follow_ok client (sid "root")));
+      equal Testable.int ~msg:"the freed slot admits the next spawn" 2
+        (List.length (children ()));
+      equal Testable.int ~msg:"the next spawn was handed over" 2
+        (List.length !materialized))
+
 let mutation_event_value =
   Testable.make ~pp:Mutation.Event.pp ~equal:Mutation.Event.equal
 
@@ -6201,6 +6408,15 @@ let () =
             publish_reflects_the_settled_mutation_cache;
           test "recovery is consistent across commit points"
             recovery_is_consistent_across_commit_points;
+        ];
+      group "brokered child backend"
+        [
+          test "a brokered spawn hands identity and integrates on the wake"
+            a_brokered_spawn_hands_identity_and_integrates_on_the_wake;
+          test "a brokered failure settles the parked wait"
+            a_brokered_failure_settles_the_parked_wait;
+          test "a reaped brokered child releases capacity"
+            a_reaped_brokered_child_releases_capacity;
         ];
       group "online metadata cone (4a)"
         [

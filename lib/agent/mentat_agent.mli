@@ -127,15 +127,14 @@ val create :
     materializes once its edge and document are durable
     ({!Ports.child_backend}, default {!Ports.In_process}): under [In_process]
     the runtime attaches the child as a sibling driver and submits its
-    deterministic first turn ({!child_first_turn}) itself; the [Brokered] arm
-    is the reserved seam for an executable-owned broker, and this runtime does
-    not consume it — [create] refuses it with [Invalid_argument] at
-    construction, before any durable edge exists. A broker implementation must
-    replace that refusal with a real materialization rather than inherit it: a
-    raise deferred to delegation time would re-fire on every recovery re-drive
-    of a durable edge, wedging attachment.
-
-    Raises [Invalid_argument] on [child_backend = Brokered _]. *)
+    deterministic first turn ({!child_first_turn}) itself; under [Brokered] the
+    runtime still records the edge, creates the child document, and holds the
+    capacity permit, then hands the child's identity to the ops record — the
+    broker owns spawn, observation, and reaping, and reports what it observes
+    back through {{!section-brokered}the observation seam}. A child this
+    runtime already drives in-process is never handed to the broker: its own
+    driver and fence are the materialization, and a second process racing that
+    fence could only lose. *)
 
 val child_first_turn :
   Mentat_session.Delegation.Id.t -> Mentat_session.Turn.Id.t
@@ -145,6 +144,58 @@ val child_first_turn :
     turn under this id, so a crash re-drive or a re-materialization resubmits
     the same turn and the byte-identical task prompt is idempotent rather
     than duplicated. *)
+
+(** {1:brokered The brokered observation seam}
+
+    A brokered child's driver lives in another process; what this runtime holds
+    is the durable journals and the parent's scheduler bookkeeping. These three
+    calls are how the broker reports what it observes — a settlement seen on
+    the child's feed, a child process reaped, a materialization abandoned — and
+    how a node re-adopts a session no client is asking for. Each resolves
+    entirely against journals, so a spurious, repeated, or racing call
+    converges to the same state; none of them blocks on the child. *)
+
+val adopt : t -> Mentat_session.Id.t -> (unit, Mentat_protocol.Error.t) result
+(** [adopt t session] attaches [session]'s driver on demand with no
+    accompanying command: acquire the fence, load, and recover to quiescence,
+    leaving the driver resident. Recovery's own consequences run as they would
+    under any attach — a parked children-wait is reconstructed, unfinished
+    delegation edges re-drive through the configured backend, settled ones are
+    folded into the scheduler buffer, and undelivered recorded messages are
+    re-driven. It is the verb a restarted node uses to re-adopt the parent of
+    an orphaned child so the child's eventual settlement has a driver to wake.
+    Idempotent for a session this runtime already drives; [Busy] when another
+    process holds the fence. *)
+
+val integrate_brokered_child :
+  t ->
+  child:Mentat_session.Id.t ->
+  [ `Integrated | `Not_settled | `Unbound ]
+(** [integrate_brokered_child t ~child] folds an observed brokered-child
+    settlement into the parent: it re-derives the result from the child
+    journal's settled head (never from the report), buffers it, returns the
+    capacity permit, wakes the parent's parked wait, and re-drives any of the
+    parent's recorded messages for this child that were never delivered — the
+    sweep a child's exit makes deliverable, deduplicated by the derived message
+    ids so repetition is harmless. [`Integrated] on success. [`Not_settled]
+    when the child journal holds no settled head — an unstarted child, an
+    active turn, or an unreadable journal — which after a child process exit
+    means the child died mid-work: re-materialization, not integration, is the
+    caller's next move. [`Unbound] when this runtime holds no parent binding
+    for [child] (it never delegated through this engine, or has shut down);
+    the journals still hold the truth and the parent's next attach integrates
+    without the broker. *)
+
+val fail_brokered_child :
+  t -> child:Mentat_session.Id.t -> message:string -> unit
+(** [fail_brokered_child t ~child ~message] settles the parent's wait for
+    [child] with the spawn-failure text carrying [message] and returns the
+    capacity permit — the loud floor for a child the broker has abandoned
+    (spawn refused, repeated crashes, an unidentifiable fence holder). The
+    parent's parked wait completes with that text instead of parking forever;
+    no child journal fact is minted, so a later successful materialization of
+    the same edge supersedes the failure through the ordinary settlement path.
+    A no-op when this runtime holds no parent binding for [child]. *)
 
 val shutdown : t -> unit
 (** [shutdown t] stops admission and closes every driver, then returns. It has

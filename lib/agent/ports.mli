@@ -326,10 +326,12 @@ type child_ops = {
           running is a no-op, and a re-drive after a crash re-issues the same
           identities. *)
   cancel : child:Mentat_session.Id.t -> unit;
-      (** [cancel ~child] asks the broker to stop [child]'s work semantically —
-          an interrupt delivered to the child, never a kill of the delegation
-          tree's processes. Completion is observed through the child's
-          journal, not through this call. *)
+      (** [cancel ~child] asks the broker to stop [child]'s work: a semantic
+          interrupt delivered to the child first, with a bounded escalation to
+          the child's own process as the floor for a child that cannot hear it
+          — never a signal to the delegation tree's process groups, whose
+          descendants are the child's own to stop. Non-blocking; completion is
+          observed through the child's journal, not through this call. *)
 }
 (** The calls an out-of-process child backend consumes.
 
