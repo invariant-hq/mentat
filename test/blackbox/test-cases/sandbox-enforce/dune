@@ -33,3 +33,17 @@
  (alias blackbox)
  (enabled_if
   (= %{system} linux)))
+
+; review-seal.t pins the review-mode read-only seal — a posture-owned
+; confinement, not a configured one — so its body is deliberately backend- and
+; wording-agnostic (filesystem bytes and the evidence marker, no backend names
+; or refusal text) and one file serves both enforcing hosts. It is gated to
+; their union and skipped where neither backend exists.
+
+(cram
+ (applies_to review-seal)
+ (alias blackbox)
+ (enabled_if
+  (or
+   (= %{system} macosx)
+   (= %{system} linux))))
