@@ -115,12 +115,13 @@ auto-review design all go.
   that reviews it; the OpenClaw skill-registry class.
 - **N3 — Receipt before acknowledgment.** A delivery becomes a durable
   receipt line — an fsynced append under the store's ledger discipline,
-  with the `O_EXCL` marker as the creation barrier
-  (`lib/store/disk.ml:110-119`), exactly as durable as the journal — before
-  the ingress answers 202; a receipt that cannot be written is a 5xx. The
-  residual power-loss window is closed by the reconcile sweep, not by a
-  stronger barrier. *Prevents:* acknowledged-then-lost deliveries no
-  reconcile can see.
+  exactly as durable as the journal — before the ingress answers 202; a
+  receipt that cannot be written is a 5xx. The append alone is the
+  acknowledgment barrier; duplicate delivery lines across redeliveries
+  are harmless log lines, because dedup authority lives in the run-claim
+  (§3 step 3), not at intake. The residual power-loss window is closed by
+  the reconcile sweep, not by a stronger barrier. *Prevents:*
+  acknowledged-then-lost deliveries no reconcile can see.
 - **N4 — Identity is content-derived at every layer.** Run session ids and
   receipt names derive from `(charter digest, event identity)`. Redelivery
   and re-spawn are no-ops or loud collisions, never silent duplicates.
@@ -257,7 +258,10 @@ charter without `ingress.id` is refused at load with the hint to run
 `charter add`. `remove` deletes the id; a re-`add` mints a fresh URL and
 says so, since GitHub settings must follow. Receipts are retained for the
 charter's life — they are the dedup horizon and the metering substrate;
-retention knobs govern worktrees only, never receipts.
+retention knobs govern worktrees only, never receipts. (The
+`retention.keep_failed_worktrees` member parses but is refused as
+unimplemented — the `schedule` precedent — until a run-root reaper
+lands; an accepted no-op grant would be a silent lie.)
 
 **Verbs** (rung-1 surface; `rotate-secret` arrives with rung 1b, where
 the secret it rotates first matters):
@@ -283,18 +287,22 @@ no tunnel (the gate's current-head check and the publish are GitHub
 calls like any other; "no network" in an earlier draft overstated it —
 what `--event` removes is residency, not the API), and
 `--sweep` performs one open-PR listing with the read token and
-synthesizes deliveries for heads without receipts (the same fold rung 1b
-later runs at boot). A crontab line `*/5 * * * * mentat charter fire
+synthesizes deliveries for heads without run-claims — plus one narrower
+re-entry: a head that ran to settlement with findings but has no
+successful egress receipt re-enters the publisher only (C2's upsert is
+idempotent; no fresh run, no fresh spend). The same fold rung 1b later
+runs at boot. A crontab line `*/5 * * * * mentat charter fire
 pr-review --sweep` is therefore a complete, fenced, deduplicated,
 publishing review charter with zero listener, zero tunnel, zero service
 unit — rung 1 dogfoods on cron alone. `fire` runs the pipeline in the
 invoking process itself — the charter machinery is one code path with
 two invoking processes (the CLI and the node) — so a crontab line needs
-no resident node at all. The per-event-identity `O_CREAT|O_EXCL` marker
-(§3 step 1) is what serializes a CLI `fire` against a resident intake:
-one winner runs, the loser reads `dup`. (This supersedes an earlier
-draft's daemon-surface transport, which contradicted §3 step 1's own
-cross-process design and would have made rung 1 depend on residency.)
+no resident node at all. The per-event-identity `O_CREAT|O_EXCL`
+run-claim (§3 step 3) plus the per-charter fire lock are what serialize
+a CLI `fire` against a resident intake: one winner commits the run, the
+loser reads `dup`. (This supersedes an earlier draft's daemon-surface
+transport, which contradicted the marker's own cross-process design and
+would have made rung 1 depend on residency.)
 
 ## 3. Triggers
 
@@ -309,17 +317,20 @@ does not exist:
   action-class)` — semantic, never the delivery GUID, so a UI redelivery
   dedupes and a new push runs. Default rate fence where the charter names
   none: `runs_per_hour = 6`.
-- `cli` — **funded.** `mentat charter fire NAME [--event FILE | --sweep]
-  [--key STRING]`. A bare or `--key` fire carries identity
-  `(digest, key)`, `key` defaulting to the fire instant — distinct runs
-  per fire, and an explicit key exercises the dedup path, the test seam
-  for N4 itself; a bare fire on an event-shaped charter (nothing to
-  review) is refused with the hint to use `--event` or `--sweep`.
-  `--event` and `--sweep` fires carry the identity of the delivery they
-  decode or synthesize, so the canonical `--sweep` crontab dedupes
-  exactly as the webhook path would. `--event` bytes are fenced exactly
-  as a webhook body. Rate fence: none by default — the invoker is the
-  owner's own scheduler.
+- `cli` — **funded.** `mentat charter fire NAME [--event FILE |
+  --sweep]`. `--event` and `--sweep` fires carry the identity of the
+  webhook-shaped delivery they decode or synthesize, so the canonical
+  `--sweep` crontab dedupes — **and is fenced** — exactly as the webhook
+  path would: the fence follows the delivery's arm, never the invoking
+  transport, because the per-sweep run count is controlled by whoever
+  opens PRs, not by the owner's cron cadence. `--event` bytes are fenced
+  exactly as a webhook body. A bare fire on an event-shaped charter
+  (nothing to review) is refused with the hint to use `--event` or
+  `--sweep`. The `(digest, key)` cli identity is minted vocabulary
+  reserved for a future event-less charter shape; the `--key` flag is
+  deliberately absent until such a shape can bind it — the "invoker is
+  the owner's own scheduler, no default rate fence" clause applies only
+  to that future arm.
 - `schedule` — **designed, unfunded.** Identity `(digest, fire-instant)`;
   at-most-one-pending, no backfill; fresh isolated session per fire,
   always a receipt. Parses and is refused as unimplemented; lands with a
@@ -332,21 +343,33 @@ does not exist:
 
 **The trigger-to-run path** (funded slice):
 
-1. The listener authenticates and receipts the delivery (N3), answers
-   202. Receipt creation is a per-event-identity file created
-   `O_CREAT|O_EXCL` — create-exclusion is the **cross-process**
-   serialization point, so a CLI `fire` racing the resident intake
-   collapses to one receipt and one loser reading `dup`. Everything after
-   the receipt — gate, fences, spawn, reap, fold, publish, notify — runs
-   on one node fiber, so fold actions are at-most-once-in-flight.
+1. The listener authenticates and receipts the delivery (N3) — a JSONL
+   append, no marker, no network — and answers 202. Everything after
+   the receipt — gate, fences, claim, spawn, reap, fold, publish,
+   notify — runs on one node fiber, so fold actions are
+   at-most-once-in-flight. (An earlier draft placed the `O_EXCL` marker
+   here, at intake; that made every gate or fence refusal permanent —
+   a draft swept once was never reviewed after "ready for review", and
+   a rate-fenced head never re-entered when its window freed. The
+   marker is a run-claim and sits at step 3.)
 2. The node re-reads the charter, evaluates the gate, folds the fences
    over receipts (N5, §6). Refusals are receipt lines — silent except the
-   once-per-window fence alert. The gate also refuses a delivery whose
+   once-per-window fence alert — and **never claim**: a refused head
+   re-enters on its next delivery or sweep pass once the refusing
+   condition clears. (Accepted cost: a standing refused head appends one
+   `skipped`/`fenced` line per sweep pass — receipted refusals were
+   chosen over dedup.) The gate also refuses a delivery whose
    `head_sha` is no longer the PR's current head — closing stale-head
    replays and supersession races at one stroke.
-3. It derives the run session id — `"c-" ^ H(digest, event-identity)`
-   under domain `mentat.charter.run.v1` — and prepares the ephemeral
-   checkout at `~/.cache/mentat/charters/<name>/runs/<session-id>/`
+3. With gate and fences passed, it commits the run: under the
+   per-charter fire lock it takes the per-event-identity `O_CREAT|O_EXCL`
+   **run-claim** — marker present means this identity committed a run,
+   so every later delivery and every sweep pass reads `dup`; a torn
+   claim (marker held, no `spawned` receipt) is adopted and driven by
+   the next pass — then derives the run session id — `"c-" ^ H(digest,
+   event-identity)` under domain `mentat.charter.run.v1` — and prepares
+   the ephemeral checkout at
+   `~/.cache/mentat/charters/<name>/runs/<session-id>/`
    (that directory is the run's workspace root, so store, journal, and
    run log are discoverable from the receipt alone). The run root lives
    under the cache home, not the state home, and the placement is
@@ -415,8 +438,8 @@ the delivery as a queue entry to admit as `Origin.Queued` (the sealed
 contract — mode, schema, posture — rides the `Prompt` command; a bare
 queue entry admits under session defaults).
 
-**Idempotency and supersession.** Three layers: the `O_EXCL` receipt
-(above); the content-derived session id, whose duplicate spawn collides
+**Idempotency and supersession.** Three layers: the `O_EXCL` run-claim
+(§3 step 3); the content-derived session id, whose duplicate spawn collides
 loudly at create (`Already_exists` → protocol `Unavailable`, child
 exit 1 — `lib/store/session.ml:122-128`, `bin/session_meta.ml:19-21`) and
 is receipted `already_exists`, never alerted — whether the prior run is
@@ -513,9 +536,9 @@ public front door; it has no private path into the engine.
 
 **5.1 The receipt log.** One append-only JSONL file per charter,
 `~/.local/state/mentat/charters/<name>/receipts.jsonl` (plus the
-per-event-identity `O_EXCL` marker files of §3's step 1 — the markers are
-the serialization point, the JSONL is the authoritative record; open
-question 4's goldens pin both), written only by the node, never
+per-event-identity `O_EXCL` run-claim markers of §3's step 3 — the
+markers serialize run commitment, the JSONL is the authoritative record;
+open question 4's goldens pin both), written only by the node, never
 rewritten. A line is one of four kinds — a closed sum with
 `error_unknown` decode and a diagnostic projection (house norm):
 
@@ -1010,7 +1033,7 @@ dogfood ≈ 5,700–8,400 LOC.**
 | TUI-private notify firing (§8) | ≈ −40 (one shared module; prevents a divergent second copy) | rung 1 |
 | Roadmap ladder rungs 3–5 → one design; goal doc surface | ≈ −50 prose; two future design campaigns collapsed into charter trigger arms | on landing |
 | Avoided outright | the ~300-LOC headless-band re-hosting (the node spawns `run start`); an in-node scheduler; a delivery/intent store; a second structured parser | by construction |
-| The `In_process` delegation arm (deletion candidate, amends 0018's compatibility clause) | the seam's second backend and its cross-backend golden upkeep; deleting it makes every subagent an OS process and delegation one story | after the broker lands and soaks: `In_process` re-justifies against its true rents (unit-tier delegation tests; the one-shot CLI's teardown policy) or goes. The soak clock cannot start while `Brokered` still leans on the arm: post-first-turn delivery attaches in-process drivers, a brokered child's own grandchildren run in-process inside the child server (depth ≥ 2 brokering is 0018 §7.2's named RPC, unbuilt), and the one-shot CLI's die-with-the-run teardown has no brokered substitute without a resident reaper. Until the seam's delivery verb and the daemon's session-keyed child routing land, the arm is infrastructure, not a candidate |
+| The `In_process` delegation arm (deletion candidate, amends 0018's compatibility clause) | the seam's second backend and its cross-backend golden upkeep; deleting it makes every subagent an OS process and delegation one story | after the broker lands and soaks: `In_process` re-justifies against its true rents (unit-tier delegation tests; the one-shot CLI's teardown policy) or goes. The seam's delivery verb and the daemon's session-keyed child routing have landed: a live brokered child now takes messages over its endpoint and serves its own session cone to daemon-routed callers. The soak clock still cannot start while `Brokered` leans on the arm for what remains: delivery to a settled, exited child is deliberately the in-process attach (the exit-time and attach-time re-drive story), a brokered child's own grandchildren run in-process inside the child server (depth ≥ 2 brokering is 0018 §7.2's named RPC, unbuilt), and the one-shot CLI's die-with-the-run teardown has no brokered substitute without a resident reaper |
 
 **The honest net:** the tree grows in the slice — ≈ **+1,700 to +3,600
 impl** (4,500–6,400 built against ≈2,800 deleted: goals −2,700,
