@@ -932,7 +932,8 @@ let resume_cmd ~version =
     ]
   in
   Cmd.v
-    (Cmd.info "resume" ~doc ~docs:Cli_common.s_run ~man ~exits:Cli_common.exits)
+    (Cmd.info "resume" ~doc ~docs:Cli_common.s_run ~man
+       ~envs:Cli_common.daemon_envs ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const (run version)
@@ -957,7 +958,8 @@ let review_cmd ~version =
     ]
   in
   Cmd.v
-    (Cmd.info "review" ~doc ~docs:Cli_common.s_run ~man ~exits:Cli_common.exits)
+    (Cmd.info "review" ~doc ~docs:Cli_common.s_run ~man
+       ~envs:Cli_common.daemon_envs ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const (run_review version)

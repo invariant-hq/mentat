@@ -1359,7 +1359,8 @@ let start_term =
 let start_cmd =
   let doc = "Run a headless turn on a new session." in
   Cmd.v
-    (Cmd.info "start" ~doc ~docs ~exits:Cli_common.exits)
+    (Cmd.info "start" ~doc ~docs ~envs:Cli_common.daemon_envs
+       ~exits:Cli_common.exits)
     (Exit_status.term start_term)
 
 (* resume. — a new turn on an existing session.
@@ -1442,7 +1443,8 @@ let resume_pos1 =
 let resume_cmd =
   let doc = "Run a new headless turn on an existing session." in
   Cmd.v
-    (Cmd.info "resume" ~doc ~docs ~exits:Cli_common.exits)
+    (Cmd.info "resume" ~doc ~docs ~envs:Cli_common.daemon_envs
+       ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const resume $ Cli_common.json $ run_options_term $ Cli_common.attach
@@ -1975,7 +1977,8 @@ let review_commit_opt =
 let review_cmd =
   let doc = "Run a headless review turn over a git diff target." in
   Cmd.v
-    (Cmd.info "review" ~doc ~docs ~exits:Cli_common.exits)
+    (Cmd.info "review" ~doc ~docs ~envs:Cli_common.daemon_envs
+       ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const review $ Cli_common.json $ review_base_opt

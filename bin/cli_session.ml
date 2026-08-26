@@ -249,7 +249,8 @@ let limit_opt =
 let list_cmd =
   let doc = "List sessions." in
   Cmd.v
-    (Cmd.info "list" ~doc ~docs ~exits:Cli_common.exits)
+    (Cmd.info "list" ~doc ~docs ~envs:Cli_common.daemon_envs
+       ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const list $ Cli_common.json $ all_flag $ archived_flag $ deleted_flag
@@ -540,7 +541,8 @@ let title_req =
 let rename_cmd =
   let doc = "Rename a session." in
   Cmd.v
-    (Cmd.info "rename" ~doc ~docs ~exits:Cli_common.exits)
+    (Cmd.info "rename" ~doc ~docs ~envs:Cli_common.daemon_envs
+       ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const rename $ title_req $ Cli_common.session_arg $ Cli_common.last
@@ -555,7 +557,8 @@ let archive session_opt last attach cwd =
 let archive_cmd =
   let doc = "Archive a session." in
   Cmd.v
-    (Cmd.info "archive" ~doc ~docs ~exits:Cli_common.exits)
+    (Cmd.info "archive" ~doc ~docs ~envs:Cli_common.daemon_envs
+       ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const archive $ Cli_common.session_arg $ Cli_common.last
@@ -570,7 +573,8 @@ let restore session_opt last attach cwd =
 let restore_cmd =
   let doc = "Restore an archived session." in
   Cmd.v
-    (Cmd.info "restore" ~doc ~docs ~exits:Cli_common.exits)
+    (Cmd.info "restore" ~doc ~docs ~envs:Cli_common.daemon_envs
+       ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const restore $ Cli_common.session_arg $ Cli_common.last
@@ -591,7 +595,8 @@ let yes_flag = Arg.(value & flag & info [ "yes" ] ~doc:"Confirm the deletion.")
 let delete_cmd =
   let doc = "Delete a session (recoverable tombstone)." in
   Cmd.v
-    (Cmd.info "delete" ~doc ~docs ~exits:Cli_common.exits)
+    (Cmd.info "delete" ~doc ~docs ~envs:Cli_common.daemon_envs
+       ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const delete $ yes_flag $ Cli_common.session_arg $ Cli_common.last
@@ -1421,7 +1426,8 @@ let revert_cmd =
     "Revert Mentat-authored workspace changes from the mutation ledger."
   in
   Cmd.v
-    (Cmd.info "revert" ~doc ~docs ~exits:Cli_common.exits)
+    (Cmd.info "revert" ~doc ~docs ~envs:Cli_common.daemon_envs
+       ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const revert $ Cli_common.json $ apply_flag $ latest_flag $ change_opt
@@ -1672,7 +1678,8 @@ let quiet_opt =
 let export_cmd =
   let doc = "Export a session as a self-describing bundle." in
   Cmd.v
-    (Cmd.info "export" ~doc ~docs ~exits:Cli_common.exits)
+    (Cmd.info "export" ~doc ~docs ~envs:Cli_common.daemon_envs
+       ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const export $ format_opt $ output_opt $ no_timestamp_opt
