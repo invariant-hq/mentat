@@ -32,9 +32,6 @@ module Transition : sig
 
   val to_string : t -> string
   (** [to_string t] is ["failed"], ["parked"], or ["fenced"]. *)
-
-  val equal : t -> t -> bool
-  (** [equal a b] is [true] iff [a] and [b] are the same transition. *)
 end
 
 (** Budget meters — the per-charter admission fences. *)
@@ -42,10 +39,6 @@ module Meter : sig
   type t =
     | Usd_per_day  (** Derived spend over the trailing 24 hours. *)
     | Runs_per_hour  (** Spawned runs over the trailing hour. *)
-
-  val of_string : string -> t option
-  (** [of_string s] is the meter named [s] (["usd_per_day"] or
-      ["runs_per_hour"]), or [None]. *)
 
   val to_string : t -> string
   (** [to_string t] is ["usd_per_day"] or ["runs_per_hour"]. *)
@@ -131,14 +124,25 @@ module Kind : sig
   type t =
     | Delivery  (** The event arrived and was durably recorded. *)
     | Disposition of Disposition.t  (** What was decided about it. *)
-    | Egress of { summary : [ `Created | `Updated ]; threads : int }
-        (** What the publisher wrote: whether the summary comment was
-            created or updated, and how many finding threads were posted. *)
-    | Alert of { transition : Transition.t; window : string }
-        (** The owner was alerted for [transition]; [window] names the
-            dedup scope — a meter name for a fence trip, an event identity
-            otherwise — so a later query can tell whether this window
-            already alerted. *)
+    | Egress of {
+        summary : [ `Created | `Updated | `None_needed ];
+        threads : int;
+      }
+        (** What the publisher concluded: whether the summary comment was
+            created, updated, or — a clean suppressed run with nothing
+            posted before — the publisher converged with nothing to write,
+            and how many finding threads were posted. [`None_needed] is a
+            real egress fact: without it a settled run with no comment
+            would look egress-less forever and be re-published on every
+            reconcile pass. *)
+    | Alert of {
+        transition : Transition.t;
+        window : [ `Meter of Meter.t | `Identity ];
+      }
+        (** The owner was alerted for [transition]; [window] types the
+            dedup scope — the tripped meter for a fence trip, or the
+            receipt's own event identity — so a later query can tell
+            whether this window already alerted. *)
 end
 
 type t = {
@@ -175,10 +179,11 @@ val decode : string -> (t, Error.t) result
 (** [decode line] is the receipt [line] denotes, where [line] carries no
     trailing newline. The read is strict: malformed JSON, an unknown or
     duplicate member, a missing member, a wrongly-typed member, an unknown
-    kind, disposition, meter, transition, head outcome, or cause, a negative
-    or non-finite timestamp, an empty identity, a digest that is not
-    lowercase hexadecimal, an exit code outside [0]–[255], or a negative
-    cost or thread count is an [Error] naming the offending part. The
+    kind, disposition, meter, transition, head outcome, or cause, an alert
+    window that names neither a meter nor ["identity"], a negative or
+    non-finite timestamp, an empty identity, a digest that is not lowercase
+    hexadecimal, an exit code outside [0]–[255], or a negative cost or
+    thread count is an [Error] naming the offending part. The
     [usage] member of a reaped disposition must be a JSON object and is
     otherwise preserved without interpretation. *)
 

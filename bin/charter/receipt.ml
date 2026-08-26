@@ -16,11 +16,6 @@ module Transition = struct
     | Failed -> "failed"
     | Parked -> "parked"
     | Fenced -> "fenced"
-
-  let equal a b =
-    match (a, b) with
-    | Failed, Failed | Parked, Parked | Fenced, Fenced -> true
-    | (Failed | Parked | Fenced), _ -> false
 end
 
 module Meter = struct
@@ -120,8 +115,14 @@ module Kind = struct
   type t =
     | Delivery
     | Disposition of Disposition.t
-    | Egress of { summary : [ `Created | `Updated ]; threads : int }
-    | Alert of { transition : Transition.t; window : string }
+    | Egress of {
+        summary : [ `Created | `Updated | `None_needed ];
+        threads : int;
+      }
+    | Alert of {
+        transition : Transition.t;
+        window : [ `Meter of Meter.t | `Identity ];
+      }
 end
 
 type t = { at : float; identity : string; digest : string; kind : Kind.t }
@@ -172,14 +173,19 @@ let kind_mems = function
             (str
                (match summary with
                | `Created -> "created"
-               | `Updated -> "updated"));
+               | `Updated -> "updated"
+               | `None_needed -> "none_needed"));
           mem "threads" (Jsont.Json.int threads);
         ] )
   | Kind.Alert { transition; window } ->
       ( str "alert",
         [
           mem "transition" (str (Transition.to_string transition));
-          mem "window" (str window);
+          mem "window"
+            (str
+               (match window with
+               | `Meter meter -> Meter.to_string meter
+               | `Identity -> "identity"));
         ] )
 
 let encode t =
@@ -356,8 +362,10 @@ let decode line =
             match name with
             | "created" -> Ok `Created
             | "updated" -> Ok `Updated
+            | "none_needed" -> Ok `None_needed
             | _ ->
-                error ~context:"summary" "must be \"created\" or \"updated\""
+                error ~context:"summary"
+                  "must be \"created\", \"updated\", or \"none_needed\""
           in
           let* threads =
             let* json = value slots "threads" in
@@ -375,8 +383,14 @@ let decode line =
                   "must be \"failed\", \"parked\", or \"fenced\""
           in
           let* window =
-            let* json = value slots "window" in
-            Decode.as_non_empty_string ~context:"window" json
+            let* name = string_value slots "window" in
+            match Meter.of_string name with
+            | Some meter -> Ok (`Meter meter)
+            | None ->
+                if String.equal name "identity" then Ok `Identity
+                else
+                  error ~context:"window"
+                    "must name a meter or be \"identity\""
           in
           finish slots (Kind.Alert { transition; window })
       | other ->
@@ -387,7 +401,9 @@ let decode line =
 
 (* Civil date from a day count since 1970-01-01, proleptic Gregorian — the
    era decomposition keeps the arithmetic exact over the whole float-second
-   range receipts can carry. *)
+   range receipts can carry. Hand-rolled rather than [Unix.gmtime] because
+   this library's dependency envelope deliberately excludes unix: the
+   charter layer is pure and linkable anywhere. *)
 let civil days =
   let z = days + 719468 in
   let era = (if z >= 0 then z else z - 146096) / 146097 in
@@ -437,9 +453,14 @@ let diagnostic t =
             | None -> "unpriced"))
   | Kind.Egress { summary; threads } ->
       Printf.sprintf "%s egress %s: summary %s, %d threads" stamp t.identity
-        (match summary with `Created -> "created" | `Updated -> "updated")
+        (match summary with
+        | `Created -> "created"
+        | `Updated -> "updated"
+        | `None_needed -> "none_needed")
         threads
   | Kind.Alert { transition; window } ->
       Printf.sprintf "%s alert %s: %s (window %s)" stamp t.identity
         (Transition.to_string transition)
-        window
+        (match window with
+        | `Meter meter -> Meter.to_string meter
+        | `Identity -> "identity")

@@ -7,11 +7,6 @@ module Unattended = struct
   type t = Deny | Block
 
   let to_string = function Deny -> "deny" | Block -> "block"
-
-  let equal a b =
-    match (a, b) with
-    | Deny, Deny | Block, Block -> true
-    | (Deny | Block), _ -> false
 end
 
 module Gate = struct
@@ -30,10 +25,6 @@ module Trigger = struct
   end
 
   type t = Github_webhook of Webhook.t | Cli
-
-  let default_runs_per_hour = function
-    | Github_webhook _ -> Some 6
-    | Cli -> None
 end
 
 module Run = struct
@@ -178,19 +169,47 @@ let association_vocabulary =
 let reasoning_vocabulary =
   [ "none"; "minimal"; "low"; "medium"; "high"; "xhigh"; "max" ]
 
+(* GitHub's documented pull_request webhook actions. Closed like every other
+   vocabulary in this envelope: a typo'd action must be a load error, never a
+   charter that silently fires on nothing; a new GitHub action becomes
+   admissible by a build update. *)
+let action_vocabulary =
+  [
+    "assigned";
+    "auto_merge_disabled";
+    "auto_merge_enabled";
+    "closed";
+    "converted_to_draft";
+    "demilestoned";
+    "dequeued";
+    "edited";
+    "enqueued";
+    "labeled";
+    "locked";
+    "milestoned";
+    "opened";
+    "ready_for_review";
+    "reopened";
+    "review_request_removed";
+    "review_requested";
+    "synchronize";
+    "unassigned";
+    "unlabeled";
+    "unlocked";
+  ]
+
 let event_name ~context s =
   let prefix = "pull_request." in
   let plen = String.length prefix in
-  let well_formed =
-    String.length s > plen
-    && String.equal (String.sub s 0 plen) prefix
-    && String.for_all
-         (fun c -> (c >= 'a' && c <= 'z') || Char.equal c '_')
-         (String.sub s plen (String.length s - plen))
-  in
-  if well_formed then Ok s
-  else
+  if
+    String.length s <= plen || not (String.equal (String.sub s 0 plen) prefix)
+  then
     error ~context "must name a pull_request event like \"pull_request.opened\""
+  else
+    let action = String.sub s plen (String.length s - plen) in
+    if List.mem action action_vocabulary then Ok s
+    else
+      error ~context (Printf.sprintf "unknown pull_request action %S" action)
 
 let decode_gate ~context json =
   match json with

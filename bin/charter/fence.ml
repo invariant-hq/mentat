@@ -34,9 +34,23 @@ let spawns_in_window ~digest ~now receipts =
       | _ -> count)
     0 receipts
 
-let admit ~digest ~usd_per_day ~runs_per_hour ~now receipts =
+(* The webhook arm's rate fallback lives here, in admission itself, so an
+   unfenced webhook charter can never exist by a caller forgetting to apply
+   it: a remote service must never be an unmetered spender. The cli arm's
+   invoker is the owner's own scheduler, so it imposes no default. *)
+let webhook_default_runs_per_hour = 6
+
+let effective_runs_per_hour ~(budget : Charter.Budget.t) ~trigger =
+  match budget.Charter.Budget.runs_per_hour with
+  | Some limit -> Some limit
+  | None -> (
+      match trigger with
+      | Charter.Trigger.Github_webhook _ -> Some webhook_default_runs_per_hour
+      | Charter.Trigger.Cli -> None)
+
+let admit ~digest ~(budget : Charter.Budget.t) ~trigger ~now receipts =
   let spend_tripped =
-    match usd_per_day with
+    match budget.Charter.Budget.usd_per_day with
     | None -> false
     | Some limit ->
         Float.compare (spend_in_window ~digest ~now receipts) limit >= 0
@@ -44,7 +58,7 @@ let admit ~digest ~usd_per_day ~runs_per_hour ~now receipts =
   if spend_tripped then Fenced Receipt.Meter.Usd_per_day
   else
     let rate_tripped =
-      match runs_per_hour with
+      match effective_runs_per_hour ~budget ~trigger with
       | None -> false
       | Some limit -> spawns_in_window ~digest ~now receipts >= limit
     in
@@ -52,14 +66,16 @@ let admit ~digest ~usd_per_day ~runs_per_hour ~now receipts =
 
 let should_alert ~digest ~now ~meter receipts =
   let window = Receipt.Meter.window meter in
-  let name = Receipt.Meter.to_string meter in
   not
     (List.exists
        (fun (receipt : Receipt.t) ->
          match receipt.Receipt.kind with
          | Receipt.Kind.Alert
-             { transition = Receipt.Transition.Fenced; window = scope }
-           when String.equal scope name ->
+             {
+               transition = Receipt.Transition.Fenced;
+               window = `Meter tripped;
+             }
+           when Receipt.Meter.equal tripped meter ->
              relevant ~digest ~now ~window receipt
          | _ -> false)
        receipts)

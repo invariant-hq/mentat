@@ -150,19 +150,9 @@ let charter_defaults () =
         c.Charter.budget.Charter.Budget.runs_per_hour;
       is_false ~msg:"clean runs announce by default" c.Charter.suppress_clean_run;
       is_true ~msg:"no notify contract" (Option.is_none c.Charter.notify);
-      (match c.Charter.triggers with
+      match c.Charter.triggers with
       | [ Charter.Trigger.Cli ] -> ()
-      | _ -> fail "expected exactly the cli arm");
-      equal (option int) ~msg:"cli arm imposes no default rate fence" None
-        (Charter.Trigger.default_runs_per_hour Charter.Trigger.Cli);
-      equal (option int) ~msg:"webhook arm defaults to 6 runs per hour"
-        (Some 6)
-        (Charter.Trigger.default_runs_per_hour
-           (Charter.Trigger.Github_webhook
-              {
-                Charter.Trigger.Webhook.events = [ "pull_request.opened" ];
-                gate = { Charter.Gate.base = None; drafts = false; associations = None };
-              }))
+      | _ -> fail "expected exactly the cli arm"
 
 let gate_defaults_when_omitted () =
   let payload =
@@ -338,6 +328,11 @@ let charter_envelope_is_closed () =
     (amended
        ~old_string:{|"events": ["pull_request.opened", "pull_request.synchronize",|}
        ~new_string:{|      "events": ["push", "pull_request.synchronize",|});
+  rejects ~msg:"typo'd pull_request action"
+    ~expect:{|unknown pull_request action "sychronize"|}
+    (amended
+       ~old_string:{|"events": ["pull_request.opened", "pull_request.synchronize",|}
+       ~new_string:{|      "events": ["pull_request.sychronize",|});
   rejects ~msg:"unknown notify transition" ~expect:"notify.on[0]"
     (amended ~old_string:{|"notify": { "on": ["failed", "parked", "fenced"],|}
        ~new_string:{|  "notify": { "on": ["clean_run", "parked", "fenced"],|});
@@ -454,8 +449,14 @@ let all_kinds =
            cause = Receipt.Cause.Wall_clock;
          });
     Receipt.Kind.Egress { summary = `Created; threads = 3 };
+    Receipt.Kind.Egress { summary = `None_needed; threads = 0 };
     Receipt.Kind.Alert
-      { transition = Receipt.Transition.Fenced; window = "usd_per_day" };
+      {
+        transition = Receipt.Transition.Fenced;
+        window = `Meter Receipt.Meter.Usd_per_day;
+      };
+    Receipt.Kind.Alert
+      { transition = Receipt.Transition.Parked; window = `Identity };
   ]
 
 let receipt_round_trips () =
@@ -577,6 +578,10 @@ let receipt_decode_is_strict () =
        base);
   receipt_rejects ~msg:"empty alert window" ~expect:"window"
     (Printf.sprintf {|{"kind":"alert",%s,"transition":"failed","window":""}|}
+       base);
+  receipt_rejects ~msg:"alert window vocabulary is closed" ~expect:"window"
+    (Printf.sprintf
+       {|{"kind":"alert",%s,"transition":"failed","window":"cli:0123456789abcdef:k"}|}
        base)
 
 let receipt_diagnostics () =
@@ -608,6 +613,12 @@ let receipt_diagnostics () =
                   usd = Some 1.25;
                   cause = Receipt.Cause.Exited;
                 }))));
+  equal string ~msg:"egress none_needed line"
+    (Printf.sprintf
+       "1970-01-02T01:01:01Z egress %s: summary none_needed, 0 threads"
+       sample_identity)
+    (Receipt.diagnostic
+       (receipt (Receipt.Kind.Egress { summary = `None_needed; threads = 0 })));
   equal string ~msg:"a modern timestamp renders"
     (Printf.sprintf "2026-08-25T00:00:00Z dup %s" sample_identity)
     (Receipt.diagnostic
@@ -764,19 +775,24 @@ let gate_arms () =
     | None, Gate.Skip reason -> failf "%s: unexpectedly skipped: %s" msg reason
     | Some _, Gate.Pass -> failf "%s: unexpectedly passed" msg
   in
+  let repo = "invariant/spice" in
   check ~msg:"a conforming event passes" None
-    (Gate.evaluate webhook_arm sample_event);
+    (Gate.evaluate ~repo webhook_arm sample_event);
+  check ~msg:"a foreign repository skips first"
+    (Some {|repository "acme/widgets" is not the charter's|})
+    (Gate.evaluate ~repo webhook_arm
+       { sample_event with Event.Pull_request.repo = "acme/widgets" });
   check ~msg:"an unadmitted event skips" (Some {|"pull_request.closed"|})
-    (Gate.evaluate webhook_arm
+    (Gate.evaluate ~repo webhook_arm
        { sample_event with Event.Pull_request.action = "closed" });
   check ~msg:"an unadmitted base skips" (Some {|base branch "dev"|})
-    (Gate.evaluate webhook_arm
+    (Gate.evaluate ~repo webhook_arm
        { sample_event with Event.Pull_request.base_ref = "dev" });
   check ~msg:"a draft skips" (Some "draft")
-    (Gate.evaluate webhook_arm
+    (Gate.evaluate ~repo webhook_arm
        { sample_event with Event.Pull_request.draft = true });
   check ~msg:"an admitted draft passes" None
-    (Gate.evaluate
+    (Gate.evaluate ~repo
        {
          webhook_arm with
          Charter.Trigger.Webhook.gate =
@@ -784,10 +800,10 @@ let gate_arms () =
        }
        { sample_event with Event.Pull_request.draft = true });
   check ~msg:"an unadmitted association skips" (Some "association NONE")
-    (Gate.evaluate webhook_arm
+    (Gate.evaluate ~repo webhook_arm
        { sample_event with Event.Pull_request.author_association = "NONE" });
   check ~msg:"a permissive gate passes anything but drafts" None
-    (Gate.evaluate
+    (Gate.evaluate ~repo
        {
          Charter.Trigger.Webhook.events = [ "pull_request.opened" ];
          gate = { Charter.Gate.base = None; drafts = false; associations = None };
@@ -825,7 +841,8 @@ let reaped_at ?(digest = sample_digest) ?usd at =
            });
   }
 
-let fence_alert_at ?(digest = sample_digest) ?(window = "usd_per_day") at =
+let fence_alert_at ?(digest = sample_digest)
+    ?(window = `Meter Receipt.Meter.Usd_per_day) at =
   {
     Receipt.at;
     identity = sample_identity;
@@ -857,50 +874,61 @@ let fence_windows () =
          spawned_at ~digest:"feedfacefeedface" (now -. 10.0);
          reaped_at ~usd:1.0 (now -. 10.0);
        ]);
-  let admit = Fence.admit ~digest:sample_digest ~now in
-  (match
-     admit ~usd_per_day:(Some 15.0) ~runs_per_hour:None
-       [ reaped_at ~usd:15.0 (now -. 100.0) ]
-   with
+  let budget ?usd_per_day ?runs_per_hour () =
+    { Charter.Budget.wall_clock = 900.0; usd_per_day; runs_per_hour }
+  in
+  let webhook = Charter.Trigger.Github_webhook webhook_arm in
+  let admit ?usd_per_day ?runs_per_hour ?(trigger = Charter.Trigger.Cli)
+      receipts =
+    Fence.admit ~digest:sample_digest
+      ~budget:(budget ?usd_per_day ?runs_per_hour ())
+      ~trigger ~now receipts
+  in
+  (match admit ~usd_per_day:15.0 [ reaped_at ~usd:15.0 (now -. 100.0) ] with
   | Fence.Fenced Receipt.Meter.Usd_per_day -> ()
   | _ -> fail "spend at the limit must fence");
-  (match
-     admit ~usd_per_day:(Some 15.0) ~runs_per_hour:None
-       [ reaped_at ~usd:14.99 (now -. 100.0) ]
-   with
+  (match admit ~usd_per_day:15.0 [ reaped_at ~usd:14.99 (now -. 100.0) ] with
   | Fence.Pass -> ()
   | _ -> fail "spend under the limit must pass");
-  (match
-     admit ~usd_per_day:(Some 15.0) ~runs_per_hour:None
-       [ reaped_at ~usd:15.0 (now -. day) ]
-   with
+  (match admit ~usd_per_day:15.0 [ reaped_at ~usd:15.0 (now -. day) ] with
   | Fence.Pass -> ()
   | _ -> fail "a receipt exactly a day old has left the window");
   (match
-     admit ~usd_per_day:None ~runs_per_hour:(Some 2)
+     admit ~runs_per_hour:2 ~trigger:webhook
        [ spawned_at (now -. 10.0); spawned_at (now -. 20.0) ]
    with
   | Fence.Fenced Receipt.Meter.Runs_per_hour -> ()
-  | _ -> fail "the rate limit must fence at the count");
+  | _ -> fail "an explicit rate limit fences at its own count");
   (match
-     admit ~usd_per_day:None ~runs_per_hour:(Some 2)
-       [ spawned_at (now -. 10.0); spawned_at (now -. hour) ]
+     admit ~runs_per_hour:2 [ spawned_at (now -. 10.0); spawned_at (now -. hour) ]
    with
   | Fence.Pass -> ()
   | _ -> fail "an hour-old spawn has left the window");
   (match
-     admit ~usd_per_day:(Some 1.0) ~runs_per_hour:(Some 1)
+     admit ~usd_per_day:1.0 ~runs_per_hour:1
        [ reaped_at ~usd:2.0 (now -. 10.0); spawned_at (now -. 10.0) ]
    with
   | Fence.Fenced Receipt.Meter.Usd_per_day -> ()
   | _ -> fail "spend is checked before rate");
   (match
-     admit ~usd_per_day:(Some 1.0) ~runs_per_hour:None
+     admit ~usd_per_day:1.0
        [ reaped_at ~usd:2.0 ~digest:"feedfacefeedface" (now -. 10.0) ]
    with
   | Fence.Pass -> ()
   | _ -> fail "a policy edit resets the window");
-  match admit ~usd_per_day:None ~runs_per_hour:None [] with
+  let six_spawns =
+    List.init 6 (fun i -> spawned_at (now -. 10.0 -. float_of_int i))
+  in
+  (match admit ~trigger:webhook six_spawns with
+  | Fence.Fenced Receipt.Meter.Runs_per_hour -> ()
+  | _ -> fail "an unfenced webhook charter defaults to 6 runs per hour");
+  (match admit ~trigger:webhook (List.tl six_spawns) with
+  | Fence.Pass -> ()
+  | _ -> fail "five spawns pass the webhook default");
+  (match admit six_spawns with
+  | Fence.Pass -> ()
+  | _ -> fail "the cli arm imposes no default rate fence");
+  match admit [] with
   | Fence.Pass -> ()
   | _ -> fail "no limits means no fence"
 
@@ -917,7 +945,10 @@ let fence_alert_dedup () =
        [ fence_alert_at (now -. 86400.0) ]);
   is_true ~msg:"another meter's alert does not suppress"
     (Fence.should_alert ~digest:sample_digest ~now ~meter
-       [ fence_alert_at ~window:"runs_per_hour" (now -. 100.0) ]);
+       [
+         fence_alert_at ~window:(`Meter Receipt.Meter.Runs_per_hour)
+           (now -. 100.0);
+       ]);
   is_true ~msg:"a policy edit re-alerts"
     (Fence.should_alert ~digest:sample_digest ~now ~meter
        [ fence_alert_at ~digest:"feedfacefeedface" (now -. 100.0) ])

@@ -5,7 +5,7 @@
 
 type verdict = Pass | Skip of string
 
-let evaluate (webhook : Charter.Trigger.Webhook.t)
+let evaluate ~repo (webhook : Charter.Trigger.Webhook.t)
     (event : Event.Pull_request.t) =
   let { Charter.Trigger.Webhook.events; gate } = webhook in
   let { Charter.Gate.base; drafts; associations } = gate in
@@ -16,12 +16,15 @@ let evaluate (webhook : Charter.Trigger.Webhook.t)
     author_association;
     number = _;
     head_sha = _;
-    repo = _;
+    repo = event_repo;
   } =
     event
   in
   let event_name = "pull_request." ^ action in
-  if not (List.mem event_name events) then
+  if not (String.equal event_repo repo) then
+    Skip
+      (Printf.sprintf "repository %S is not the charter's %S" event_repo repo)
+  else if not (List.mem event_name events) then
     Skip (Printf.sprintf "event %S is not in the charter's events" event_name)
   else
     match base with

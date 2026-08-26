@@ -29,9 +29,6 @@ module Unattended : sig
   val to_string : t -> string
   (** [to_string t] is ["deny"] or ["block"] — the run surface's
       [--permission-unattended] values. *)
-
-  val equal : t -> t -> bool
-  (** [equal a b] is [true] iff [a] and [b] are the same policy. *)
 end
 
 (** Webhook gate configuration — which deliveries are worth a run. *)
@@ -58,7 +55,11 @@ module Trigger : sig
     type t = {
       events : string list;
           (** The admitted deliveries, each named
-              [pull_request.<action>]; non-empty, no duplicates. *)
+              [pull_request.<action>] where [<action>] is one of GitHub's
+              documented pull_request webhook actions; non-empty, no
+              duplicates. The action vocabulary is closed at decode, so a
+              typo is a load error, never a charter that silently never
+              fires. *)
       gate : Gate.t;  (** Which admitted deliveries are worth a run. *)
     }
     (** The type for webhook trigger arms. *)
@@ -68,12 +69,6 @@ module Trigger : sig
     | Github_webhook of Webhook.t
         (** Fire on a GitHub [pull_request] delivery. *)
     | Cli  (** Fire when the owner invokes the charter by hand. *)
-
-  val default_runs_per_hour : t -> int option
-  (** [default_runs_per_hour t] is the rate fence an arm imposes when the
-      charter's budget names none: 6 for {!Github_webhook} — a remote
-      service must never be an unmetered spender — and [None] for {!Cli},
-      whose invoker is the owner's own scheduler. *)
 end
 
 (** The run contract — every field maps onto one audited run-surface
@@ -114,8 +109,10 @@ module Budget : sig
             leaves spend unmetered. *)
     runs_per_hour : int option;
         (** Spawns admitted over the trailing hour; [None] falls back to
-            the firing arm's default
-            ({!Trigger.default_runs_per_hour}). *)
+            the firing arm's default, applied inside admission
+            ({!Fence.admit}): 6 for a webhook arm — a remote service must
+            never be an unmetered spender — and none for the cli arm,
+            whose invoker is the owner's own scheduler. *)
   }
   (** The type for budgets. *)
 end
@@ -186,8 +183,9 @@ val decode : string -> (t, Error.t) result
     than ["review"], a non-empty [skills] list, a [suppress.clean_run]
     other than ["silent"], a prompt or schema path that is absolute,
     traverses [..], names [charter.json] or [ingress.id], or lives under
-    [secrets/], or a trigger kind this build does not run is an [Error]
-    naming the offending member.
+    [secrets/], an event naming a pull_request action outside GitHub's
+    documented vocabulary, or a trigger kind this build does not run is an
+    [Error] naming the offending member.
 
     The trigger kinds [schedule], [agent_message], and [self_schedule] are
     recognized vocabulary: each parses but is refused as unimplemented,
