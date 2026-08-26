@@ -230,7 +230,7 @@ let catalog =
   | Error e -> Format.kasprintf failwith "catalog: %a" Agent.Catalog.Error.pp e
 
 let config _id ~latest_model:_ =
-  Ok (Agent.Config.make ~model ~continuation_turn_limit:None ())
+  Ok (Agent.Config.make ~model ())
 
 (* The client's non-session responders are inert stubs: a latency run exercises
    only submit and follow, which route to the engine's session driver. *)

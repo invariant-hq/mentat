@@ -190,7 +190,7 @@ let of_session ?(timing = Timing.empty) session =
       | Event.Provider_requested _ | Event.Provider_settled _
       | Event.Compaction_installed _ | Event.Decision_requested _
       | Event.Decision_resolved _ | Event.Interrupt_requested _
-      | Event.Tasks_replaced _ | Event.Goal_updated _
+      | Event.Tasks_replaced _
       | Event.Delegation_recorded _ | Event.Delegations_detached
       | Event.Queue_updated _ | Event.Turn_finished _ | Event.Workspace_notice _
       | Event.Undo_updated _ ->
@@ -289,7 +289,7 @@ let of_session ?(timing = Timing.empty) session =
       | Event.Message_appended _ | Event.Provider_requested _
       | Event.Decision_requested _ | Event.Decision_resolved _
       | Event.Interrupt_requested _ | Event.Tool_claimed _
-      | Event.Tool_settled _ | Event.Tasks_replaced _ | Event.Goal_updated _
+      | Event.Tool_settled _ | Event.Tasks_replaced _
       | Event.Delegation_recorded _ | Event.Delegations_detached
       | Event.Queue_updated _ | Event.Turn_finished _ | Event.Workspace_notice _
       | Event.Undo_updated _ ->
