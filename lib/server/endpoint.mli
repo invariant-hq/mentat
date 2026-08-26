@@ -92,11 +92,11 @@ val review_compose : (Mentat_review.Cr.Edit.t, unit) t
 
 (** {1:workspace Workspace cone} *)
 
-val glance : (unit, Textdiff.stats option * Mentat_workspace.Health.t) t
+val glance : (unit, Textdiff.stats option) t
 
 val dune_status : (unit, Mentat_workspace.Health.t) t
-(** The watch status alone — [glance]'s dune half without the git read, for a
-    frontend's transitional tick. *)
+(** The watch status: the one wire carrier of the dune row's fact ([glance]
+    carries the worktree summary alone). *)
 
 (** {1:lookup Lookup} *)
 

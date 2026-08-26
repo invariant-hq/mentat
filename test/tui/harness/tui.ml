@@ -3130,7 +3130,7 @@ let client (fixture : fixture) =
   in
   let workspace : Driver.Workspace.t =
     {
-      Driver.Workspace.glance = (fun () -> Ok fixture.glance);
+      Driver.Workspace.glance = (fun () -> Ok (fst fixture.glance));
       dune = (fun () -> Ok (snd fixture.glance));
       dune_control =
         (fun ~op:_ ->

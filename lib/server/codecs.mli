@@ -147,4 +147,4 @@ val review_diff_path : Lpath.Rel.t Jsont.t
 val sessions_result :
   (Mentat_session.Summary.t list * Mentat_diagnostic.t list) Jsont.t
 
-val glance_result : (Textdiff.stats option * Mentat_workspace.Health.t) Jsont.t
+val glance_result : Textdiff.stats option Jsont.t

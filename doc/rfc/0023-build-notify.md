@@ -514,15 +514,16 @@ detection ever pays its way, it mints that phase alongside itself (§11).
 Every restart blanks the user's verdict while `stated` keeps the
 model's — intended: the row shows what is known now.
 
-**Two queries.** `workspace.glance` keeps its pair — stripping it would
-force two calls at every glance moment — but its dune half becomes a free
-projection of the shared snapshot, and its handler stops building a second
-producer and draining it on read. The status-only `workspace.dune : unit ->
-Health.t` is the same observation without the git read; the TUI issues both
-at the event moments and polls `workspace.dune` alone every 2 s while a
-watch is live or coming up — a settled row must still follow an editor save
-between turns, where no engine boundary fires. Each fact has one writer: the
-glance never feeds the row. A turn-less `Progress` pulse is not built:
+**Two queries, one fact each.** `workspace.glance` is the worktree summary
+alone; `workspace.dune : unit -> Health.t` is the row's one wire carrier — a
+memory read of the shared snapshot, no git involved. The TUI issues both at
+the event moments and polls `workspace.dune` alone every 2 s while a watch
+is live or coming up — a settled row must still follow an editor save
+between turns, where no engine boundary fires. One writer per fact is
+structural: the health rides exactly one endpoint. (An earlier shape kept
+the glance as a pair to save a call per glance moment; the shipped TUI made
+both calls anyway, so the pair was one fact with two carriers held apart by
+discipline comments — deleted while the Health wire was already breaking.) A turn-less `Progress` pulse is not built:
 `Progress.turn` is total (`progress.mli:124-129`), the transcript refuses
 notices without an active turn (`turn.ml:798-801`), and a build that settles
 between turns is stated at the next turn's preparation — the replay-faithful

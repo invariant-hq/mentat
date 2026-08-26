@@ -268,26 +268,19 @@ val review_crs :
     The frontend addresses a CR by that ref through the review-compose flow. *)
 
 val workspace_glance :
-  t ->
-  ( Textdiff.stats option * Mentat_workspace.Health.t,
-    Mentat_protocol.Error.t )
-  result
-(** [workspace_glance t] is the ambient workspace status glance: the git
-    worktree change summary against the review base — changed files with summed
-    line additions and deletions as {!Textdiff.stats}, or [None] when the
-    workspace is not a git worktree or git is unavailable — paired with the
-    dune watch status {!Mentat_workspace.Health.t}, which is
-    {!Mentat_workspace.Health.Off} [Disabled] when [workspace.tooling] is
-    disabled. Both are derived on demand: the responder re-reads git and the
-    watch observer's snapshot per call, and a frontend holds the answer as a
-    last observation, never persisted derived state. *)
+  t -> (Textdiff.stats option, Mentat_protocol.Error.t) result
+(** [workspace_glance t] is the git worktree change summary against the
+    review base — changed files with summed line additions and deletions as
+    {!Textdiff.stats}, or [None] when the workspace is not a git worktree or
+    git is unavailable. Derived on demand: the responder re-reads git per
+    call, and a frontend holds the answer as a last observation, never
+    persisted derived state. *)
 
 val workspace_dune :
   t -> (Mentat_workspace.Health.t, Mentat_protocol.Error.t) result
-(** [workspace_dune t] is the watch status alone — the dune half of
-    {!workspace_glance} without the git read, cheap enough for a frontend to
-    poll on a short tick while the watch is starting, building, or
-    restarting. *)
+(** [workspace_dune t] is the watch status — the one wire carrier of the
+    dune row's fact, a memory read cheap enough for a frontend to poll at
+    the event moments and on a short tick alike. *)
 
 val workspace_dune_control :
   t ->

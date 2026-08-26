@@ -252,7 +252,7 @@ let default_review : Driver.Review.t =
 
 let default_workspace : Driver.Workspace.t =
   {
-    Driver.Workspace.glance = (fun () -> Ok (None, Workspace.Health.Off Workspace.Health.Off.Disabled));
+    Driver.Workspace.glance = (fun () -> Ok None);
     dune = (fun () -> Ok (Workspace.Health.Off Workspace.Health.Off.Disabled));
     dune_control =
       (fun ~op:_ ->
@@ -572,8 +572,8 @@ let reads_group =
                    (readiness remote));
               (* workspace_glance. *)
               (match Client.workspace_glance remote with
-              | Ok (None, Workspace.Health.Off Workspace.Health.Off.Disabled) -> ()
-              | _ -> fail "workspace_glance should be (None, Off Disabled)");
+              | Ok None -> ()
+              | _ -> fail "workspace_glance should be None");
               (* sessions — the partial-diagnostics list crosses whole. *)
               match
                 Client.sessions remote
@@ -956,7 +956,6 @@ let endpoint_deferred =
   [
     ("settings.configuration", "response is the full resolved config view");
     ("lifecycle.session", "response is the session view");
-    ("workspace.glance", "response carries the workspace health tree");
     ("accounts.save_api_key", "provider request and account response");
     ("accounts.logout", "provider request and logout response");
     ("review.apply", "request is a review command");
@@ -1019,6 +1018,9 @@ let endpoint_reps () =
     ("review.crs", {|{}|}, {|[]|});
     (* A Live/Theirs/Settled failing value, so the live case's every member
        is pinned; the other case tags are covered by the codec's own suite. *)
+    (* The worktree summary's absent case; the stats shape itself is
+       Textdiff's own codec. *)
+    ("workspace.glance", {|{}|}, {|{"stats":null}|});
     ( "workspace.dune",
       {|{}|},
       {|{"state":"live","ours":false,"pid":4242,"phase":"settled","errors":2,"warnings":1,"lint":3}|}
@@ -2312,7 +2314,7 @@ let glance_recording_driver served label =
       Driver.Workspace.glance =
         (fun () ->
           served := label :: !served;
-          Ok (None, Workspace.Health.Off Workspace.Health.Off.Disabled));
+          Ok None);
       dune = (fun () -> Ok (Workspace.Health.Off Workspace.Health.Off.Disabled));
       dune_control =
         (fun ~op:_ ->
