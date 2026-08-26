@@ -192,6 +192,7 @@ let action_vocabulary =
     "reopened";
     "review_request_removed";
     "review_requested";
+    "stacked";
     "synchronize";
     "unassigned";
     "unlabeled";
