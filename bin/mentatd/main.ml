@@ -116,6 +116,81 @@ let stop_cmd =
     (Cmd.info "stop" ~doc ~man ~exits:Exit_status.exits)
     (Exit_status.term Term.(const Daemon.stop $ const ()))
 
+let print_flag =
+  Arg.(
+    value & flag
+    & info [ "print" ]
+        ~doc:
+          "Render the service unit to standard output and touch nothing: no \
+           file is written, no directory created, no service manager spoken \
+           to.")
+
+let install_cmd =
+  let doc = "Install mentatd as this user's resident service." in
+  let man =
+    [
+      `S Manpage.s_description;
+      `P
+        "Write the user-level service unit that keeps $(b,mentatd) resident — \
+         started at login, restarted on failure — and hand it to the service \
+         manager: a launchd agent at \
+         $(b,~/Library/LaunchAgents/dev.invarianthq.mentatd.plist) on macOS \
+         ($(b,launchctl bootstrap) into the $(b,gui) domain), a systemd user \
+         unit at $(b,~/.config/systemd/user/mentatd.service) on Linux \
+         ($(b,systemctl --user enable)). The daemon's standard output and \
+         error are appended to the same $(b,daemon.log) the $(b,--attach) \
+         spawn path writes. Any other platform is refused.";
+      `P
+        "The unit pins the setting that lets the daemon's run children \
+         outlive it — $(b,KillMode=process) under systemd, \
+         $(b,AbandonProcessGroup) under launchd. Delegated children detach \
+         into their own sessions and must survive a stop, restart, or crash \
+         of the daemon, which adopts them when it next boots; without the \
+         pin, the service manager would take mid-turn runs down with the \
+         daemon. Do not edit it out — the next install overwrites edits \
+         anyway.";
+      `P
+        "The unit names the absolute path of the binary that ran the \
+         install. A binary upgraded in place is picked up at the next \
+         service start; a binary that moved leaves the unit pointing at \
+         nothing, and the manager fails to start it — re-run \
+         $(b,mentatd install) from the new binary, which replaces the unit \
+         when its content differs and says so. A file at the unit path that \
+         was not written by $(b,mentatd install) is named and refused, never \
+         overwritten.";
+      `P
+        "A daemon already running outside the service (spawned by \
+         $(b,--attach)) holds the per-user claim, so the service's daemon \
+         exits at startup and the manager retries until the claim frees; \
+         $(b,mentatd stop) the spawned daemon to let the service take over. \
+         A service manager call that fails is a loud error naming the \
+         command to run manually; the written unit stays in place.";
+    ]
+  in
+  Cmd.v
+    (Cmd.info "install" ~doc ~man ~exits:Exit_status.exits)
+    (Exit_status.term
+       Term.(const (fun print -> Service.install ~print) $ print_flag))
+
+let uninstall_cmd =
+  let doc = "Remove the resident service installed by $(b,mentatd install)." in
+  let man =
+    [
+      `S Manpage.s_description;
+      `P
+        "Unload the service from the manager and remove its unit file — \
+         nothing else. The daemon's store, discovery file, and logs are \
+         never touched, and running run children are not signalled: the \
+         unit's child-survival pin means unloading stops only the daemon \
+         itself. An absent unit is a clean no-op with a note; a file at the \
+         unit path that was not written by $(b,mentatd install) is named and \
+         refused.";
+    ]
+  in
+  Cmd.v
+    (Cmd.info "uninstall" ~doc ~man ~exits:Exit_status.exits)
+    (Exit_status.term Term.(const Service.uninstall $ const ()))
+
 let root =
   let doc = "The mentat daemon." in
   let info =
@@ -128,6 +203,6 @@ let root =
          Term.(
            const serve $ socket_opt $ stop_flag $ spawned_flag $ web_flag
            $ web_port_opt))
-    info [ stop_cmd ]
+    info [ stop_cmd; install_cmd; uninstall_cmd ]
 
 let () = Entry.run ~version:Daemon.binary_version root

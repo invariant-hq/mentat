@@ -1,0 +1,20 @@
+; `mentatd install` hands a unit file to the user's service manager, so only
+; its no-touch surfaces run here: --print renders without writing anything,
+; and the refusal paths fire before any launchctl/systemctl call — a cram
+; must never load a real service. The rendered unit and its path are the
+; platform's, so the bodies are split per platform and gated by %{system},
+; the sibling sandbox-enforce mechanism: the parent whole-subtree stanza
+; attaches every .t here ungated, and each scoped stanza below ANDs in its
+; %{system} guard.
+
+(cram
+ (applies_to install-macos)
+ (alias blackbox)
+ (enabled_if
+  (= %{system} macosx)))
+
+(cram
+ (applies_to install-linux)
+ (alias blackbox)
+ (enabled_if
+  (= %{system} linux)))
