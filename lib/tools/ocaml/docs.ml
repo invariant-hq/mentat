@@ -1863,8 +1863,8 @@ let watch_lock_message =
    ocaml_find_definitions or ocaml_type_at for name lookups, or query \
    ocaml_docs by path"
 
-let resolve_universe workspace_io ~clock ~dune_program ~dune_lease ~cancelled
-    =
+let resolve_universe workspace_io ~clock ~dune_program ~dune_lease
+    ~dune_activity ~cache ~cancelled =
   let describe () =
     match logical_workspace workspace_io with
     | Error message -> Error (Run_failed { kind = `Failed; message })
@@ -1895,14 +1895,37 @@ let resolve_universe workspace_io ~clock ~dune_program ~dune_lease ~cancelled
                              (Mentat_ocaml_dune_describe.Error.message error);
                      })))
   in
-  match dune_lease () with
-  | `Held ->
-      Error (Run_failed { kind = `Unavailable; message = watch_lock_message })
-  | `Free -> describe ()
-  | `Leased release -> Fun.protect ~finally:release describe
+  (* The build witness: the attach observer's activity generation. An
+     unchanged generation means no build event flowed since the cached
+     describe, so the artifacts the universe reads are unchanged — repeated
+     name queries in one quiet stretch answer from memory and never take
+     dune's lock (no lease, no watch bounce). The blind spot is the lint
+     trigger's own: a sub-sample rebuild moves no generation. The witness is
+     read before the run, so a build racing the describe only makes the
+     stamp conservative — one redundant describe, never a stale universe
+     served past a witnessed build. With no witness (no observer) nothing is
+     cached and every query pays the describe, as before. *)
+  let generation = dune_activity () in
+  match (generation, !cache) with
+  | Some generation, Some (cached, project) when Int.equal generation cached
+    ->
+      Ok project
+  | _ ->
+      let outcome =
+        match dune_lease () with
+        | `Held ->
+            Error
+              (Run_failed { kind = `Unavailable; message = watch_lock_message })
+        | `Free -> describe ()
+        | `Leased release -> Fun.protect ~finally:release describe
+      in
+      (match (generation, outcome) with
+      | Some generation, Ok project -> cache := Some (generation, project)
+      | _ -> ());
+      outcome
 
 let run workspace_io ~clock ~merlin_program ~dune_program ~ocamlfind_program
-    ~opam_switch_prefix ~dune_lease ~cancelled input =
+    ~opam_switch_prefix ~dune_lease ~dune_activity ~cache ~cancelled input =
   if cancelled () then interrupted ()
   else
     let max_bytes =
@@ -1917,7 +1940,7 @@ let run workspace_io ~clock ~merlin_program ~dune_program ~ocamlfind_program
     | (Library _ | Module_path _ | Focused _) as form -> (
         match
           resolve_universe workspace_io ~clock ~dune_program ~dune_lease
-            ~cancelled
+            ~dune_activity ~cache ~cancelled
         with
         | Error Cancelled -> interrupted ()
         | Error (Run_failed { kind; message }) ->
@@ -1968,15 +1991,18 @@ let validate_switch_prefix = function
            ^ Lpath.Error.message error))
 
 let make workspace_io ~clock ~merlin_program ~dune_program ~ocamlfind_program
-    ~opam_switch_prefix ?(dune_lease = fun () -> `Free) () =
+    ~opam_switch_prefix ?(dune_lease = fun () -> `Free)
+    ?(dune_activity = fun () -> None) () =
   validate_program "Merlin program" merlin_program;
   validate_program "Dune program" dune_program;
   validate_program "ocamlfind program" ocamlfind_program;
   validate_switch_prefix opam_switch_prefix;
   let execution = Confinement.confined workspace_io in
+  let cache = ref None in
   Tool.make ~name ~description ~input:Input.contract ~output:Output.encode
     ~permissions:(permissions workspace_io ~execution ~opam_switch_prefix)
     ~run:(fun ~cancelled input ->
       run workspace_io ~clock ~merlin_program ~dune_program ~ocamlfind_program
-        ~opam_switch_prefix ~dune_lease ~cancelled input)
+        ~opam_switch_prefix ~dune_lease ~dune_activity ~cache ~cancelled
+        input)
     ()
