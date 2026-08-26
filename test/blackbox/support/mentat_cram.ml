@@ -253,6 +253,23 @@ let cmd_stat args =
   in
   print_endline out
 
+(* hmac-sha256. Sign a webhook delivery body the way GitHub does — the
+   lowercase hex HMAC-SHA256 over the file's exact bytes — so a cram mints
+   X-Hub-Signature-256 headers against a charter's minted secret without an
+   ambient openssl. The key is taken as an argument: crams read it with
+   $(cat secrets/webhook), whose trailing-newline strip matches the
+   listener's trim of the stored secret. *)
+let cmd_hmac_sha256 args =
+  let key, file =
+    match args with
+    | [ key ] -> (key, None)
+    | [ key; file ] -> (key, Some file)
+    | _ -> fail ~code:2 "usage: mentat_cram hmac-sha256 KEY [FILE]"
+  in
+  print_endline
+    (Digestif.SHA256.to_hex
+       (Digestif.SHA256.hmac_string ~key (read_source file)))
+
 (* lock. Hold an exclusive POSIX record lock ([lockf F_LOCK]) — the same fence
    the store's run lock takes — on a file until a signal terminates the process,
    printing "ready" once the lock is held. A held-fence contention scenario runs
@@ -284,7 +301,8 @@ let cmd_lock args =
 let usage () =
   prerr_endline
     "usage: mentat_cram \
-     <censor|json|subst|wait-file|wait-line|count-ctl|stat|lock> ...";
+     <censor|json|subst|wait-file|wait-line|count-ctl|stat|hmac-sha256|lock> \
+     ...";
   exit 2
 
 let () =
@@ -299,6 +317,7 @@ let () =
         | "wait-line" -> cmd_wait_line args
         | "count-ctl" -> cmd_count_ctl args
         | "stat" -> cmd_stat args
+        | "hmac-sha256" -> cmd_hmac_sha256 args
         | "lock" -> cmd_lock args
         | other ->
             Printf.eprintf "mentat_cram: unknown subcommand %S\n" other;

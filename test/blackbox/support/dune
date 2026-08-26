@@ -2,7 +2,10 @@
 ; dune's dune_cmd. Its normalization delegates to the shared Mentat_test_censor
 ; library under test/support/.
 
+; digestif signs webhook delivery bodies (the hmac-sha256 subcommand) with
+; the same primitive the server's ingress verifies against.
+
 (executable
  (name mentat_cram)
  (modules mentat_cram)
- (libraries mentat_test_censor re jsont jsont.bytesrw unix))
+ (libraries mentat_test_censor re jsont jsont.bytesrw digestif unix))
