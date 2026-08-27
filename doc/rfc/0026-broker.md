@@ -183,9 +183,10 @@ val supervise :
     delegation children, 0 for charter runs); exhaustion fires
     [on_failure]. *)
 
-val stop : t -> Mentat_session.Id.t -> unit
+val cancel : t -> Mentat_session.Id.t -> unit
 (** The ladder — wire interrupt, grace, SIGTERM, grace, SIGKILL — for
-    sessions in this broker's own table only. *)
+    sessions in this broker's own table only. (Named [cancel]: [stop]
+    is the broker's own teardown.) *)
 ```
 
 Supervision recurses: an engine's `spawn` verb materializes the child
@@ -574,10 +575,14 @@ intensity bound.
 ## Unresolved questions
 
 **Before merge:**
-1. The origin member's exact wire and journal encoding (one string
-   form vs a small object) — decides the corpus goldens.
+1. RESOLVED at R1 (2026-08-27): the origin encodes as a small
+   per-arm-tagged object, identical on wire and journal — the idiom
+   the triggered turn already uses; a packed string would reopen the
+   separator-injectivity hole over free-form ids. Two corpus goldens
+   pin the bytes.
 2. Whether the delivery-refusal fact is a new event kind or a payload
-   of an existing notice kind.
+   of an existing notice kind (still open; R1 ships sender-side
+   undelivered only).
 
 **During implementation:**
 0. `Broker.for_tests`'s exact shape (which effects are stubbable) and
@@ -635,6 +640,10 @@ this RFC implies nothing about priority or scheduling.
 
 - **R0 — the move.** Broker family into the shared library; mentatd
   rewires. Pure move; everything holds.
+- **Migration note, owned:** a pre-R1 journal whose follow-up was
+  delivered as a derived-id turn holds no enqueued fact, so the
+  narrowed redrive re-mails it once at the parent's next attach — the
+  admission dedups everything after; bounded, once per old edge.
 - **R1 — the send, first caller.** Parent-to-child delivery over
   `send` under today's topology — the transitional local arm carries
   in-process children; the ladder and fallbacks are deleted. Holds:
