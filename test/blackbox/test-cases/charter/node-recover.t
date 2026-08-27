@@ -45,7 +45,7 @@ The fire is spawned from a command substitution so the harness shell never
 owns the job: a SIGKILLed job would otherwise leave an asynchronous death
 notice on the harness's own stderr.
 
-  $ FIRE_PID=$(mentat charter fire pr-review --event event.json >fire.out 2>&1 & echo $!)
+  $ FIRE_PID=$(mentatd charter fire pr-review --event event.json >fire.out 2>&1 & echo $!)
   $ mentat_cram wait-line '"disposition":"spawned"' "$RECEIPTS"
   $ mentat_cram wait-file capture-run/request-1.json
   $ kill -9 "$FIRE_PID"
@@ -107,7 +107,7 @@ minted no run and spent nothing — no provider fake is even alive.
   1
   $ grep -c '"summary":"created"' "$RECEIPTS"
   1
-  $ mentat charter runs pr-review | censor --times
+  $ mentatd charter runs pr-review | censor --times
   $TS spawned github:acme/widgets#7@$DIGEST1:head: session c-$DIGEST2
   $TS reaped github:acme/widgets#7@$DIGEST1:head: session c-$DIGEST2, exit 0, head settled, cause recovered, $0.0110
 

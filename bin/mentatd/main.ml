@@ -140,7 +140,7 @@ let man =
     `S "CHARTERS";
     `P
       "The daemon is also the resident charter node: it serves the webhook \
-       ingress for every charter installed by $(b,mentat charter add), drives \
+       ingress for every charter installed by $(b,mentatd charter add), drives \
        admitted deliveries through the charter fire pipeline (each run is a \
        spawned $(b,mentat) child, never in-process), and reconciles every \
        charter's durable record — at boot, and on a periodic beat — so an \
@@ -168,9 +168,10 @@ let envs =
   [
     Cmd.Env.info "MENTAT_BIN"
       ~doc:
-        "The $(b,mentat) binary the daemon's child broker spawns for \
-         delegated sessions, overriding the resolution of the sibling of the \
-         running executable — for layouts where the two binaries do not \
+        "The $(b,mentat) binary spawned for children — the child broker's \
+         delegated sessions and the charter pipeline's run and publication \
+         children — overriding the resolution of the sibling of the \
+         running executable, for layouts where the two binaries do not \
          share a directory (a build tree, a test harness).";
     Cmd.Env.info "MENTAT_LOG"
       ~doc:
@@ -353,6 +354,6 @@ let root =
            const serve $ socket_opt $ stop_flag $ spawned_flag $ web_flag
            $ web_port_opt $ ingress_port_opt $ github_base_url_opt
            $ charter_git_base_opt))
-    info [ stop_cmd; install_cmd; uninstall_cmd ]
+    info [ stop_cmd; install_cmd; uninstall_cmd; Charter_cli.cmd ]
 
 let () = Entry.run ~version:Daemon.binary_version root

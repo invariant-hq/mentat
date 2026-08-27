@@ -28,7 +28,7 @@ appends each event line to a log.
   > EOF
   $ printf 'Review the diff.\n' > proposal/prompt.md
   $ printf '{"type":"object"}\n' > proposal/findings.schema.json
-  $ mentat charter add proposal >/dev/null
+  $ mentatd charter add proposal >/dev/null
   $ CDIR="$PWD/config/mentat/charters/pr-review"
   $ printf 'test-read-token\n' > "$CDIR/secrets/read-token"
   $ chmod 600 "$CDIR/secrets/read-token"
@@ -52,7 +52,7 @@ never claims, fences, or spawns.
   > EOF
   $ start_fake_server github-stale.jsonl capture-stale gh-port
   $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
-  $ mentat charter fire pr-review --event event-stale.json | censor
+  $ mentatd charter fire pr-review --event event-stale.json | censor
   superseded github:acme/widgets#7@$DIGEST:head
   $ wait_fake_server
   $ RECEIPTS="$PWD/state/mentat/charters/pr-review/receipts.jsonl"
@@ -63,7 +63,7 @@ Exhaust the rate window by hand: one spawned receipt under the current
 digest inside the trailing hour. The receipt bytes are this build's own
 codec, so writing them directly is writing what the pipeline would have.
 
-  $ digest=$(mentat charter list | awk 'NR==2 {print $2}')
+  $ digest=$(mentatd charter list | awk 'NR==2 {print $2}')
   $ printf '{"kind":"disposition","at":%s,"identity":"cli:%s:seed","digest":"%s","disposition":"spawned","session":"c-0000000000000000"}\n' "$(date +%s)" "$digest" "$digest" >> "$RECEIPTS"
 
 The next admissible delivery is fenced after its delivery receipt: the
@@ -84,7 +84,7 @@ once, and the hook heard exactly one structured event.
   > EOF
   $ start_fake_server github-fresh.jsonl capture-fresh gh-port
   $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
-  $ mentat charter fire pr-review --event event-fresh.json | censor
+  $ mentatd charter fire pr-review --event event-fresh.json | censor
   fenced github:acme/widgets#8@$DIGEST:head: runs_per_hour
   $ wait_fake_server
   $ grep -c '"disposition":"fenced"' "$RECEIPTS"
@@ -111,7 +111,7 @@ line, no second hook firing.
   > EOF
   $ start_fake_server github-later.jsonl capture-later gh-port
   $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
-  $ mentat charter fire pr-review --event event-later.json | censor
+  $ mentatd charter fire pr-review --event event-later.json | censor
   fenced github:acme/widgets#9@$DIGEST:head: runs_per_hour
   $ wait_fake_server
   $ grep -c '"kind":"alert"' "$RECEIPTS"
@@ -123,7 +123,7 @@ The verb's own ladder. A fire without the read credential is refused before
 any receipt — the pipeline cannot gate what it cannot observe.
 
   $ rm "$CDIR/secrets/read-token"
-  $ mentat charter fire pr-review --event event-fresh.json 2>&1 | censor
+  $ mentatd charter fire pr-review --event event-fresh.json 2>&1 | censor
   mentat: fire needs the GitHub read credential at $TESTCASE_ROOT/config/mentat/charters/pr-review/secrets/read-token (a fine-grained PAT with read access to acme/widgets)
   [1]
 
@@ -143,8 +143,8 @@ without a webhook arm has no deliveries for --event or --sweep to replay.
   > EOF
   $ printf 'p\n' > hookless/prompt.md
   $ printf '{"type":"object"}\n' > hookless/findings.schema.json
-  $ mentat charter add hookless >/dev/null
-  $ mentat charter fire hookless --event event-fresh.json 2>&1
+  $ mentatd charter add hookless >/dev/null
+  $ mentatd charter fire hookless --event event-fresh.json 2>&1
   mentat: charter hookless has no cli trigger arm; add {"kind": "cli"} to its trigger list to fire it by hand
   [2]
   $ cat > webhookless/charter.json <<'EOF'
@@ -158,20 +158,20 @@ without a webhook arm has no deliveries for --event or --sweep to replay.
   > EOF
   $ printf 'p\n' > webhookless/prompt.md
   $ printf '{"type":"object"}\n' > webhookless/findings.schema.json
-  $ mentat charter add webhookless >/dev/null
-  $ mentat charter fire webhookless --event event-fresh.json 2>&1
+  $ mentatd charter add webhookless >/dev/null
+  $ mentatd charter fire webhookless --event event-fresh.json 2>&1
   mentat: charter webhookless has no github_webhook trigger; --event and --sweep replay webhook deliveries
   [2]
-  $ mentat charter fire webhookless --sweep 2>&1
+  $ mentatd charter fire webhookless --sweep 2>&1
   mentat: charter webhookless has no github_webhook trigger; --event and --sweep replay webhook deliveries
   [2]
 
 --event and --sweep are one choice, and a bare fire has nothing to review.
 
-  $ mentat charter fire pr-review --event event-fresh.json --sweep 2>&1
+  $ mentatd charter fire pr-review --event event-fresh.json --sweep 2>&1
   mentat: choose one of --event or --sweep
   [2]
-  $ mentat charter fire pr-review 2>&1
+  $ mentatd charter fire pr-review 2>&1
   mentat: charter pr-review reviews pull requests and a bare fire has nothing to review; use --event FILE or --sweep
   [2]
 
@@ -195,12 +195,12 @@ seeded; the seventh admissible delivery is fenced.
   > EOF
   $ printf 'p\n' > nometer/prompt.md
   $ printf '{"type":"object"}\n' > nometer/findings.schema.json
-  $ mentat charter add nometer >/dev/null
+  $ mentatd charter add nometer >/dev/null
   $ NDIR="$PWD/config/mentat/charters/nometer"
   $ printf 'test-read-token\n' > "$NDIR/secrets/read-token"
   $ chmod 600 "$NDIR/secrets/read-token"
   $ NRECEIPTS="$PWD/state/mentat/charters/nometer/receipts.jsonl"
-  $ ndigest=$(mentat charter list | awk '$1 == "nometer" {print $2}')
+  $ ndigest=$(mentatd charter list | awk '$1 == "nometer" {print $2}')
   $ mkdir -p "$(dirname "$NRECEIPTS")"
   $ for i in 1 2 3 4 5 6; do
   >   printf '{"kind":"disposition","at":%s,"identity":"cli:%s:seed-%s","digest":"%s","disposition":"spawned","session":"c-000000000000000%s"}\n' "$(date +%s)" "$ndigest" "$i" "$ndigest" "$i" >> "$NRECEIPTS"
@@ -219,10 +219,10 @@ seeded; the seventh admissible delivery is fenced.
   > EOF
   $ start_fake_server github-seventh.jsonl capture-seventh gh-port
   $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
-  $ mentat charter fire nometer --event event-seventh.json | censor
+  $ mentatd charter fire nometer --event event-seventh.json | censor
   fenced github:acme/widgets#14@$DIGEST:head: runs_per_hour
   $ wait_fake_server
-  $ mentat charter status nometer | grep 'runs 1h'
+  $ mentatd charter status nometer | grep 'runs 1h'
     runs 1h: 6 of 6
 
 Refusals never claim, so an event re-enters when its circumstances change.
@@ -238,7 +238,7 @@ freed, it drives on to the checkout. The receipts poison nothing.
   > EOF
   $ start_fake_server listing-draft.jsonl capture-draft gh-port
   $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
-  $ mentat charter fire pr-review --sweep | censor
+  $ mentatd charter fire pr-review --sweep | censor
   skipped github:acme/widgets#12@$DIGEST:head: draft pull requests are not admitted
   $ wait_fake_server
   $ cat > listing-ready.jsonl <<EOF
@@ -246,7 +246,7 @@ freed, it drives on to the checkout. The receipts poison nothing.
   > EOF
   $ start_fake_server listing-ready.jsonl capture-ready gh-port
   $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
-  $ mentat charter fire pr-review --sweep | censor
+  $ mentatd charter fire pr-review --sweep | censor
   fenced github:acme/widgets#12@$DIGEST:head: runs_per_hour
   $ wait_fake_server
 
@@ -261,7 +261,7 @@ did not poison re-admission; only the run-claim dedups.
   $ start_fake_server listing-ready.jsonl capture-freed gh-port
   $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
   $ export MENTAT_CHARTER_GIT_URL="$PWD/no-such-remote"
-  $ mentat charter fire pr-review --sweep 2>&1 | censor | sed -e 's/checkout: .*/checkout: (git error)/' -e 's/^mentat: git .*/mentat: (git error)/'
+  $ mentatd charter fire pr-review --sweep 2>&1 | censor | sed -e 's/checkout: .*/checkout: (git error)/' -e 's/^mentat: git .*/mentat: (git error)/'
   refused github:acme/widgets#12@$DIGEST:head: checkout: (git error)
   mentat: (git error)
   [1]

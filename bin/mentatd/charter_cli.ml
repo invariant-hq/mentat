@@ -7,7 +7,6 @@ open! Cmdliner
 open Mentat_charter
 open Mentat_github
 
-let docs = Cli_common.s_config
 let ( let* ) = Result.bind
 
 let resolve_dirs () =
@@ -321,6 +320,11 @@ let fire_env t ~stop (loaded : Charter_store.Loaded.t) =
     | Some url when String.length url > 0 -> url
     | Some _ | None -> Printf.sprintf "https://github.com/%s.git" repo
   in
+  let* mentat_bin =
+    Result.map_error Exit_status.runtime
+      (Daemon.resolve_sibling ~env:"MENTAT_BIN" ~name:"mentat"
+         ~beside:"mentatd")
+  in
   Ok
     ( {
         Charter_fire.dirs = Composition.dirs t;
@@ -328,7 +332,7 @@ let fire_env t ~stop (loaded : Charter_store.Loaded.t) =
         catalog = Composition.catalog t;
         stdenv = Composition.stdenv t;
         environment = Composition.environment t;
-        mentat_bin = Sys.executable_name;
+        mentat_bin;
         stop;
         say = (fun line -> Output.stdout_printf "%s\n" line);
       },
@@ -448,7 +452,7 @@ let add_cmd =
     ]
   in
   Cmd.v
-    (Cmd.info "add" ~doc ~docs ~man ~exits:Cli_common.exits)
+    (Cmd.info "add" ~doc ~man ~exits:Exit_status.exits)
     (Exit_status.term Term.(const add $ src_arg))
 
 let rotate_secret_cmd =
@@ -470,25 +474,25 @@ let rotate_secret_cmd =
     ]
   in
   Cmd.v
-    (Cmd.info "rotate-secret" ~doc ~docs ~man ~exits:Cli_common.exits)
+    (Cmd.info "rotate-secret" ~doc ~man ~exits:Exit_status.exits)
     (Exit_status.term Term.(const rotate_secret $ name_arg))
 
 let list_cmd =
   let doc = "List installed charters." in
   Cmd.v
-    (Cmd.info "list" ~doc ~docs ~exits:Cli_common.exits)
+    (Cmd.info "list" ~doc ~exits:Exit_status.exits)
     (Exit_status.term Term.(const list $ const ()))
 
 let runs_cmd =
   let doc = "Print a charter's disposition receipts." in
   Cmd.v
-    (Cmd.info "runs" ~doc ~docs ~exits:Cli_common.exits)
+    (Cmd.info "runs" ~doc ~exits:Exit_status.exits)
     (Exit_status.term Term.(const runs $ name_arg))
 
 let status_cmd =
   let doc = "Render each charter's durable record: budgets and receipts." in
   Cmd.v
-    (Cmd.info "status" ~doc ~docs ~exits:Cli_common.exits)
+    (Cmd.info "status" ~doc ~exits:Exit_status.exits)
     (Exit_status.term Term.(const status $ name_opt_arg))
 
 let remove_cmd =
@@ -504,7 +508,7 @@ let remove_cmd =
     ]
   in
   Cmd.v
-    (Cmd.info "remove" ~doc ~docs ~man ~exits:Cli_common.exits)
+    (Cmd.info "remove" ~doc ~man ~exits:Exit_status.exits)
     (Exit_status.term Term.(const remove $ name_arg))
 
 let event_opt =
@@ -527,6 +531,12 @@ let fire_cmd =
   let doc = "Fire a charter by hand: a saved delivery, or a sweep." in
   let envs =
     [
+      Cmd.Env.info "MENTAT_BIN"
+        ~doc:
+          "The $(b,mentat) binary the pipeline spawns for the run and \
+           publication children, overriding the resolution of the sibling \
+           of the running executable — for layouts where the two binaries \
+           do not share a directory (a build tree, a test harness).";
       Cmd.Env.info "MENTAT_GITHUB_BASE_URL"
         ~doc:
           "Overrides the GitHub API base for the read closures and the \
@@ -559,13 +569,13 @@ let fire_cmd =
     ]
   in
   Cmd.v
-    (Cmd.info "fire" ~doc ~docs ~envs ~man ~exits:Cli_common.exits)
+    (Cmd.info "fire" ~doc ~envs ~man ~exits:Exit_status.exits)
     (Exit_status.term Term.(const fire $ name_arg $ event_opt $ sweep_flag))
 
 let cmd =
   let doc = "Manage standing, unattended review charters." in
   Cmd.group
-    (Cmd.info "charter" ~doc ~docs ~exits:Cli_common.exits)
+    (Cmd.info "charter" ~doc ~exits:Exit_status.exits)
     [
       add_cmd;
       list_cmd;

@@ -100,7 +100,7 @@ let html ?(ingress = None) observed =
 let empty_roster () =
   let page = html (Ok []) in
   contains ~msg:page ~sub:"No charters are installed" page;
-  contains ~sub:"mentat charter add" page
+  contains ~sub:"mentatd charter add" page
 
 let roster_failure () =
   let page = html (Error (store_error "permission denied")) in

@@ -58,7 +58,7 @@ then the thread and summary posts.
 
 The round trip: spawned, reaped settled with priced spend, published.
 
-  $ mentat charter fire pr-review --event event.json | censor
+  $ mentatd charter fire pr-review --event event.json | censor
   spawned github:acme/widgets#7@$DIGEST1:head: session c-$DIGEST2
   reaped c-$DIGEST2: exit 0, head settled, $0.0110
   published: summary created, 1 threads
@@ -76,7 +76,7 @@ in the shared store.
   1
   $ grep -c '"summary":"created"' "$RECEIPTS"
   1
-  $ mentat charter runs pr-review | censor --times
+  $ mentatd charter runs pr-review | censor --times
   $TS spawned github:acme/widgets#7@$DIGEST1:head: session c-$DIGEST2
   $TS reaped github:acme/widgets#7@$DIGEST1:head: session c-$DIGEST2, exit 0, head settled, cause exited, $0.0110
 
@@ -97,7 +97,7 @@ Firing the identical delivery again is one receipt line reading dup: the
 run-claim marker alone carries dup authority, so a redelivery is refused
 without any network read — no head check is scripted, and none happens.
 
-  $ mentat charter fire pr-review --event event.json | censor
+  $ mentatd charter fire pr-review --event event.json | censor
   dup github:acme/widgets#7@$DIGEST:head
   $ grep -c '"disposition":"dup"' "$RECEIPTS"
   1
@@ -112,7 +112,7 @@ dedupes exactly as the webhook path would.
   > EOF
   $ start_fake_server listing.jsonl capture-sweep gh-port
   $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
-  $ mentat charter fire pr-review --sweep
+  $ mentatd charter fire pr-review --sweep
   $ wait_fake_server
 
 A policy edit moves the digest, so the same head is a fresh event: the
@@ -132,7 +132,7 @@ owner's deliberate re-review path.
   > EOF
   $ start_fake_server github3.jsonl capture-gh4 gh-port
   $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
-  $ mentat charter fire pr-review --sweep | censor
+  $ mentatd charter fire pr-review --sweep | censor
   spawned github:acme/widgets#7@$DIGEST1:head: session c-$DIGEST2
   reaped c-$DIGEST2: exit 0, head settled, $0.0110
   published: summary created, 1 threads
@@ -164,7 +164,7 @@ receipt log stays intact.
   $ start_fake_server github8.jsonl capture-gh8 gh-port
   $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
   $ export MENTAT_CHARTER_GIT_URL="$PWD/missing.git"
-  $ mentat charter fire pr-review --event event8.json 2>&1 | censor | sed -e 's/checkout: .*/checkout: (git error)/' -e 's/^mentat: git .*/mentat: (git error)/'
+  $ mentatd charter fire pr-review --event event8.json 2>&1 | censor | sed -e 's/checkout: .*/checkout: (git error)/' -e 's/^mentat: git .*/mentat: (git error)/'
   refused github:acme/widgets#8@$DIGEST:head: checkout: (git error)
   mentat: (git error)
   [1]
@@ -189,7 +189,7 @@ so the run settles with findings but no egress receipt.
   > EOF
   $ start_fake_server github8b.jsonl capture-gh8b gh-port
   $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
-  $ mentat charter fire pr-review --event event8.json 2>&1 | censor
+  $ mentatd charter fire pr-review --event event8.json 2>&1 | censor
   spawned github:acme/widgets#8@$DIGEST1:head: session c-$DIGEST2
   reaped c-$DIGEST2: exit 0, head settled, $0.0110
   mentat: github publish exited 1 without upserting the summary
@@ -216,7 +216,7 @@ fake is even running), and the claimed head #7 stays silent beside it.
   > EOF
   $ start_fake_server listing8.jsonl capture-gh8c gh-port
   $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
-  $ mentat charter fire pr-review --sweep | censor
+  $ mentatd charter fire pr-review --sweep | censor
   published: summary created, 1 threads
   $ wait_fake_server
   $ grep '"kind":"egress"' "$RECEIPTS" | grep -c '#8@'

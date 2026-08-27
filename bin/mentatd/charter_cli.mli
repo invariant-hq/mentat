@@ -27,7 +27,8 @@
     provisioning, the sealed review run, publication, alerts — so a crontab
     line is a complete review charter with no resident node. It needs the
     charter's [secrets/read-token] for its GitHub reads and spawns the run
-    and publication children from this executable; a bare fire is refused,
+    and publication children from the [mentat] binary beside this
+    executable ([MENTAT_BIN] overrides); a bare fire is refused,
     since every version-1 charter reviews pull requests and has nothing to
     run without a delivery. The other verbs need no workspace, session
     store, or network: they read and write the config and state homes only.

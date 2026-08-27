@@ -6,7 +6,7 @@
 (** The charter fire pipeline — one triggering event driven from decoded
     delivery to durable receipts.
 
-    One code path, two invoking processes: [mentat charter fire] runs the
+    One code path, two invoking processes: [mentatd charter fire] runs the
     pipeline in the invoking process itself, and the resident node runs the
     identical path when a webhook delivery arrives. The pipeline is split at
     its durability point into the two halves a two-fiber intake needs:
@@ -131,8 +131,8 @@ type env = {
           [GIT_*] variable. *)
   mentat_bin : string;
       (** The [mentat] binary the run and publication children exec — the
-          invoking executable itself for the CLI, the sibling binary for the
-          node. *)
+          sibling of the invoking executable for both the CLI fire and the
+          node, [MENTAT_BIN] overriding. *)
   stop : unit -> [ `None | `Stop | `Force ];
       (** The stop seam, polled while a run child is being reaped. [`Stop]
           asks the pipeline to stop the run: the child is sent SIGINT once

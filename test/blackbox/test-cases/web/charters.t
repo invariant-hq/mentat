@@ -26,7 +26,7 @@ The page rides the same cookie gate as the rest of the mount.
 A node with no charters says so plainly.
 
   $ curl -sS -b jar "$BASE/charters" | grep -o 'No charters are installed[^<]*'
-  No charters are installed. Install one with mentat charter add.
+  No charters are installed. Install one with mentatd charter add.
 
 Install a webhook charter and a cli charter, and break a third — all while
 the daemon runs.
@@ -44,7 +44,7 @@ the daemon runs.
   > EOF
   $ printf 'Review the diff.\n' > p-quiet/prompt.md
   $ printf '{"type":"object"}\n' > p-quiet/findings.schema.json
-  $ mentat charter add p-quiet >/dev/null
+  $ mentatd charter add p-quiet >/dev/null
 
   $ mkdir p-attention
   $ cat > p-attention/charter.json <<'EOF'
@@ -58,12 +58,12 @@ the daemon runs.
   > EOF
   $ printf 'Review the diff.\n' > p-attention/prompt.md
   $ printf '{"type":"object"}\n' > p-attention/findings.schema.json
-  $ mentat charter add p-attention >/dev/null
+  $ mentatd charter add p-attention >/dev/null
 
   $ mkdir p-broken
   $ sed 's/z-attention/m-broken/' p-attention/charter.json > p-broken/charter.json
   $ cp p-attention/prompt.md p-attention/findings.schema.json p-broken/
-  $ mentat charter add p-broken >/dev/null
+  $ mentatd charter add p-broken >/dev/null
   $ printf 'not json\n' > "$XDG_CONFIG_HOME/mentat/charters/m-broken/charter.json"
 
 Record one failed run for the cli charter by hand: the receipt bytes are
@@ -71,7 +71,7 @@ this build's own codec, so writing them is writing what the pipeline would
 have — a spawned line, the reap that settled nothing, and the identity's
 failed alert.
 
-  $ DIGEST=$(mentat charter list | awk '$1 == "z-attention" {print $2}')
+  $ DIGEST=$(mentatd charter list | awk '$1 == "z-attention" {print $2}')
   $ NOW=$(date +%s)
   $ RECEIPTS="$XDG_STATE_HOME/mentat/charters/z-attention/receipts.jsonl"
   $ mkdir -p "$(dirname "$RECEIPTS")"

@@ -245,7 +245,7 @@ no cache; `enabled` is a field the owner flips in the file. Unknown
 fields, versions, and trigger kinds are load errors (the `error_unknown`
 discipline); a group- or world-writable charter or secret file is refused
 the way sshd refuses a loose key. A repository may ship a *proposal*
-(`.mentat/charters/…`); `mentat charter add` copies it in after the owner
+(`.mentat/charters/…`); `mentatd charter add` copies it in after the owner
 reads it — a proposal never activates by discovery (N2).
 
 **Identity.** The charter digest is the ordered hash of the policy
@@ -267,19 +267,27 @@ lands; an accepted no-op grant would be a silent lie.)
 the secret it rotates first matters):
 
 ```
-mentat charter add PATH|DIR      # validate; mint ingress id + secret;
+mentatd charter add PATH|DIR     # validate; mint ingress id + secret;
                                  # print the webhook URL for GitHub settings
-mentat charter list              # names, digests, enabled, last disposition
-mentat charter fire NAME --event FILE | --sweep [--key STRING]
-mentat charter runs NAME         # dispositions: when, trigger, spend, session
-mentat charter status [NAME]     # the N5 fold, rendered
-mentat charter remove NAME
+mentatd charter list             # names, digests, enabled, last disposition
+mentatd charter fire NAME --event FILE | --sweep [--key STRING]
+mentatd charter runs NAME        # dispositions: when, trigger, spend, session
+mentatd charter status [NAME]    # the N5 fold, rendered
+mentatd charter remove NAME
 ```
 
-(The `mentat charter` verbs ride the agent binary deliberately: they are
-config-file writes plus wire-client calls — owner-facing UX, nothing
-resident — so "the agent only" refers to what the process *is*, not to
-which binary carries the admin verbs for its neighbor.)
+(Maintainer reversal, 2026-08-27 — this supersedes the earlier ruling
+that rode these verbs on the agent binary. mentat is a complete product
+without mentatd, so the pair is the ssh/sshd shape — two products, each
+owning its own configuration and tooling — not the docker/dockerd shape
+where a thin client carries the daemon's controls. Charters are the
+unattended layer's configuration: a user who never runs unattended
+operation never sees the word charter in `mentat --help`. The
+zero-residency cron deployment survives unchanged, since both binaries
+ship in one artifact — the crontab line is `mentatd charter fire NAME
+--sweep`, one-shot, nothing resident — and "one code path, two invoking
+processes" becomes one binary invoking, as one-shot CLI or as resident
+node.)
 
 `fire` is load-bearing twice over: `--event` exercises receipt, dedup,
 gate, fence, spawn, publish — the identical path — with no listener and
@@ -291,7 +299,7 @@ synthesizes deliveries for heads without run-claims — plus one narrower
 re-entry: a head that ran to settlement with findings but has no
 successful egress receipt re-enters the publisher only (C2's upsert is
 idempotent; no fresh run, no fresh spend). The same fold rung 1b later
-runs at boot. A crontab line `*/5 * * * * mentat charter fire
+runs at boot. A crontab line `*/5 * * * * mentatd charter fire
 pr-review --sweep` is therefore a complete, fenced, deduplicated,
 publishing review charter with zero listener, zero tunnel, zero service
 unit — rung 1 dogfoods on cron alone. `fire` runs the pipeline in the
@@ -317,7 +325,7 @@ does not exist:
   action-class)` — semantic, never the delivery GUID, so a UI redelivery
   dedupes and a new push runs. Default rate fence where the charter names
   none: `runs_per_hour = 6`.
-- `cli` — **funded.** `mentat charter fire NAME [--event FILE |
+- `cli` — **funded.** `mentatd charter fire NAME [--event FILE |
   --sweep]`. `--event` and `--sweep` fires carry the identity of the
   webhook-shaped delivery they decode or synthesize, so the canonical
   `--sweep` crontab dedupes — **and is fenced** — exactly as the webhook

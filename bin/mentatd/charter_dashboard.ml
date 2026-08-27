@@ -443,7 +443,7 @@ let page ~now ~ingress observed =
       shell
         [
           empty_notice
-            "No charters are installed. Install one with mentat charter add.";
+            "No charters are installed. Install one with mentatd charter add.";
         ]
   | Ok entries ->
       let items = attention ~now entries in

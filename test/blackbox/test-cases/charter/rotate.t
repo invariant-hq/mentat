@@ -24,7 +24,7 @@ construction.
   $ printf 'Review the diff.\n' > proposal/prompt.md
   $ printf '{"type":"object"}\n' > proposal/findings.schema.json
 
-  $ mentat charter add proposal | censor
+  $ mentatd charter add proposal | censor
   added pr-review ($TESTCASE_ROOT/config/mentat/charters/pr-review)
   digest $DIGEST1
   webhook POST /ingress/github/$DIGEST2 (fresh URL; update GitHub settings)
@@ -33,7 +33,7 @@ construction.
   $ cp config/mentat/charters/pr-review/secrets/webhook secret.before
   $ cp config/mentat/charters/pr-review/ingress.id id.before
 
-  $ mentat charter rotate-secret pr-review | censor
+  $ mentatd charter rotate-secret pr-review | censor
   rotated webhook secret at $TESTCASE_ROOT/config/mentat/charters/pr-review/secrets/webhook
   webhook POST /ingress/github/$DIGEST (URL unchanged; set the new secret on the GitHub hook now — the old one no longer verifies)
 
@@ -46,13 +46,13 @@ The secret changed; the ingress id — the webhook URL — did not.
 
 The charter still loads whole: same digest, same state.
 
-  $ mentat charter list | censor
+  $ mentatd charter list | censor
   NAME       DIGEST            STATE    LAST
   pr-review  $DIGEST  enabled  -
 
 A missing charter is refused loudly.
 
-  $ mentat charter rotate-secret missing 2>&1
+  $ mentatd charter rotate-secret missing 2>&1
   mentat: load: $TESTCASE_ROOT/config/mentat/charters/missing: no charter named missing
   [1]
 
@@ -70,9 +70,9 @@ A charter without a webhook arm has no secret to rotate.
   > EOF
   $ printf 'Review the diff.\n' > cli-proposal/prompt.md
   $ printf '{"type":"object"}\n' > cli-proposal/findings.schema.json
-  $ mentat charter add cli-proposal | censor
+  $ mentatd charter add cli-proposal | censor
   added cli-review ($TESTCASE_ROOT/config/mentat/charters/cli-review)
   digest $DIGEST
-  $ mentat charter rotate-secret cli-review 2>&1
+  $ mentatd charter rotate-secret cli-review 2>&1
   mentat: charter cli-review has no github_webhook trigger, so there is no webhook secret to rotate
   [2]

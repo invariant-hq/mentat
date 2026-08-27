@@ -127,6 +127,6 @@ provider through the sealed review contract.
   1
   $ grep -c 'charter pr-review: queued' daemon-serve.out
   1
-  $ mentat charter runs pr-review | censor --times
+  $ mentatd charter runs pr-review | censor --times
   $TS spawned github:acme/widgets#7@$DIGEST1:head: session c-$DIGEST2
   $TS reaped github:acme/widgets#7@$DIGEST1:head: session c-$DIGEST2, exit 0, head settled, cause exited, $0.0110

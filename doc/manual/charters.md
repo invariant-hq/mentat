@@ -40,7 +40,7 @@ as-is:
               "per_charter": { "usd_per_day": 15.0, "runs_per_hour": 6 } },
   "publish": { "github": "review-threads" },
   "notify": { "on": ["failed", "parked", "fenced"],
-              "command": ["notify-send", "mentat charter"] } }
+              "command": ["notify-send", "mentatd charter"] } }
 ```
 
 The `github_webhook` arm names the deliveries that trigger a run, each
@@ -107,7 +107,7 @@ tokens revocable without touching your own.
 ## Installing
 
 ```sh
-mentat charter add ./pr-review
+mentatd charter add ./pr-review
 ```
 
 `add` validates the directory (or a path to its `charter.json`) and installs
@@ -125,21 +125,22 @@ The policy digest identifies what the three policy files say. Editing any of
 them moves it, which resets the budget windows and re-admits every open
 head — the deliberate re-review path.
 
-`mentat charter rotate-secret NAME` re-mints the webhook HMAC secret in
+`mentatd charter rotate-secret NAME` re-mints the webhook HMAC secret in
 place; the URL never moves. The old secret stops verifying the moment the
 verb returns, so set the new one on the GitHub hook immediately — deliveries
 signed with the old secret answer 401 until you do, and the sweep converges
-whatever the gap missed. `mentat charter remove NAME` deletes the
+whatever the gap missed. `mentatd charter remove NAME` deletes the
 configuration, secrets and webhook identity included (a later re-add mints a
 fresh URL), and deliberately keeps the receipts: they are the audit trail.
 
 ## Running it with a crontab line
 
-The smallest complete deployment is one crontab line — no daemon, no tunnel,
-no inbound URL:
+The smallest complete deployment is one crontab line — nothing resident, no
+tunnel, no inbound URL. `mentatd` here is a one-shot command: it runs the
+pipeline in the invoking process and exits.
 
 ```
-*/15 * * * * /usr/local/bin/mentat charter fire pr-review --sweep >>"$HOME/pr-review.log" 2>&1
+*/15 * * * * /usr/local/bin/mentatd charter fire pr-review --sweep >>"$HOME/pr-review.log" 2>&1
 ```
 
 `fire --sweep` lists the repository's open pull requests once with the read
@@ -157,7 +158,7 @@ by-hand invocation.
 
 Give cron the binary's absolute path, and make sure the invoking user holds
 a model credential ([Providers and accounts](providers.md)) — the review run
-authenticates like any headless run. `mentat charter fire NAME --event
+authenticates like any headless run. `mentatd charter fire NAME --event
 FILE` drives one saved webhook payload instead of a sweep, fenced exactly
 as a live delivery.
 
@@ -236,9 +237,9 @@ recorded in `daemon.json`, never printed to the service log. Running
 verbs below are the status surface either way.
 
 ```sh
-mentat charter list          # roster: name, digest, state, last disposition
-mentat charter status        # per charter: budgets against their windows, last receipt
-mentat charter runs NAME     # the disposition receipts, one line per decision
+mentatd charter list          # roster: name, digest, state, last disposition
+mentatd charter status        # per charter: budgets against their windows, last receipt
+mentatd charter runs NAME     # the disposition receipts, one line per decision
 ```
 
 Every decision is a receipt line in
@@ -287,4 +288,4 @@ under the run's readable roots is refused before spawning. Ambient
 
 For GitHub Enterprise hosts, both the CLI fire and the daemon accept
 overrides for the GitHub API base and the git host checkouts fetch from —
-see `mentat charter fire --help` and `mentatd --help`.
+see `mentatd charter fire --help` and `mentatd --help`.

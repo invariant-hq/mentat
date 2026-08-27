@@ -61,7 +61,6 @@ let root =
       Cli_trust.trust_cmd;
       Cli_trust.untrust_cmd;
       Cli_session.cmd;
-      Cli_charter.cmd;
       Cli_run.cmd;
       Cli_serve_session.cmd;
       Cli_github.cmd;

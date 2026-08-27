@@ -256,7 +256,7 @@ install_review_charter () {
 EOF
   printf 'Review the diff for defects.\n' > proposal/prompt.md
   printf '{"type":"object"}\n' > proposal/findings.schema.json
-  mentat charter add proposal >/dev/null
+  mentatd charter add proposal >/dev/null
   CDIR="$PWD/config/mentat/charters/pr-review"
   printf 'test-read-token\n' > "$CDIR/secrets/read-token"
   chmod 600 "$CDIR/secrets/read-token"

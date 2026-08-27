@@ -21,7 +21,7 @@ the configuration. No workspace, store, or network is touched.
 
 The first add mints the ingress URL and the webhook secret.
 
-  $ mentat charter add proposal | censor
+  $ mentatd charter add proposal | censor
   added pr-review ($TESTCASE_ROOT/config/mentat/charters/pr-review)
   digest $DIGEST1
   webhook POST /ingress/github/$DIGEST2 (fresh URL; update GitHub settings)
@@ -31,16 +31,16 @@ Re-adding replaces the policy files and keeps the identity: the URL is not
 fresh and the secret is not re-minted, so owner edits never move the webhook
 URL.
 
-  $ mentat charter add proposal | censor
+  $ mentatd charter add proposal | censor
   added pr-review ($TESTCASE_ROOT/config/mentat/charters/pr-review)
   digest $DIGEST1
   webhook POST /ingress/github/$DIGEST2
 
-  $ mentat charter list | censor
+  $ mentatd charter list | censor
   NAME       DIGEST            STATE    LAST
   pr-review  $DIGEST  enabled  -
 
-  $ mentat charter status | censor
+  $ mentatd charter status | censor
   pr-review
     state: enabled
     digest: $DIGEST
@@ -50,22 +50,22 @@ URL.
 
 On empty state a charter has no runs to show.
 
-  $ mentat charter runs pr-review
+  $ mentatd charter runs pr-review
 
 A bare fire has nothing to review — every version-1 charter reviews pull
 requests — so the verb asks for a delivery or a sweep (fire.t drives the
 full pipeline).
 
-  $ mentat charter fire pr-review 2>&1
+  $ mentatd charter fire pr-review 2>&1
   mentat: charter pr-review reviews pull requests and a bare fire has nothing to review; use --event FILE or --sweep
   [2]
 
 `remove` deletes the configuration — secrets and webhook identity included.
 No state was recorded here, so nothing is named as kept.
 
-  $ mentat charter remove pr-review
+  $ mentatd charter remove pr-review
   removed pr-review ($TESTCASE_ROOT/config/mentat/charters/pr-review)
-  $ mentat charter list
-  $ mentat charter runs pr-review 2>&1
+  $ mentatd charter list
+  $ mentatd charter runs pr-review 2>&1
   mentat: load: $TESTCASE_ROOT/config/mentat/charters/pr-review: no charter named pr-review
   [1]

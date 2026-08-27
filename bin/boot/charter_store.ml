@@ -134,11 +134,11 @@ let load dirs ~name =
       | Some _, true -> Ok ()
       | None, _ ->
           error ~operation ~path:(Filename.concat dir ingress_id_name)
-            "a webhook charter has no ingress id; run `mentat charter add` to \
-             mint one"
+            "a webhook charter has no ingress id; run `mentatd charter add` \
+             to mint one"
       | Some _, false ->
           error ~operation ~path:secret_path
-            "a webhook charter has no webhook secret; run `mentat charter \
+            "a webhook charter has no webhook secret; run `mentatd charter \
              add` to mint one"
   in
   let digest = Charter.policy_digest ~charter_json ~prompt ~output_schema in
