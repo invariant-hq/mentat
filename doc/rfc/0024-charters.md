@@ -542,8 +542,12 @@ open question 4's goldens pin both), written only by the node, never
 rewritten. A line is one of four kinds — a closed sum with
 `error_unknown` decode and a diagnostic projection (house norm):
 
-- **delivery** — event identity, charter digest, received-at; the N3/N4
-  serialization record;
+- **delivery** — event identity, charter digest, received-at, and the
+  gate members the identity cannot carry (action, base ref, draft,
+  author association — written all-or-none); the N3/N4 serialization
+  record, and the re-drive record: a delivery the crash window orphans
+  is rebuilt from this line alone and driven through the ordinary
+  dispose;
 - **disposition** — closed set: `spawned | skipped of reason | dup |
   fenced of meter | already_exists | superseded | refused of reason |
   reaped of {exit; head_outcome; usage; usd; cause}` — wall-clock expiry
@@ -563,8 +567,14 @@ input that does carry the fact (a journal head, a counter, an HTTP
 status). Exact byte schema and goldens are implementation (open
 question 4).
 
-**The reconcile fold** — run at boot and after every reap; pure over
-durable inputs, so running it twice is running it once. Child liveness is
+**The reconcile fold** — the local settle half runs synchronously at
+boot (so the advertised sockets answer before any network work), the
+full fold is the periodic beat's immediate first pass, and the
+after-reap re-entry yields to a pass already in flight rather than
+parking the pump; pure over durable inputs, so running it twice is
+running it once. Each pass also re-derives owed alerts from reaped
+dispositions — a crash between a reap and its alert converges on the
+next beat, which is what makes "once" durable rather than inline. Child liveness is
 read from the run fence (non-blocking probe of `sessions/<id>/run.lock` —
 `Held` names the owner to signal; fences release on owner death, D17),
 never from a stored pid; on boot each
@@ -576,7 +586,9 @@ timestamp.
 | ingress receipt, no run journal, no live child | — | spawn (idempotent: N4 turns a lost race into a loud collision) — reachable because N3 promises work before spawning it, and the sweep cannot see it (the head has a receipt) |
 | settled, findings | present | done |
 | settled, findings | absent | spawn publisher (safe under C2's upsert) |
-| settled, semantic failure | absent | advisory + alert, once per `(pr, head)` |
+| settled, semantic failure | absent | advisory + alert, once per `(pr, head)`, closed by a none-needed egress — the close is what makes the record terminal instead of re-entered every pass |
+| settled, no findings document | absent | alert once, close with a none-needed egress (a step-limit or failed-turn run must not be republished forever) |
+| delivery receipt, no disposition | — | rebuild the event from the receipt's members and dispose it; an unreconstructable or retired-digest record closes as skipped |
 | unsettled, pending decision | — | **parked**: the child stays alive, serving its session, until the park TTL; alert names the session; the owner attaches from the session list and answers as `Local_user`; a parked child that died re-materializes on the owner's attach (free fence → successor binds; the decision fact is durable) |
 | unsettled, no pending decision, child alive | — | leave it (the deadline ladder is armed) |
 | unsettled, no pending decision, child dead | — | the broker re-materializes a successor once (0018 §7.3–7.4): its own `recover` drives the head to an honest settle — a provider-claim crash settles `Interrupted` at once; a tool-claim crash continues the turn to its natural settle, spending against the charter's fences — then the fold re-enters on the settled head (which may publish). One re-materialization per receipt; a successor that dies leaves the row for the next pass; the next push remains the retry |
