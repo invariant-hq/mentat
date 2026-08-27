@@ -424,6 +424,7 @@
   lpath
   mentat_broker
   mentat_llm
+  mentat_server
   mentat_session
   mentat_store))
 

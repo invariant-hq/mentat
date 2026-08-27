@@ -38,11 +38,30 @@ let serve_owner_label = "serve-session"
    labeled hold that releases on its own — never a driver — so every probe
    classifies it as transient: re-probed shortly, never preempted, never
    failed over. The store's session removal guards its rmtree the same way
-   under its own "remove" label. *)
+   under its own exported label. *)
 let send_owner_label = "send"
 
 let custodial_label label =
-  String.equal label send_owner_label || String.equal label "remove"
+  String.equal label send_owner_label
+  || String.equal label Mentat_store.Run_lock.remove_owner_label
+
+(* The one fence-owner classification: a custodial label is a transient the
+   observer re-probes; the serving label on a same-host owner is a dialable
+   per-session child server; anything else — an interactive driver, an
+   unreadable label, a foreign host — is a holder no loop here may reach.
+   [probe_fence] maps it onto the decision table's vocabulary and the send
+   loop matches it directly, so the two can never drift on the host
+   conjunction. *)
+let classify_owner owner =
+  match Mentat_store.Run_lock.Owner.label owner with
+  | Some label when custodial_label label -> `Custodial
+  | Some label
+    when String.equal label serve_owner_label
+         && String.equal
+              (Mentat_store.Run_lock.Owner.host owner)
+              (Unix.gethostname ()) ->
+      `Server (Mentat_store.Run_lock.Owner.pid owner)
+  | Some _ | None -> `Other
 
 module Engine = struct
   type t = {
@@ -100,10 +119,24 @@ type broker = {
   entries : (string, entry) Hashtbl.t;
   stop_signal : unit Eio.Promise.t;
   stop_resolver : unit Eio.Promise.u;
+  send_locks : (string, Eio.Mutex.t) Hashtbl.t;
   mutable stopped : bool;
+  mutable reaping : bool;
 }
 
 let key child = Mentat_session.Id.to_string child
+
+(* The per-target ordering lock a send serializes on, created on demand and
+   kept for the broker's life. [Eio.Mutex] queues its waiters in FIFO order,
+   so contending senders are serviced in arrival order — the ordering is the
+   primitive's contract, never a discipline each caller must keep. *)
+let lock_for locks key =
+  match Hashtbl.find_opt locks key with
+  | Some lock -> lock
+  | None ->
+      let lock = Eio.Mutex.create () in
+      Hashtbl.replace locks key lock;
+      lock
 let clock t = Eio.Stdenv.clock t.stdenv
 let net t = Eio.Stdenv.net t.stdenv
 let sleep t seconds = Eio.Time.sleep (clock t) seconds
@@ -119,43 +152,33 @@ let current t entry =
 let send_signal pid signal =
   try Unix.kill pid signal with Unix.Unix_error _ -> ()
 
-(* Map the fence probe onto the table's vocabulary. Identity mapping lives
-   here, not in the table: [`Held (Some pid)] only for a same-host holder
-   whose owner line carries the child-server label — the only holder the
-   escalation ladder may signal. This process's own hold (an in-process
-   driver) is its own arm, a custodial label (a send's append, the store's
-   removal) is a transient the table re-probes, and every other holder — an
-   interactive CLI that resumed the child, an unreadable owner line, a
-   foreign host — is [`Held None], which the table refuses to preempt. *)
+(* Map the fence probe onto the table's vocabulary. This process's own hold
+   (an in-process driver) is its own arm; every other holder is
+   [classify_owner]'s: [`Held (Some pid)] only for a dialable child server —
+   the only holder the escalation ladder may signal — and [`Held None] for a
+   holder the table refuses to preempt. *)
 let probe_fence t entry () : Reconcile.fence =
   match Mentat_store.Run_lock.holder t.store ~session:entry.child with
   | `Free -> `Free
   | `Io io -> `Io (Format.asprintf "%a" Mentat_store.Io.pp io)
   | `Held None -> `Held None
   | `Held (Some owner) -> (
-      let pid = Mentat_store.Run_lock.Owner.pid owner in
-      if pid = Unix.getpid () then `Held_self
+      if Mentat_store.Run_lock.Owner.pid owner = Unix.getpid () then `Held_self
       else
-        match Mentat_store.Run_lock.Owner.label owner with
-        | Some label when custodial_label label -> `Custodial
-        | Some label
-          when String.equal label serve_owner_label
-               && String.equal
-                    (Mentat_store.Run_lock.Owner.host owner)
-                    (Unix.gethostname ()) ->
-            `Held (Some pid)
-        | Some _ | None -> `Held None)
+        match classify_owner owner with
+        | `Custodial -> `Custodial
+        | `Server pid -> `Held (Some pid)
+        | `Other -> `Held None)
 
 let root_string entry = Lpath.Abs.to_string entry.engine.Engine.root
 
-(* The unfinished-work judgment is head OR queue: a settled head with
+(* The unfinished-work judgment is the state's own: a settled head with
    unconsumed mail is not finished — the mail buys the session another turn,
    so a free fence over it spawns rather than disposes. *)
 let head_of session : Reconcile.head =
-  let state = Mentat_session.state session in
-  match Mentat_session.State.settled_head state with
-  | Some _ when Mentat_session.State.pending_queue state = [] -> `Terminal
-  | Some _ | None -> `Unfinished
+  if Mentat_session.State.finished (Mentat_session.state session) then
+    `Terminal
+  else `Unfinished
 
 (* A fence-free head read, elided by the document stamp: the polls that watch
    a parked child decode its journal only when the persisted bytes change. An
@@ -501,7 +524,57 @@ and spawn_child t entry =
   | Error message -> give_up t entry message
   | Ok pid ->
       entry.pid <- Some pid;
+      ensure_reaper t;
       observe t entry
+
+(* The reaper: one fiber per broker sweeping the spawned-pid set with
+   [WNOHANG] on a short cadence. It starts with the first spawned pid — a
+   send-only broker (a CLI or TUI instance that materializes nothing) runs no
+   fiber at all, so nothing sweeps, or pins the process switch, for a table
+   that can never hold a process. The reaper never suspends: the sweep clears
+   each [pid] in the same step that observes its exit, and every exit's
+   settlement runs on its own forked fiber — so the reaper is never captive
+   to a successor child's lifetime, and one entry's failure lands in
+   [fork_entry]'s loud floor instead of parking its batch siblings. Detection
+   latency is bounded by the cadence; settlement latency is not, because the
+   live path is the feed observer. *)
+and ensure_reaper t =
+  if not (t.reaping || t.stopped) then begin
+    t.reaping <- true;
+    Eio.Fiber.fork ~sw:t.sw (fun () -> run_reaper t)
+  end
+
+and reap_sweep t =
+  let exited =
+    Hashtbl.fold
+      (fun _ entry acc ->
+        match entry.pid with
+        | None -> acc
+        | Some pid -> (
+            match Unix.waitpid [ Unix.WNOHANG ] pid with
+            | 0, _ -> acc
+            | _, _ ->
+                entry.pid <- None;
+                entry :: acc
+            | exception Unix.Unix_error (Unix.EINTR, _, _) -> acc
+            | exception Unix.Unix_error _ ->
+                entry.pid <- None;
+                entry :: acc))
+      t.entries []
+  in
+  List.iter
+    (fun entry -> fork_entry t entry (fun () -> settle_exit t entry))
+    exited
+
+and run_reaper t =
+  if not t.stopped then begin
+    (try reap_sweep t with
+    | Eio.Cancel.Cancelled _ as exn -> raise exn
+    | exn ->
+        Eio.traceln "broker: the reaper failed: %s" (Printexc.to_string exn));
+    sleep t reap_interval_s;
+    run_reaper t
+  end
 
 (* Observation: wait for the endpoint to answer a handshake, then follow the
    feed until the stream ends. Readiness is connectability, not the socket
@@ -568,10 +641,12 @@ and foreign_watch t entry =
 
 (* Materialization: the pure table decides over live probes — the fence, the
    endpoint handshake, and the journal head, so the executed table is exactly
-   the tested one. A custodial hold re-probes on a short cadence for as long
-   as it lasts: the hold is bounded by its owner's brief work and owner death
-   releases the fence, so the loop always makes progress. *)
-let rec launch t entry =
+   the tested one. A custodial hold re-probes for as long as it lasts: the
+   hold is bounded by its owner's brief work and owner death releases the
+   fence, so the loop always makes progress — but a wedged custodial holder
+   must not be polled at the initial cadence forever, so the reprobe interval
+   doubles to a one-second ceiling. *)
+let rec launch ?(reprobe_s = 0.05) t entry =
   match
     Reconcile.decide ~fence:(probe_fence t entry)
       ~reachable:(endpoint_reachable t entry)
@@ -595,8 +670,9 @@ let rec launch t entry =
       settle_exit t entry
   | Reconcile.Stand_down -> Hashtbl.remove t.entries (key entry.child)
   | Reconcile.Reprobe ->
-      sleep t 0.05;
-      if current t entry then launch t entry
+      sleep t reprobe_s;
+      if current t entry then
+        launch ~reprobe_s:(Float.min 1.0 (reprobe_s *. 2.)) t entry
   | Reconcile.Fail message -> give_up t entry message
 
 (* Admission: register the child in the node table and fork its work. A child
@@ -664,36 +740,6 @@ let cancel t ~child =
    weaker success, and an exhausted budget is a loud [`Undelivered] against
    the sender's own durable record. *)
 
-(* The accept judgment over the target's own recorded facts — the honest
-   floor while only delegation kin and the owner send: mail from the owner
-   (an absent origin), from the target's recorded parent, or from one of its
-   own recorded children is admitted; anything else is refused loudly. The
-   grant table grows here. *)
-let accepted ~origin target_session =
-  match origin with
-  | None -> true
-  | Some (Mentat_session.Origin.Trigger _) -> false
-  | Some (Mentat_session.Origin.Agent sender) ->
-      let is_parent =
-        match
-          Mentat_session.Metadata.delegated_from
-            (Mentat_session.metadata target_session)
-        with
-        | None -> false
-        | Some lineage ->
-            Mentat_session.Id.equal
-              (Mentat_session.Metadata.Delegated_from.parent lineage)
-              sender
-      in
-      is_parent
-      || List.exists
-           (fun edge ->
-             Mentat_session.Id.equal
-               (Mentat_session.Delegation.child edge)
-               sender)
-           (Mentat_session.State.delegations
-              (Mentat_session.state target_session))
-
 (* The append twin of the driver's queue admission, for a dormant target:
    acquire the fence under the custodial send label — acquisition is the
    liveness probe, there is no read-then-act race — then perform the
@@ -719,7 +765,7 @@ let append_under_fence t ?origin ~target ~id ~input () =
           let session = Mentat_store.Session.Document.session document in
           let state = Mentat_session.state session in
           if Mentat_session.State.enqueue_recorded id state then `Delivered
-          else if not (accepted ~origin session) then
+          else if not (Mentat_session.accepts_mail ~origin session) then
             `Undelivered
               (Printf.sprintf "session %s does not accept this sender's mail"
                  (Mentat_session.Id.to_string target))
@@ -745,11 +791,11 @@ let append_under_fence t ?origin ~target ~id ~input () =
                     `Undelivered (Mentat_store.Session.Error.message e))))
 
 (* The wire arm, for a target a per-session server drives: dial the derived
-   socket and submit the entry as a [Queue_next] on one short-lived,
-   grace-bounded connection — the driver's recorded-enqueue dedup makes
-   redelivery idempotent. The handshake's workspace identity is the target's
-   recorded cwd, read fence-free. *)
-let wire_send t ?origin ~target ~id ~input () =
+   socket and submit the entry as a [Queue_next] on one short-lived
+   connection bounded at [timeout_s] — the driver's recorded-enqueue dedup
+   makes redelivery idempotent. The handshake's workspace identity is the
+   target's recorded cwd, read fence-free. *)
+let wire_send t ?origin ~timeout_s ~target ~id ~input () =
   match Mentat_store.Session.load t.store target with
   | Error _ -> `Unreachable
   | Ok document -> (
@@ -771,7 +817,7 @@ let wire_send t ?origin ~target ~id ~input () =
               ~session:(Mentat_session.Id.to_string target)
           in
           match
-            Eio.Time.with_timeout (clock t) grace_s @@ fun () ->
+            Eio.Time.with_timeout (clock t) timeout_s @@ fun () ->
             Eio.Switch.run @@ fun sw ->
             match
               Mentat_server.connect ~sw ~net:(net t) ~clock:(clock t)
@@ -810,9 +856,16 @@ let send t ?origin ?(budget_s = grace_s) ~target ~id ~input () =
     `Undelivered "mail cannot carry inline or referenced media"
   else
     let backoff_s = 0.05 in
-    let rec attempt elapsed =
+    (* The budget bounds the loop in wall time — read from the broker clock,
+       never accumulated from the sleeps alone, or a frozen server's dials
+       would stretch one send to passes times the grace. Waiting for the
+       target's ordering lock spends the same budget: a sender queued behind
+       earlier sends is still one bounded call. *)
+    let started = Eio.Time.now (clock t) in
+    let elapsed () = Eio.Time.now (clock t) -. started in
+    let rec attempt () =
       let retry held =
-        if elapsed >= budget_s then
+        if elapsed () >= budget_s then
           `Undelivered
             (match held with
             | Some owner ->
@@ -821,24 +874,24 @@ let send t ?origin ?(budget_s = grace_s) ~target ~id ~input () =
             | None -> "the target's fence stayed held by an unreadable owner")
         else begin
           sleep t backoff_s;
-          attempt (elapsed +. backoff_s)
+          attempt ()
         end
       in
       match append_under_fence t ?origin ~target ~id ~input () with
       | (`Delivered | `Undelivered _) as outcome -> outcome
       | `Held None -> retry None
       | `Held (Some owner) -> (
-          match Mentat_store.Run_lock.Owner.label owner with
-          | Some label when custodial_label label ->
+          match classify_owner owner with
+          | `Custodial ->
               (* Another brief hold is in flight; never dial, never
                  preempt. *)
               retry (Some owner)
-          | Some label
-            when String.equal label serve_owner_label
-                 && String.equal
-                      (Mentat_store.Run_lock.Owner.host owner)
-                      (Unix.gethostname ()) -> (
-              match wire_send t ?origin ~target ~id ~input () with
+          | `Server _ -> (
+              (* One dial may not outrun what remains of the budget. *)
+              let timeout_s =
+                Float.min grace_s (Float.max 0. (budget_s -. elapsed ()))
+              in
+              match wire_send t ?origin ~timeout_s ~target ~id ~input () with
               | `Submitted -> `Delivered
               | `Invalid message -> `Undelivered message
               | `Refused | `Unreachable ->
@@ -847,75 +900,46 @@ let send t ?origin ?(budget_s = grace_s) ~target ~id ~input () =
                      fence — a holder that exits mid-loop is caught by the
                      acquire. *)
                   retry (Some owner))
-          | Some _ | None ->
+          | `Other ->
               (* An unlabeled or foreign holder is a driver this loop cannot
                  reach; within the budget it may release. *)
               retry (Some owner))
     in
-    attempt 0.
-
-(* The reaper: one fiber per broker sweeping the spawned-pid set with
-   [WNOHANG] on a short cadence. The reaper never suspends: the sweep clears
-   each [pid] in the same step that observes its exit, and every exit's
-   settlement runs on its own forked fiber — so the reaper is never captive
-   to a successor child's lifetime, and one entry's failure lands in
-   [fork_entry]'s loud floor instead of parking its batch siblings. Detection
-   latency is bounded by the cadence; settlement latency is not, because the
-   live path is the feed observer. *)
-let reap_sweep t =
-  let exited =
-    Hashtbl.fold
-      (fun _ entry acc ->
-        match entry.pid with
-        | None -> acc
-        | Some pid -> (
-            match Unix.waitpid [ Unix.WNOHANG ] pid with
-            | 0, _ -> acc
-            | _, _ ->
-                entry.pid <- None;
-                entry :: acc
-            | exception Unix.Unix_error (Unix.EINTR, _, _) -> acc
-            | exception Unix.Unix_error _ ->
-                entry.pid <- None;
-                entry :: acc))
-      t.entries []
-  in
-  List.iter
-    (fun entry -> fork_entry t entry (fun () -> settle_exit t entry))
-    exited
-
-let run_reaper t =
-  let rec loop () =
-    if not t.stopped then begin
-      (try reap_sweep t with
-      | Eio.Cancel.Cancelled _ as exn -> raise exn
-      | exn ->
-          Eio.traceln "broker: the reaper failed: %s" (Printexc.to_string exn));
-      sleep t reap_interval_s;
-      loop ()
-    end
-  in
-  loop ()
+    (* One send to a target at a time, in arrival order: the delivery loop
+       runs under the target's ordering lock, so a second sender's entry can
+       never overtake a first still contending for the fence or the wire —
+       per-sender FIFO is this primitive's contract. The lock wait is
+       cancelled at the budget: a lane that stays busy answers the same loud
+       [`Undelivered] as a fence that stays held. *)
+    let lane = lock_for t.send_locks (key target) in
+    match
+      Eio.Time.with_timeout (clock t) budget_s @@ fun () ->
+      Eio.Mutex.lock lane;
+      Ok ()
+    with
+    | Error `Timeout ->
+        `Undelivered
+          "earlier sends to the target did not clear within the budget"
+    | Ok () ->
+        Fun.protect ~finally:(fun () -> Eio.Mutex.unlock lane) attempt
 
 let create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir ~now =
   let stop_signal, stop_resolver = Eio.Promise.create () in
-  let t =
-    {
-      sw;
-      stdenv;
-      store;
-      resolve_bin;
-      socket_base;
-      log_dir;
-      now;
-      entries = Hashtbl.create 8;
-      stop_signal;
-      stop_resolver;
-      stopped = false;
-    }
-  in
-  Eio.Fiber.fork ~sw (fun () -> run_reaper t);
-  t
+  {
+    sw;
+    stdenv;
+    store;
+    resolve_bin;
+    socket_base;
+    log_dir;
+    now;
+    entries = Hashtbl.create 8;
+    stop_signal;
+    stop_resolver;
+    send_locks = Hashtbl.create 8;
+    stopped = false;
+    reaping = false;
+  }
 
 let stop t =
   t.stopped <- true;
@@ -1070,7 +1094,12 @@ type send_stub =
   input:Mentat_llm.Content.t list ->
   [ `Delivered | `Undelivered of string ]
 
-type t = Real of broker | Stub of send_stub
+(* The stub keeps the real send's per-target serialization — its own lock
+   registry — so an ordering-sensitive engine test observes the primitive's
+   contract, not a mock's looser one. It has no clock, so the lock wait is
+   unbounded; a stub that never returns is a test bug, not a case to serve. *)
+type stub = { send : send_stub; locks : (string, Eio.Mutex.t) Hashtbl.t }
+type t = Real of broker | Stub of stub
 
 let no_processes op =
   invalid_arg
@@ -1079,7 +1108,7 @@ let no_processes op =
 let create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir ~now =
   Real (create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir ~now)
 
-let for_tests ~send = Stub send
+let for_tests ~send = Stub { send; locks = Hashtbl.create 4 }
 
 let materialize t engine ~child =
   match t with
@@ -1092,7 +1121,10 @@ let cancel t ~child =
 let send t ?origin ?budget_s ~target ~id ~input () =
   match t with
   | Real b -> send b ?origin ?budget_s ~target ~id ~input ()
-  | Stub stub -> stub ~origin ~target ~id ~input
+  | Stub stub ->
+      Eio.Mutex.use_ro
+        (lock_for stub.locks (Mentat_session.Id.to_string target))
+        (fun () -> stub.send ~origin ~target ~id ~input)
 
 let rediscover t ~engine_for =
   match t with

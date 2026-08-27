@@ -72,8 +72,17 @@ val send_owner_label : string
     session under. A custodial hold is a brief labeled hold that releases on
     its own — never a driver — so every fence probe treats it as a transient
     to re-probe shortly, never a holder to preempt or fail over. Exported for
-    the same reason as {!serve_owner_label}: an activation's first attach must
-    recognize it and retry briefly instead of refusing a foreign driver. *)
+    the same reason as {!serve_owner_label}: the two sides of the fence must
+    spell it identically. *)
+
+val custodial_label : string -> bool
+(** [custodial_label label] is [true] iff [label] is a custodial run-fence
+    owner label: {!send_owner_label}, or the store's removal label
+    ({!Mentat_store.Run_lock.remove_owner_label}). The one judgment "this
+    holder is a brief hold that releases on its own, never a driver", shared
+    so every consumer — the broker's own probes and send loop, and a child
+    activation's first attach, which retries briefly instead of refusing the
+    session — classifies the same labels the same way. *)
 
 (** The engine-reach seam for one workspace instance. *)
 module Engine : sig
@@ -124,8 +133,9 @@ val create :
   t
 (** [create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir ~now] is a
     broker over the process's one opened [store] and its ambient [stdenv]. Its
-    reaper fiber starts under [sw] immediately; observers fork under [sw] as
-    children materialize. The broker stops with {!stop} — its fibers end
+    reaper fiber starts under [sw] with the first spawned child — a broker
+    that only ever sends runs no fiber at all — and observers fork under [sw]
+    as children materialize. The broker stops with {!stop} — its fibers end
     promptly — while the children themselves are deliberately not bound to
     [sw]: a delegated child outlives the process that spawned it.
 
@@ -170,17 +180,26 @@ val send :
     label. Acquiring the fence under {!send_owner_label} is itself the
     liveness probe: acquired, the entry is admitted exactly as the target's
     own driver would admit it — the recorded-enqueue dedup, the accept
-    judgment over the target's recorded facts, the committed fact — and
+    judgment ({!Mentat_session.accepts_mail}), the committed fact — and
     released. A fence held under the serving label is a live per-session
-    server: the entry crosses its socket as a queue command on a short-lived,
-    grace-bounded connection, and the driver's dedup makes redelivery
-    idempotent. A fence held under another custodial label is a transient,
-    re-probed on a short backoff, never dialed and never preempted. The loop
-    is symmetric — a holder that exits mid-pass is caught by the next pass's
-    acquire — and [budget_s] (default: the grace bound; a supervisor
-    delivering as part of a wake may pass more) bounds the whole loop: spent
-    with nothing delivered, the answer is [`Undelivered] with the reason,
-    against the sender's own durable record.
+    server: the entry crosses its socket as a queue command on a short-lived
+    connection, and the driver's dedup makes redelivery idempotent. A fence
+    held under another custodial label is a transient, re-probed on a short
+    backoff, never dialed and never preempted. The loop is symmetric — a
+    holder that exits mid-pass is caught by the next pass's acquire — and
+    [budget_s] (default: the grace bound; a supervisor delivering as part of
+    a wake may pass more) bounds the whole loop in wall time, a single wire
+    dial capped at what remains of it: spent with nothing delivered, the
+    answer is [`Undelivered] with the reason, against the sender's own
+    durable record.
+
+    {b Ordering is this primitive's contract.} Sends to one target are
+    serviced one at a time, in arrival order: the delivery loop runs under a
+    per-target ordering lock whose waiters are served FIFO, so a caller that
+    issues two sends to one target in sequence knows they land in that order
+    with no discipline of its own — per-sender FIFO holds for every caller.
+    The wait for the lock spends the sender's own [budget_s]; a budget spent
+    entirely behind earlier sends is an [`Undelivered] like any other.
 
     [id] is the sender's derived idempotency key: the same send retried lands
     the same entry once (at-least-once mechanics, exactly-once effect).
@@ -239,7 +258,10 @@ val for_tests :
 (** [for_tests ~send] is a mocked broker for unit-tier tests of the engines
     that hold one: {!val-send}'s fence, append, and dial effects are replaced
     by the given function, which answers the outcome the test scripts and may
-    record what crossed. Every process-facing operation — {!materialize},
+    record what crossed. The stub keeps the real send's per-target
+    serialization — concurrent sends to one target reach the given function
+    one at a time, in arrival order — so ordering-sensitive tests observe the
+    primitive's contract. Every process-facing operation — {!materialize},
     {!cancel}, {!rediscover} — raises [Invalid_argument]: the stub performs no
     process work, and a test that reaches one of those has wired the wrong
     seam. *)

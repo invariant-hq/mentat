@@ -105,10 +105,7 @@ let head_summary store cache child =
           | Error _ -> None
           | Ok doc ->
               let state = Session.state (Store.Session.Document.session doc) in
-              let settled =
-                Option.is_some (Session.State.settled_head state)
-                && Session.State.pending_queue state = []
-              in
+              let settled = Session.State.finished state in
               let children =
                 List.map Session.Delegation.child
                   (Session.State.delegations state)
@@ -118,12 +115,12 @@ let head_summary store cache child =
 
 (* The child idle predicate over durable heads, read fence-free so observation
    never contends with this process's own driver. It builds on the shared
-   settled-head judgment ({!Mentat_session.State.settled_head}) and is
-   deliberately stronger: the head must be settled, nothing may be queued, and
-   every delegation edge the session recorded must name a session idle by the
-   same measure — exiting abandons no obligation. The [seen] set bounds the
-   walk: ids are parent-minted, so an uncorrupted tree is finite, and a
-   corrupt journal naming an ancestor edge must not recurse forever. *)
+   finished judgment ({!Mentat_session.State.finished}) and is deliberately
+   stronger: every delegation edge the session recorded must also name a
+   session idle by the same measure — exiting abandons no obligation. The
+   [seen] set bounds the walk: ids are parent-minted, so an uncorrupted tree
+   is finite, and a corrupt journal naming an ancestor edge must not recurse
+   forever. *)
 let idle store cache child =
   let rec go seen child =
     let id = Session.Id.to_string child in
@@ -425,22 +422,23 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
                               (Format.asprintf "%a" Mentat_protocol.Error.pp e))
                   in
                   (* The first attach tolerates a custodial hold: a fence
-                     held under the send label is a brief mail append in
-                     flight, never a foreign driver, so the boot retries
-                     briefly instead of refusing the session. *)
-                  let send_hold () =
+                     held under a custodial label (a send appending mail,
+                     the store removing a session) is a brief hold that
+                     releases on its own, never a foreign driver, so the
+                     boot retries briefly instead of refusing the session. *)
+                  let custodial_hold () =
                     match Store.Run_lock.holder store ~session:child with
-                    | `Held (Some owner) ->
-                        Option.equal String.equal
-                          (Store.Run_lock.Owner.label owner)
-                          (Some Mentat_broker.send_owner_label)
+                    | `Held (Some owner) -> (
+                        match Store.Run_lock.Owner.label owner with
+                        | Some label -> Mentat_broker.custodial_label label
+                        | None -> false)
                     | `Free | `Held None | `Io _ -> false
                   in
                   let rec submit_with_patience elapsed =
                     match submit () with
                     | Ok () -> Ok ()
                     | Error _ as error ->
-                        if elapsed >= 5.0 || not (send_hold ()) then error
+                        if elapsed >= 5.0 || not (custodial_hold ()) then error
                         else begin
                           Eio.Time.sleep clock 0.1;
                           submit_with_patience (elapsed +. 0.1)
