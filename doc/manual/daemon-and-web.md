@@ -105,9 +105,11 @@ cd /path/to/project
 mentatd --web
 ```
 
-`--web` binds IPv4 loopback only and prints a URL such as
-`http://127.0.0.1:PORT/?t=TOKEN`. It uses an ephemeral port by default; choose one
-with `--web-port PORT`. The option has no effect without `--web`. The web
+`--web` binds IPv4 loopback only. Run by hand in a terminal it prints a URL
+such as `http://127.0.0.1:PORT/?t=TOKEN`; under a service manager — where
+standard output is the daemon log — the URL is recorded in `daemon.json`
+(mode 0600) instead, so the access token never lands in a log file. It uses
+an ephemeral port by default; choose one with `--web-port PORT`. The option has no effect without `--web`. The web
 workspace is the daemon process's startup working directory; there is no web
 `--cwd` flag.
 
