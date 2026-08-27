@@ -13,7 +13,9 @@ to stdout, and performs no network IO — posting is a short `gh api` loop that
 you own. A ready-made GitHub Actions workflow wiring the whole pipeline ships
 in this repository as `.github/workflows/mentat-review.yml`; this page shows
 the underlying commands so you can wire your own CI, a cron job, or a local
-script the same way.
+script the same way. To have mentat run the whole pipeline itself as a
+standing, unattended grant — checkout, run, and posting included — see
+[Charters](charters.md).
 
 ## Producing the findings
 
