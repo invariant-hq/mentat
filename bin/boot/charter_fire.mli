@@ -152,6 +152,11 @@ type env = {
     binary. Everything charter- or delivery-scoped rides {!Repo.t} and the
     loaded charter instead. *)
 
+val named_env : env -> name:string -> env
+(** [named_env env ~name] is [env] with every narration line prefixed
+    [charter <name>: ] — one resident process speaks for many charters, so
+    the prefix is the line's provenance. *)
+
 type outcome =
   | Disposed
       (** The event was driven to a disposition — spawned and reaped,
@@ -200,7 +205,14 @@ val dispose :
     signal a resident caller turns into a prompt reconcile re-entry, since
     everything after the reap (the findings read, the publication, the
     egress) can fail while the money is already spent. An event disposed
-    without a run never calls it. [Error message] is a machinery failure:
+    without a run never calls it. The reaped append re-checks the record
+    under the charter's fire lock — the child's fence frees at its exit,
+    before the append, so a concurrent reconcile pass may settle the
+    record recovered first; exactly one reaped line lands per digest and
+    identity, and the loser narrates, still signals [on_reap], and leaves
+    the record's owed publication or alert to the sweep. A settled run
+    whose log carries no findings document closes with a failed alert and
+    a none-needed egress line. [Error message] is a machinery failure:
     the pipeline itself could not do its job (an unwritable receipt, an
     unreachable remote, a failed spawn) — receipted as [refused] wherever
     an identity exists to receipt against, and distinct from every run
@@ -218,21 +230,50 @@ val fire_event :
 
 val fire_sweep :
   env -> repo:Repo.t -> Charter_store.Loaded.t -> (outcome, string) result
-(** [fire_sweep env ~repo loaded] performs one open-PR listing and drives a
-    synthesized delivery through {!dispose} for every head whose run-claim
-    is not held under the current policy digest (the listing is the head
-    read, so the current-head check is not repeated; no delivery receipt is
-    admitted — the sweep observes, it never re-delivers). A head whose
-    claim is held is passed over silently, with two exceptions: a claim
-    with no spawned line — a committer that died between claim and spawn —
-    re-enters {!dispose} whole, whose admission adopts the abandoned
-    commitment; and an identity that ran to settlement with findings and
-    holds no egress receipt re-enters the {e publisher} only — the upsert
-    is idempotent, so finishing an interrupted publication spends nothing
-    and mints no run. Heads a gate skipped or a fence refused hold no claim
-    and re-enter on every pass, so a draft that goes ready is reviewed and
-    a fenced head runs when its window frees. Events are driven in listing
-    order; the first machinery failure stops the sweep. *)
+(** [fire_sweep env ~repo loaded] performs one open-PR listing and
+    interprets {!Mentat_charter.Record.sweep_action} over each head's
+    receipts (the listing is the head read, so the current-head check is
+    not repeated; no delivery receipt is admitted — the sweep observes, it
+    never re-delivers): a head whose run-claim is not held under the
+    current policy digest — or whose claim has no spawned line, a
+    committer that died between claim and spawn — is driven through
+    {!dispose} whole, whose admission adopts an abandoned commitment; an
+    identity that ran to a publishable settle and holds no egress receipt
+    re-enters the {e publisher} only — the upsert is idempotent, so
+    finishing an interrupted publication spends nothing and mints no run —
+    and a settled head whose log carries no findings document closes with
+    an alert and a none-needed egress line instead of re-entering forever.
+    Heads a gate skipped or a fence refused hold no claim and re-enter on
+    every pass, so a draft that goes ready is reviewed and a fenced head
+    runs when its window frees. Events are driven in listing order; the
+    first machinery failure stops the sweep, and a stop request observed
+    before a drive stops committing new runs ([Ok Interrupted]) — the beat
+    finishes the fold. *)
+
+val alert_identity :
+  env ->
+  Charter_store.Loaded.t ->
+  digest:string ->
+  identity:string ->
+  transition:Mentat_charter.Receipt.Transition.t ->
+  session:string option ->
+  (unit, string) result
+(** [alert_identity env loaded ~digest ~identity ~transition ~session]
+    fires the identity-scoped alert for [transition] — the alert receipt,
+    then the charter's notify hook — unless the record already carries one
+    for [transition] under [digest] and [identity], in which case nothing
+    happens: the dedup rides the receipt log, so the call is idempotent and
+    a reconcile pass may re-derive an owed alert freely. [digest] is the
+    policy the alerted run was spawned under — which for a recovered run
+    may not be the policy in force — so an old policy's failure never
+    spends the new policy's one alert. *)
+
+val probe_fence : Mentat_store.t -> session:string -> Mentat_charter.Record.fence
+(** [probe_fence store ~session] reads [session]'s run fence, non-blocking,
+    in the reconcile tables' vocabulary: free, held, or unprobeable. The
+    fence, never a stored pid, is the liveness truth — fences release on
+    holder death, so a free fence over a spawned-but-unreaped run means no
+    process anywhere is left to write the record's reaped line. *)
 
 val settle_recovered :
   env ->
@@ -248,15 +289,18 @@ val settle_recovered :
     reaper survives it. Nothing is signalled and nothing is spawned. The
     reaped disposition carries cause [recovered] and is stamped with
     [digest] — the policy the run was spawned under, which may not be the
-    policy in force — so the spawn/reap pair stays whole under one digest.
-    The journal head, not the unobservable exit status, carries the truth:
-    a settled head stamps exit 0, making the run's findings publishable to
-    the next sweep's publisher re-entry; every other head stamps 255 and
-    alerts, [parked] for a parked head and [failed] otherwise — the
-    identity's claim is spent, so the alert is the only surface the owner
-    has left. Settling is serialized under the charter's fire lock and
-    re-checked there, so concurrent passes finding the same orphan settle
-    it once; a record already reaped is left untouched. *)
+    policy in force — so the spawn/reap pair stays whole under one digest,
+    and its alert dedups under that same digest. The journal head, not the
+    unobservable exit status, carries the truth: a settled head stamps
+    exit 0, making the run's findings publishable to the next sweep's
+    publisher re-entry; every other head stamps 255 and alerts, [parked]
+    for a parked head and [failed] otherwise — the identity's claim is
+    spent, so the alert is the only surface the owner has left. Settling is
+    serialized under the charter's fire lock, where the record and the
+    fence are both re-read: a record already reaped is left untouched, and
+    a fence that re-reads held or unprobeable — the owner attached the
+    orphaned session between the caller's probe and the lock — is narrated
+    and left to its holder, never settled over. *)
 
 (** {1:folds Pure pieces}
 

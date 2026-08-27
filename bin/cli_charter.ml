@@ -85,17 +85,6 @@ let rotate_secret name =
 
 (* list *)
 
-let disposition_label disposition =
-  let name = Receipt.Disposition.name disposition in
-  match disposition with
-  | Receipt.Disposition.Fenced meter ->
-      Printf.sprintf "%s:%s" name (Receipt.Meter.to_string meter)
-  | Receipt.Disposition.Reaped { exit; _ } -> Printf.sprintf "%s:%d" name exit
-  | Receipt.Disposition.Spawned _ | Receipt.Disposition.Skipped _
-  | Receipt.Disposition.Dup | Receipt.Disposition.Already_exists
-  | Receipt.Disposition.Superseded | Receipt.Disposition.Refused _ ->
-      name
-
 (* The roster row's LAST cell is garnish: an unreadable receipt log renders as
    such here, and [charter runs NAME] is the verb that names the fault. *)
 let last_disposition dirs name =
@@ -107,14 +96,14 @@ let last_disposition dirs name =
           (fun acc receipt ->
             match receipt.Receipt.kind with
             | Receipt.Kind.Disposition disposition -> Some disposition
-            | Receipt.Kind.Delivery | Receipt.Kind.Egress _
+            | Receipt.Kind.Delivery _ | Receipt.Kind.Egress _
             | Receipt.Kind.Alert _ ->
                 acc)
           None receipts
       in
       match last with
       | None -> "-"
-      | Some disposition -> disposition_label disposition)
+      | Some disposition -> Receipt.Disposition.label disposition)
 
 let list () =
   (let* dirs = resolve_dirs () in
@@ -154,7 +143,7 @@ let runs name =
        match receipt.Receipt.kind with
        | Receipt.Kind.Disposition _ ->
            Output.stdout_printf "%s\n" (Receipt.diagnostic receipt)
-       | Receipt.Kind.Delivery | Receipt.Kind.Egress _ | Receipt.Kind.Alert _
+       | Receipt.Kind.Delivery _ | Receipt.Kind.Egress _ | Receipt.Kind.Alert _
          ->
            ())
      receipts;
@@ -171,25 +160,12 @@ let render_status dirs ~now (loaded : Charter_store.Loaded.t) =
   Output.stdout_printf "  state: %s\n"
     (if charter.Charter.enabled then "enabled" else "disabled");
   Output.stdout_printf "  digest: %s\n" digest;
-  let spend = Fence.spend_in_window ~digest ~now receipts in
-  (match charter.Charter.budget.Charter.Budget.usd_per_day with
-  | Some limit ->
-      Output.stdout_printf "  spend 24h: %.2f usd of %.2f\n" spend limit
-  | None -> Output.stdout_printf "  spend 24h: %.2f usd (no limit)\n" spend);
-  let spawns = Fence.spawns_in_window ~digest ~now receipts in
-  (* The same judgment admission applies: a webhook-armed charter's
-     deliveries are webhook-shaped, so its effective rate carries the
-     in-admission default. *)
-  let trigger =
-    match Charter.webhook_arm charter with
-    | Some _ -> `Webhook
-    | None -> `Cli
-  in
-  (match
-     Fence.effective_runs_per_hour ~budget:charter.Charter.budget ~trigger
-   with
-  | Some limit -> Output.stdout_printf "  runs 1h: %d of %d\n" spawns limit
-  | None -> Output.stdout_printf "  runs 1h: %d (no limit)\n" spawns);
+  let budget = charter.Charter.budget in
+  Output.stdout_printf "  %s\n" (Fence.spend_line ~digest ~now ~budget receipts);
+  Output.stdout_printf "  %s\n"
+    (Fence.runs_line ~digest ~now ~budget
+       ~trigger:(Charter.delivery_trigger charter)
+       receipts);
   (match List.fold_left (fun _ receipt -> Some receipt) None receipts with
   | Some receipt ->
       Output.stdout_printf "  last: %s\n" (Receipt.diagnostic receipt)

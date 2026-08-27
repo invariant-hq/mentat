@@ -60,14 +60,20 @@ let run_log_cap = 64 * 1024 * 1024
    resident node grows the fire path. *)
 let reap_grace_s = 10.0
 
-(* A stop request and a tty Ctrl-C can reach this parent while the run child,
-   sharing the process group, has already received the same SIGINT — and the
-   child's own guard force-quits on a second one. The courtesy grace lets a
-   child already tearing down gracefully exit before this parent delivers
-   the request itself. *)
+(* The run child shares this parent's process group, so a controlling
+   terminal's Ctrl-C reaches both at once — and the child's own guard
+   force-quits on a second SIGINT, so under a tty the parent sends none of
+   its own. A stop requested with no terminal (a scripted signal to this
+   process alone) reached only the parent: after the courtesy grace the
+   parent's SIGINT is the child's first. *)
 let stop_courtesy_s = 2.0
 let render_timeout_s = 120.0
 let publish_timeout_s = 300.0
+
+(* Provisioning talks to the network while the charter's fire lock is held,
+   so its git children get their own leash rather than the run's whole wall
+   clock: a wedged fetch costs minutes of lock hold, never the budget. *)
+let provision_timeout_s = 120.0
 
 (* Display hygiene for child stderr and payload text reaching a receipt or a
    terminal line: control bytes blanked, length bounded. *)
@@ -148,6 +154,14 @@ let receipt_now ~identity ~digest kind =
 
 let read_secret loaded ~file =
   Result.map_error store_error (Charter_store.read_secret loaded ~file)
+
+(* One resident process speaks for many charters, so a charter-scoped line
+   carries the charter's name as its provenance. *)
+let named_env env ~name =
+  {
+    env with
+    say = (fun line -> env.say (Printf.sprintf "charter %s: %s" name line));
+  }
 
 (* Child environments. The run and publication children never inherit a
    GitHub credential from the invoking environment (N9): the write token is
@@ -325,7 +339,8 @@ let provision env (loaded : Charter_store.Loaded.t) ~git_url
   let* token = read_secret loaded ~file:"read-token" in
   let* git = resolve_git env in
   let genv = git_environment env ~git_url ~hooks_dir ~token in
-  let run ?cap args = git_ok env ~git ~genv ~cwd_path:run_root ~timeout_s:wall_clock ?cap args in
+  let timeout_s = Float.min wall_clock provision_timeout_s in
+  let run ?cap args = git_ok env ~git ~genv ~cwd_path:run_root ~timeout_s ?cap args in
   let* _ = run [ "init"; "-q" ] in
   let* _ =
     run
@@ -341,7 +356,7 @@ let provision env (loaded : Charter_store.Loaded.t) ~git_url
   let head_sha = event.Event.Pull_request.head_sha in
   let* contained =
     let* code, _, stderr =
-      run_git env ~git ~genv ~cwd_path:run_root ~timeout_s:wall_clock
+      run_git env ~git ~genv ~cwd_path:run_root ~timeout_s
         [ "merge-base"; "--is-ancestor"; head_sha; "refs/mentat/head" ]
     in
     match code with
@@ -471,13 +486,19 @@ let spawn_run env ~argv ~run_root ~session ~prompt_path =
 (* Reap the run child under the wall-clock deadline: expiry walks SIGINT →
    grace → SIGKILL (the child's own guard turns SIGINT into an honest
    exit 130). The stop seam is polled every beat: a first stop request asks
-   the child to stop — after the courtesy grace, in case the requester's own
-   signal already reached it through a shared process group — and the reap
-   continues normally; a force request SIGKILLs and returns at once, so the
-   caller's disposition receipt is written on every stop path. *)
+   the child to stop — counted as already delivered when a controlling
+   terminal carried the signal to the shared process group, else by the
+   parent's own SIGINT after the courtesy grace — and the reap continues
+   normally; a force request SIGKILLs and returns at once, so the caller's
+   disposition receipt is written on every stop path. *)
 let reap env ~pid ~wall_clock =
   let clock = Eio.Stdenv.clock env.stdenv in
   let deadline = now () +. wall_clock in
+  let tty_delivered =
+    match Unix.isatty Unix.stdin with
+    | delivered -> delivered
+    | exception Unix.Unix_error _ -> false
+  in
   let signal s = try Unix.kill pid s with Unix.Unix_error _ -> () in
   let rec wait_dead () =
     match Unix.waitpid [] pid with
@@ -499,7 +520,9 @@ let reap env ~pid ~wall_clock =
         | (`None | `Stop) as level ->
             let stop =
               match (level, stop) with
-              | `Stop, None -> Some (`Pending_since t)
+              | `Stop, None ->
+                  if tty_delivered then Some `Signalled
+                  else Some (`Pending_since t)
               | `Stop, Some (`Pending_since asked)
                 when t -. asked > stop_courtesy_s ->
                   signal Sys.sigint;
@@ -581,10 +604,13 @@ let derived_cost env view =
               .Mentat_session.Metrics.usage)
 
 (* Alerts. Identity-scoped transitions fire once per event ever; the fence
-   transition dedups on its tripped meter's trailing window. The notify hook
-   is a courtesy behind the charter's own contract. *)
+   transition dedups on its tripped meter's trailing window. The digest is
+   the caller's — the policy the alerted run was spawned under, which for a
+   recovered run may not be the policy in force: a stale failure recorded
+   under the current digest would spend the new policy's one alert. The
+   notify hook is a courtesy behind the charter's own contract. *)
 
-let fire_hook env (loaded : Charter_store.Loaded.t) ~transition ~identity ~session =
+let fire_hook env (loaded : Charter_store.Loaded.t) ~digest ~transition ~identity ~session =
   match loaded.Charter_store.Loaded.charter.Charter.notify with
   | None -> ()
   | Some notify ->
@@ -599,16 +625,15 @@ let fire_hook env (loaded : Charter_store.Loaded.t) ~transition ~identity ~sessi
                [
                  ("type", Output.Json.string "charter.alert");
                  ("charter", Output.Json.string loaded.Charter_store.Loaded.name);
-                 ("digest", Output.Json.string loaded.Charter_store.Loaded.digest);
+                 ("digest", Output.Json.string digest);
                  ( "transition",
                    Output.Json.string (Receipt.Transition.to_string transition) );
                  ("identity", Output.Json.string identity);
                  ("session", Output.Json.string_or_null session);
                ])
 
-let alert_identity env (loaded : Charter_store.Loaded.t) ~identity ~transition ~session =
+let alert_identity env (loaded : Charter_store.Loaded.t) ~digest ~identity ~transition ~session =
   let name = loaded.Charter_store.Loaded.name in
-  let digest = loaded.Charter_store.Loaded.digest in
   let* receipts = read_receipts env ~name in
   if Receipt.alerted ~digest ~identity ~transition receipts then Ok ()
   else
@@ -617,7 +642,7 @@ let alert_identity env (loaded : Charter_store.Loaded.t) ~identity ~transition ~
         (receipt_now ~identity ~digest
            (Receipt.Kind.Alert { transition; window = `Identity }))
     in
-    fire_hook env loaded ~transition ~identity ~session;
+    fire_hook env loaded ~digest ~transition ~identity ~session;
     Ok ()
 
 (* Publication: the tokenless renderer, then the poster holding the write
@@ -802,7 +827,7 @@ let commit env ~(repo : Repo.t) (loaded : Charter_store.Loaded.t)
               (Receipt.Kind.Alert
                  { transition = Receipt.Transition.Fenced; window = `Meter meter })
           in
-          fire_hook env loaded ~transition:Receipt.Transition.Fenced
+          fire_hook env loaded ~digest ~transition:Receipt.Transition.Fenced
             ~identity:id ~session:None;
           Ok ())
         else Ok ()
@@ -914,7 +939,7 @@ let dispose env ~(repo : Repo.t) ?(on_reap = fun () -> ())
   let refuse reason =
     let* () = record (Receipt.Kind.Disposition (Receipt.Disposition.Refused reason)) in
     let* () =
-      alert_identity env loaded ~identity:id ~transition:Receipt.Transition.Failed
+      alert_identity env loaded ~digest ~identity:id ~transition:Receipt.Transition.Failed
         ~session:None
     in
     env.say (Printf.sprintf "refused %s: %s" id reason);
@@ -990,13 +1015,43 @@ let dispose env ~(repo : Repo.t) ?(on_reap = fun () -> ())
                       | None -> Jsont.Json.object' []
                     in
                     let usd = Option.bind view (derived_cost env) in
-                    let* () =
-                      record
-                        (Receipt.Kind.Disposition
-                           (Receipt.Disposition.Reaped
-                              { session; exit = exit_code; head; usage; usd; cause }))
+                    (* The child's fence frees at its exit, before this
+                       append, so a concurrent reconcile pass may have
+                       settled the record recovered in that window. Exactly
+                       one reaped line per (digest, identity) may land: the
+                       append re-checks under the fire lock, and the loser
+                       yields the record — its owed publication or alert —
+                       to the winner's line and the sweep. *)
+                    let* fresh =
+                      Fs.with_lock (fire_lock env ~name) (fun () ->
+                          let* receipts = read_receipts env ~name in
+                          if Receipt.reap_recorded ~digest ~identity:id receipts
+                          then Ok false
+                          else
+                            let* () =
+                              record
+                                (Receipt.Kind.Disposition
+                                   (Receipt.Disposition.Reaped
+                                      {
+                                        session;
+                                        exit = exit_code;
+                                        head;
+                                        usage;
+                                        usd;
+                                        cause;
+                                      }))
+                            in
+                            Ok true)
                     in
                     on_reap ();
+                    if not fresh then (
+                      env.say
+                        (Printf.sprintf
+                           "reaped %s: a concurrent pass settled the record \
+                            first"
+                           session);
+                      if stopped then Ok Interrupted else Ok Disposed)
+                    else (
                     env.say
                       (Printf.sprintf "reaped %s: exit %d, head %s, %s" session
                          exit_code
@@ -1019,10 +1074,20 @@ let dispose env ~(repo : Repo.t) ?(on_reap = fun () -> ())
                       in
                       match findings_of_log log with
                       | None ->
+                          (* A settled run without a findings document — a
+                             step-limit or failed last turn. The alert and
+                             the closing egress line both land, or the
+                             sweep re-enters the publisher on every pass
+                             for a run that can never publish. *)
                           let* () =
-                            alert_identity env loaded ~identity:id
+                            alert_identity env loaded ~digest ~identity:id
                               ~transition:Receipt.Transition.Failed
                               ~session:(Some session)
+                          in
+                          let* () =
+                            record
+                              (Receipt.Kind.Egress
+                                 { summary = `None_needed; threads = 0 })
                           in
                           env.say
                             "no findings document in the run log; nothing \
@@ -1043,10 +1108,10 @@ let dispose env ~(repo : Repo.t) ?(on_reap = fun () -> ())
                         else Receipt.Transition.Failed
                       in
                       let* () =
-                        alert_identity env loaded ~identity:id ~transition
+                        alert_identity env loaded ~digest ~identity:id ~transition
                           ~session:(Some session)
                       in
-                      Ok Disposed)))
+                      Ok Disposed))))
 
 (* Entry points. *)
 
@@ -1069,7 +1134,17 @@ let admit_delivery env (loaded : Charter_store.Loaded.t) ~body =
             in
             let* () =
               append_receipt env ~name
-                (receipt_now ~identity ~digest Receipt.Kind.Delivery)
+                (receipt_now ~identity ~digest
+                   (Receipt.Kind.Delivery
+                      (Some
+                         {
+                           Receipt.Delivery.action =
+                             event.Event.Pull_request.action;
+                           base_ref = event.Event.Pull_request.base_ref;
+                           draft = event.Event.Pull_request.draft;
+                           author_association =
+                             event.Event.Pull_request.author_association;
+                         })))
             in
             Ok event)
 
@@ -1098,8 +1173,27 @@ let republish env ~repo (loaded : Charter_store.Loaded.t) ~event ~identity
   in
   match findings_of_log log with
   | None ->
-      (* A settled run without a document already alerted at its reap;
-         there is nothing to publish and nothing pending. *)
+      (* A settled head whose log carries no findings document — a
+         recovered step-limit or failed last turn, or a lost log. Nothing
+         is publishable, but the record still owes its close: the alert
+         (idempotent — a normal reap already fired it) and the egress line,
+         without which this identity would re-enter the publisher on every
+         pass forever. *)
+      let digest = loaded.Charter_store.Loaded.digest in
+      let* () =
+        alert_identity env loaded ~digest ~identity
+          ~transition:Receipt.Transition.Failed ~session:(Some session)
+      in
+      let* () =
+        append_receipt env ~name
+          (receipt_now ~identity ~digest
+             (Receipt.Kind.Egress { summary = `None_needed; threads = 0 }))
+      in
+      env.say
+        (Printf.sprintf
+           "republish %s: no findings document in the run log; nothing \
+            published"
+           session);
       Ok ()
   | Some findings ->
       publish env ~repo loaded ~event ~identity ~session ~run_root
@@ -1128,23 +1222,41 @@ let fire_sweep env ~repo (loaded : Charter_store.Loaded.t) =
         (fun acc event ->
           match acc with
           | Error _ | Ok Interrupted -> acc
-          | Ok Disposed ->
+          | Ok Disposed -> (
               let identity = Event.Identity.of_pull_request event in
               let id = Event.Identity.to_string identity in
-              if
-                (not (Charter_store.claim_held env.dirs ~name ~digest identity))
-                || not (Receipt.spawn_recorded ~digest ~identity:id receipts)
-              then dispose env ~repo loaded ~event ~check_head:false
-              else if Receipt.egress_recorded ~digest ~identity:id receipts then
-                acc
-              else (
-                match Receipt.settled_session ~digest ~identity:id receipts with
-                | None -> acc
-                | Some session ->
-                    Result.map
-                      (fun () -> Disposed)
-                      (republish env ~repo loaded ~event ~identity:id ~session)))
+              match
+                Record.sweep_action
+                  ~claimed:
+                    (Charter_store.claim_held env.dirs ~name ~digest identity)
+                  ~spawned:(fun () ->
+                    Receipt.spawn_recorded ~digest ~identity:id receipts)
+                  ~egress:(fun () ->
+                    Receipt.egress_recorded ~digest ~identity:id receipts)
+                  ~settled:(fun () ->
+                    Receipt.settled_session ~digest ~identity:id receipts)
+              with
+              | `Drive -> (
+                  (* A requested stop commits no new run; the record
+                     re-enters on the beat. *)
+                  match env.stop () with
+                  | `Stop | `Force -> Ok Interrupted
+                  | `None -> dispose env ~repo loaded ~event ~check_head:false)
+              | `Done -> acc
+              | `Republish session ->
+                  Result.map
+                    (fun () -> Disposed)
+                    (republish env ~repo loaded ~event ~identity:id ~session)))
         (Ok Disposed) events
+
+let probe_fence store ~session : Record.fence =
+  match
+    Mentat_store.Run_lock.holder store
+      ~session:(Mentat_session.Id.of_string session)
+  with
+  | `Free -> `Free
+  | `Held _ -> `Held
+  | `Io io -> `Io (Format.asprintf "%a" Mentat_store.Io.pp io)
 
 (* The reconcile fold's honest settle: a spawned run whose reaping process
    died leaves a disposition owed. The caller has read the run fence as
@@ -1155,60 +1267,67 @@ let fire_sweep env ~repo (loaded : Charter_store.Loaded.t) =
    alert is the only surface the owner has left. The receipt takes the
    run's own digest — the policy it was spawned under, which may not be the
    policy in force — so the spawn/reap pair stays whole under one digest
-   and a later policy's folds never adopt another policy's run. The re-check
-   and append ride the fire lock: two passes finding the same orphan settle
-   it once. *)
+   and a later policy's folds never adopt another policy's run. The re-check,
+   the fence re-probe, the head read, and the append all ride the fire lock:
+   two passes finding the same orphan settle it once, and an owner attaching
+   the orphaned session between the caller's probe and the lock keeps the
+   record — a fence that re-reads held is driven by its holder, never
+   settled over. *)
 let settle_recovered env (loaded : Charter_store.Loaded.t) ~identity ~digest
     ~session =
   let name = loaded.Charter_store.Loaded.name in
-  let head, view = head_of_journal env ~session in
-  let usage =
-    match view with Some view -> usage_json view | None -> Jsont.Json.object' []
-  in
-  let usd = Option.bind view (derived_cost env) in
-  let settled = Receipt.Head.equal head Receipt.Head.Settled in
-  let* fresh =
+  let* verdict =
     Fs.with_lock (fire_lock env ~name) (fun () ->
         let* receipts = read_receipts env ~name in
-        let reaped =
-          List.exists
-            (fun (r : Receipt.t) ->
-              String.equal r.Receipt.digest digest
-              && String.equal r.Receipt.identity identity
-              &&
-              match r.Receipt.kind with
-              | Receipt.Kind.Disposition (Receipt.Disposition.Reaped _) -> true
-              | _ -> false)
-            receipts
-        in
-        if reaped then Ok false
+        if Receipt.reap_recorded ~digest ~identity receipts then
+          Ok `Settled_elsewhere
         else
-          let* () =
-            append_receipt env ~name
-              (receipt_now ~identity ~digest
-                 (Receipt.Kind.Disposition
-                    (Receipt.Disposition.Reaped
-                       {
-                         session;
-                         exit = (if settled then 0 else 255);
-                         head;
-                         usage;
-                         usd;
-                         cause = Receipt.Cause.Recovered;
-                       })))
-          in
-          Ok true)
+          match probe_fence env.store ~session with
+          | `Held -> Ok (`Leave "the fence re-reads held")
+          | `Io message ->
+              Ok (`Leave (Printf.sprintf "the fence re-read failed: %s" message))
+          | `Free ->
+              let head, view = head_of_journal env ~session in
+              let usage =
+                match view with
+                | Some view -> usage_json view
+                | None -> Jsont.Json.object' []
+              in
+              let usd = Option.bind view (derived_cost env) in
+              let settled = Receipt.Head.equal head Receipt.Head.Settled in
+              let* () =
+                append_receipt env ~name
+                  (receipt_now ~identity ~digest
+                     (Receipt.Kind.Disposition
+                        (Receipt.Disposition.Reaped
+                           {
+                             session;
+                             exit = (if settled then 0 else 255);
+                             head;
+                             usage;
+                             usd;
+                             cause = Receipt.Cause.Recovered;
+                           })))
+              in
+              Ok (`Fresh head))
   in
-  if not fresh then Ok ()
-  else (
-    env.say
-      (Printf.sprintf "recovered %s: session %s, head %s" identity session
-         (Receipt.Head.to_string head));
-    if settled then Ok ()
-    else
-      let transition =
-        if Receipt.Head.equal head Receipt.Head.Parked then
-          Receipt.Transition.Parked
-        else Receipt.Transition.Failed
-      in
-      alert_identity env loaded ~identity ~transition ~session:(Some session))
+  match verdict with
+  | `Settled_elsewhere -> Ok ()
+  | `Leave reason ->
+      env.say
+        (Printf.sprintf "recover %s: %s; leaving the record to the next pass"
+           session reason);
+      Ok ()
+  | `Fresh head ->
+      env.say
+        (Printf.sprintf "recovered %s: session %s, head %s" identity session
+           (Receipt.Head.to_string head));
+      if Receipt.Head.equal head Receipt.Head.Settled then Ok ()
+      else
+        let transition =
+          if Receipt.Head.equal head Receipt.Head.Parked then
+            Receipt.Transition.Parked
+          else Receipt.Transition.Failed
+        in
+        alert_identity env loaded ~digest ~identity ~transition
+          ~session:(Some session)
