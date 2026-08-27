@@ -61,7 +61,7 @@ let%expect_test "restricted choice is remembered by the next launch" =
     05 |                           █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·
     06 |                           █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂
     07 |
-    08 |                          dev · openai/gpt-5.6-sol medium
+    08 |                    dev · openai/gpt-5.6-sol medium · untrusted
     09 |
     10 |      ▎ welcome — and thanks for trying mentat this early.
     11 |      ▎ it's experimental: sessions and config may change without migration.
@@ -77,7 +77,7 @@ let%expect_test "restricted choice is remembered by the next launch" =
     21 |
     22 |
     23 |
-    24 |   ! not logged in · /login · ~/men… · openai/gpt-5.6-sol… · ! full access ? f…
+    24 |   ! not logged in · /login · openai/gpt-5.6-so… · ! full access · ! untrusted
     |}];
   Pty.quit terminal;
   Pty.run ~trust:false project @@ fun remembered ->
@@ -92,7 +92,7 @@ let%expect_test "restricted choice is remembered by the next launch" =
     05 |                           █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·
     06 |                           █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂
     07 |
-    08 |                          dev · openai/gpt-5.6-sol medium
+    08 |                    dev · openai/gpt-5.6-sol medium · untrusted
     09 |
     10 |      ▎ welcome — and thanks for trying mentat this early.
     11 |      ▎ it's experimental: sessions and config may change without migration.
@@ -108,7 +108,7 @@ let%expect_test "restricted choice is remembered by the next launch" =
     21 |
     22 |
     23 |
-    24 |   ! not logged in · /login · ~/men… · openai/gpt-5.6-sol… · ! full access ? f…
+    24 |   ! not logged in · /login · openai/gpt-5.6-so… · ! full access · ! untrusted
     |}];
   Pty.quit remembered
 
@@ -158,7 +158,7 @@ let%expect_test
     05 |                           █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·
     06 |                           █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂
     07 |
-    08 |                          dev · openai/gpt-5.6-sol medium
+    08 |                    dev · openai/gpt-5.6-sol medium · untrusted
     09 |
     10 |      ▎ welcome — and thanks for trying mentat this early.
     11 |      ▎ it's experimental: sessions and config may change without migration.
@@ -174,7 +174,7 @@ let%expect_test
     21 |
     22 |
     23 |
-    24 |   ! not logged in · /login · ~/men… · openai/gpt-5.6-sol … · ! full acce… ? f…
+    24 |   ! not logged in · /login · openai/gpt-5.6-so… · ! full access · ! untrusted
     |}]
 
 let fake_dune project =

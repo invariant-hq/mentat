@@ -66,7 +66,7 @@ let%expect_test "successful configuration shows values and origins" =
   Tui.print t;
   [%expect
     {|
-    01 |  settings ──────────────────────────────────────────────────────────────────────────────── 57 values
+    01 |  settings ──────────────────────────────────────────────────────────────────────────────── 62 values
     02 |
     03 | config  status  usage
     04 |
@@ -80,8 +80,8 @@ let%expect_test "successful configuration shows values and origins" =
     12 |      commands.enabled           true                                    default built-in comm...   │
     13 |      commands.project           true                                    default built-in comm...   │
     14 |      compaction.auto            true                                    default built-in comp...   │
-    15 |      image.max_bytes            5242880                                 default built-in imag...   │
-    16 |      image.max_count            20                                      default built-in imag...   ↓
+    15 |      dune.lint_command          ["litany","check","--no-build","--...   default built-in dune...   │
+    16 |      dune.targets               ["@check"]                              default built-in dune...   ↓
     17 |
     18 |   ↑↓ move · ←→ change · ↵ apply · tab page · / filter · esc back
     |}];
@@ -90,7 +90,7 @@ let%expect_test "successful configuration shows values and origins" =
   Tui.print t;
   [%expect
     {|
-    01 |  settings ──────────────────────────────────────────────────────────────────────────────── 57 values
+    01 |  settings ──────────────────────────────────────────────────────────────────────────────── 62 values
     02 |   /max_steps  1 match
     03 |
     04 | config  status  usage
@@ -116,7 +116,7 @@ let%expect_test "successful configuration shows values and origins" =
   Tui.print t;
   [%expect
     {|
-    01 |  settings ──────────────────────────────────────────────────────────────────────────────── 57 values
+    01 |  settings ──────────────────────────────────────────────────────────────────────────────── 62 values
     02 |   /base_url  1 match
     03 |
     04 | config  status  usage
@@ -142,7 +142,7 @@ let%expect_test "successful configuration shows values and origins" =
   Tui.print t;
   [%expect
     {|
-    01 |  settings ──────────────────────────────────────────────────────────────────────────────── 57 values
+    01 |  settings ──────────────────────────────────────────────────────────────────────────────── 62 values
     02 |   /web.enabled  1 match
     03 |
     04 | config  status  usage
