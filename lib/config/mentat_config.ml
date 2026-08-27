@@ -67,6 +67,26 @@ module Mode = struct
   let pp ppf t = Format.pp_print_string ppf (to_string t)
 end
 
+module Tooling = struct
+  type t = Auto | On | Off
+
+  let all = [ Auto; On; Off ]
+  let to_string = function Auto -> "auto" | On -> "on" | Off -> "off"
+
+  let of_string = function
+    | "auto" -> Some Auto
+    | "on" -> Some On
+    | "off" -> Some Off
+    | _ -> None
+
+  let equal a b =
+    match (a, b) with
+    | Auto, Auto | On, On | Off, Off -> true
+    | (Auto | On | Off), _ -> false
+
+  let pp ppf t = Format.pp_print_string ppf (to_string t)
+end
+
 module Dune_watch = struct
   type t = Auto | Observe | Off
 
@@ -250,7 +270,6 @@ let string_enum_of_string ~what ~spellings value =
     value
 
 let tools_editor_spellings = [ "auto"; "apply-patch"; "string-replace" ]
-let workspace_tooling_spellings = [ "auto"; "on"; "off" ]
 let web_search_provider_spellings = [ "exa"; "parallel"; "off" ]
 let tui_diff_layout_spellings = [ "auto"; "unified"; "split" ]
 
@@ -265,8 +284,8 @@ let sandbox_env_inherit_of_string =
     ~to_string:Env_inherit.to_string Env_inherit.of_string
 
 let workspace_tooling_of_string =
-  string_enum_of_string ~what:"workspace tooling mode"
-    ~spellings:workspace_tooling_spellings
+  decode_enum ~what:"workspace tooling mode" ~all:Tooling.all
+    ~to_string:Tooling.to_string Tooling.of_string
 
 let dune_watch_of_string =
   decode_enum ~what:"dune watch mode" ~all:Dune_watch.all
@@ -623,6 +642,7 @@ let reasoning_id : Mentat_llm.Request.Options.Reasoning_effort.t Type.Id.t =
 let unattended_id : Mentat_permission.Unattended.t Type.Id.t = Type.Id.make ()
 let mode_id : Mode.t Type.Id.t = Type.Id.make ()
 let dune_watch_id : Dune_watch.t Type.Id.t = Type.Id.make ()
+let tooling_id : Tooling.t Type.Id.t = Type.Id.make ()
 let require_id : Mentat_sandbox.Requirement.t Type.Id.t = Type.Id.make ()
 let read_id : Read.t Type.Id.t = Type.Id.make ()
 let env_inherit_id : Env_inherit.t Type.Id.t = Type.Id.make ()
@@ -840,8 +860,9 @@ let sandbox_env_inherit_codec =
     ~of_text:sandbox_env_inherit_of_string
 
 let workspace_tooling_codec =
-  string_enum_codec ~spellings:workspace_tooling_spellings
-    workspace_tooling_of_string
+  vocab_codec ~type_id:tooling_id ~equal:Tooling.equal
+    ~to_text:Tooling.to_string ~all:Tooling.all
+    ~of_text:workspace_tooling_of_string
 
 let dune_watch_codec =
   vocab_codec ~type_id:dune_watch_id ~equal:Dune_watch.equal
@@ -909,7 +930,7 @@ module Field = struct
     | Dune_watch : (Dune_watch.t, defaulted) t
     | Dune_targets : (string list, defaulted) t
     | Dune_lint_command : (string list, defaulted) t
-    | Workspace_tooling : (string, defaulted) t
+    | Workspace_tooling : (Tooling.t, defaulted) t
     | Instructions_global : (bool, defaulted) t
     | Instructions_project : (bool, defaulted) t
     | Instructions_claude_md : (bool, defaulted) t
@@ -1440,7 +1461,7 @@ module Field = struct
             (builtin field [ "litany"; "check"; "--no-build"; "--trust-build" ])
     | Workspace_tooling ->
         defaulted workspace_tooling_codec ~shared:true
-          ~default:(builtin field "auto")
+          ~default:(builtin field Tooling.Auto)
           ~env:("MENTAT_WORKSPACE_TOOLING", workspace_tooling_of_string)
     | Instructions_global -> defaulted bool_codec ~default:(builtin field true)
     | Instructions_project -> defaulted bool_codec ~default:(builtin field true)

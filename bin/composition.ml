@@ -224,13 +224,43 @@ let mentat_dirs_of dirs =
 
 let product_default_mode = Cfg.Mode.Workspace_write
 
+let executable_file path =
+  match Unix.stat path with
+  | { Unix.st_kind = Unix.S_REG; _ } -> (
+      match Unix.access path [ Unix.X_OK ] with
+      | () -> true
+      | exception Unix.Unix_error _ -> false)
+  | _ | (exception Unix.Unix_error _) -> false
+
+(* Newest-version order for package-store entries: numeric segments compare
+   as numbers ([0.5.10] beats [0.5.9]), everything else as text. The store
+   retains superseded package dirs across re-locks, so "sorted first" would
+   deterministically pick the stalest survivor. *)
+let compare_versions a b =
+  let segs v = String.split_on_char '.' v in
+  let rec go a b =
+    match (a, b) with
+    | [], [] -> 0
+    | [], _ -> -1
+    | _, [] -> 1
+    | x :: a', y :: b' -> (
+        match (int_of_string_opt x, int_of_string_opt y) with
+        | Some x, Some y when x <> y -> Int.compare x y
+        | Some _, Some _ -> go a' b'
+        | _ ->
+            let c = String.compare x y in
+            if c <> 0 then c else go a' b')
+  in
+  go (segs a) (segs b)
+
 (* The built binary of a lock-universe program: the dune-pkg store
    materializes each locked package under
-   [_build/_private/<context>/.pkg/<pkg>.<version>/target], so a
-   dev-dependency's executable lives at [target/bin/<name>] once anything
-   has built it. The probe is a stat, sorted-first across versions for
-   determinism, re-run per settle by the resolver — an unbuilt store
-   simply answers [None] until a build materializes it. *)
+   [_build/_private/default/.pkg/<pkg>.<version>/target] (the default
+   context — the one the supervised watch builds), so a dev-dependency's
+   executable lives at [target/bin/<name>] once anything has built it. The
+   probe is a stat, newest version wins, re-run per settle by the
+   resolver — an unbuilt store simply answers [None] until a build
+   materializes it. *)
 let lock_universe_binary ~root program =
   let store =
     Filename.concat root
@@ -240,35 +270,39 @@ let lock_universe_binary ~root program =
   match Sys.readdir pkg_store with
   | exception Sys_error _ -> None
   | entries ->
-      Array.sort String.compare entries;
-      Array.find_map
-        (fun entry ->
-          if String.starts_with ~prefix:(program ^ ".") entry then
-            let candidate =
-              Filename.concat pkg_store
-                (Filename.concat entry
-                   (Filename.concat "target"
-                      (Filename.concat "bin" program)))
-            in
-            match Unix.access candidate [ Unix.X_OK ] with
-            | () -> Some candidate
-            | exception Unix.Unix_error _ -> None
-          else None)
-        entries
+      let prefix = program ^ "." in
+      Array.to_list entries
+      |> List.filter_map (fun entry ->
+             if String.starts_with ~prefix entry then
+               let candidate =
+                 Filename.concat pkg_store
+                   (Filename.concat entry
+                      (Filename.concat "target"
+                         (Filename.concat "bin" program)))
+               in
+               if executable_file candidate then
+                 Some
+                   (String.drop_first (String.length prefix) entry, candidate)
+               else None
+             else None)
+      |> List.sort (fun (a, _) (b, _) -> compare_versions b a)
+      |> function
+      | (_, binary) :: _ -> Some binary
+      | [] -> None
 
 
 (* The project-tooling rung of the dune-lane ladder: trust first — an
    untrusted project's config never speaks — then the [workspace.tooling]
    knob, whose [auto] asks the project marker. The marker is a thunk so a
-   knob that already decides never stats anything. Unknown spellings are
-   unrepresentable past the config codec. *)
+   knob that already decides never stats anything. *)
 let tooling_gate ~trusted ~project_marker config =
   if not trusted then Error `Untrusted
   else
     match Cfg.Resolved.get Cfg.Field.workspace_tooling config with
-    | "off" -> Error `Tooling_off
-    | "on" -> Ok ()
-    | _ -> if project_marker () then Ok () else Error `No_project
+    | Cfg.Tooling.Off -> Error `Tooling_off
+    | Cfg.Tooling.On -> Ok ()
+    | Cfg.Tooling.Auto ->
+        if project_marker () then Ok () else Error `No_project
 
 (* The whole dune-lane gate ladder, derived once: the running gate
    ({!dune_watch_mode}) projects the mode half, doctor's probe renders the
@@ -1001,9 +1035,10 @@ let probe ~stdenv ~sw ~cwd : Probe.t =
          ladder — doctor is a local diagnostic, and the sealed child PATH
          the gate itself resolves on can differ (the parity row exists for
          exactly that divergence, for dune). The rungs match the runner's
-         resolver: directly, else the built binary in the project's lock
-         universe. Unreachable is a skipped-settles warning, never a lane
-         death — the runner re-resolves at every settle. *)
+         resolver and its order: a path-shaped program as a workspace
+         file, else the lock universe's built binary, else PATH.
+         Unreachable is a skipped-settles warning, never a lane death —
+         the runner re-resolves at every settle. *)
       let lint =
         match (config_resolved, dune_lane) with
         | Error message, _ -> Error message
@@ -1025,30 +1060,50 @@ let probe ~stdenv ~sw ~cwd : Probe.t =
                       | Ok root -> Some (Lpath.Abs.to_string root)
                       | Error _ -> None)
                 in
-                match Mentat_ocaml_toolchain.find tc program with
-                | Some (_, source) ->
-                    Ok
-                      (Printf.sprintf "%s — resolves via %s" rendered
-                         (Mentat_ocaml_toolchain.Source.to_string source))
-                | None -> (
-                    match
-                      Option.bind (Result.to_option root_result) (fun root ->
-                          lock_universe_binary
-                            ~root:(Lpath.Abs.to_string root)
-                            program)
-                    with
-                    | Some _ ->
-                        Ok
-                          (Printf.sprintf
-                             "%s — runs the lock universe's built binary"
-                             rendered)
-                    | None ->
-                        Error
-                          (Printf.sprintf
-                             "%s is not reachable on PATH or in the lock \
-                              universe; green settles are skipped until it \
-                              appears"
-                             program))))
+                let root =
+                  Option.map Lpath.Abs.to_string
+                    (Result.to_option root_result)
+                in
+                if String.contains program '/' then
+                  let candidate =
+                    match (Filename.is_relative program, root) with
+                    | true, Some root -> Some (Filename.concat root program)
+                    | true, None -> None
+                    | false, _ -> Some program
+                  in
+                  if
+                    Option.fold ~none:false ~some:executable_file candidate
+                  then Ok (Printf.sprintf "%s — a workspace file" rendered)
+                  else
+                    Error
+                      (Printf.sprintf
+                         "%s is not an executable file; green settles are \
+                          skipped until it appears"
+                         program)
+                else
+                  match
+                    Option.bind root (fun root ->
+                        lock_universe_binary ~root program)
+                  with
+                  | Some _ ->
+                      Ok
+                        (Printf.sprintf
+                           "%s — runs the lock universe's built binary"
+                           rendered)
+                  | None -> (
+                      match Mentat_ocaml_toolchain.find tc program with
+                      | Some (_, source) ->
+                          Ok
+                            (Printf.sprintf "%s — resolves via %s" rendered
+                               (Mentat_ocaml_toolchain.Source.to_string
+                                  source))
+                      | None ->
+                          Error
+                            (Printf.sprintf
+                               "%s is not reachable on PATH or in the lock \
+                                universe; green settles are skipped until \
+                                it appears"
+                               program))))
       in
       let runtime = stage_runtime ~stdenv ~dirs in
       let catalog = Runtime.catalog runtime in
@@ -1541,13 +1596,12 @@ let dune_watch_supervisor t capability ~mode ~instance =
    the watch's ladder (the trigger is the observer's readings — auto or
    observe alike, since a foreign watch's green settle is as good as our
    own) plus a non-empty [dune.lint_command]; reachability is the
-   resolver's, consulted at every due settle ({!Dune_lint}): the sealed
-   child PATH first (the opam world), else the built binary in the
-   project's lock universe (the dune-pkg world) — no dune anywhere in the
-   lint path, so a run neither needs dune's lock nor advances the build
-   witness it triggers on. Either rung resolves through the project's own
-   environment, so the linter found is version-matched to the compiler
-   that wrote the artifacts it reads. An unreachable settle is skipped,
+   resolver's, consulted at every due settle ({!Dune_lint}): a path-shaped
+   program as a workspace file, else the built binary in the project's
+   lock universe (version-matched to the compiler by construction), else
+   the sealed child PATH (the opam world) — no dune anywhere in the lint
+   path, so a run neither needs dune's lock nor advances the build
+   witness it triggers on. An unreachable settle is skipped,
    never a lane death: a lock universe built mid-session starts answering
    at its next settle, and doctor is where the reachability story lives.
    Creation is pure; {!Dune_lint.engage} is the caller's, at the first
@@ -1559,15 +1613,30 @@ let dune_lint_runner t capability ~instance =
       match Cfg.Resolved.get Cfg.Field.dune_lint_command t.config with
       | [] -> None
       | program :: arguments ->
+          (* A path-shaped program is the user naming a file: probed as one
+             (workspace-relative from the root — the run's own cwd) and
+             passed through verbatim. Otherwise the lock universe's built
+             binary outranks the sealed PATH: the store's presence is the
+             evidence this is the dune-pkg world, and its binary is
+             version-matched to the compiler by construction — an ambient
+             same-named install must not shadow it. *)
           let resolve () =
-            match Mentat_workspace_io.child_program capability program with
-            | Some _ -> Some (program :: arguments)
-            | None ->
-                Option.map
-                  (fun binary -> binary :: arguments)
-                  (lock_universe_binary
-                     ~root:(Lpath.Abs.to_string t.root)
-                     program)
+            let root = Lpath.Abs.to_string t.root in
+            if String.contains program '/' then
+              let candidate =
+                if Filename.is_relative program then
+                  Filename.concat root program
+                else program
+              in
+              if executable_file candidate then Some (program :: arguments)
+              else None
+            else
+              match lock_universe_binary ~root program with
+              | Some binary -> Some (binary :: arguments)
+              | None ->
+                  Option.map
+                    (fun _ -> program :: arguments)
+                    (Mentat_workspace_io.child_program capability program)
           in
           let runner =
             Dune_lint.make ~rpc:instance ~capability
@@ -2398,9 +2467,18 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
       Tools.Ocaml.Docs.make build_capability ~clock ~merlin_program
         ~dune_program ~ocamlfind_program ~opam_switch_prefix ~dune_lease
         ~dune_activity:(fun () ->
-          (* The slot, never the accessor: a docs query is not the moment to
-             construct an observer, and with none there is no witness. *)
-          Option.map Mentat_ocaml_dune_rpc.Instance.activity t.dune_rpc)
+          (* The slot, never the accessor: a docs query is not the moment
+             to construct an observer, and with none there is no witness.
+             The witness holds only while a watch is attached — the
+             generation counts stream events, and with no live watch a
+             build changes artifacts without moving it, so caching then
+             would serve a stale universe for the session. *)
+          Option.bind t.dune_rpc (fun instance ->
+              let snapshot = Mentat_ocaml_dune_rpc.Instance.snapshot instance in
+              match Mentat_ocaml_dune_rpc.Instance.Snapshot.health snapshot with
+              | Mentat_workspace.Health.Live _ ->
+                  Some (Mentat_ocaml_dune_rpc.Instance.activity instance)
+              | _ -> None))
         ();
     ]
   in

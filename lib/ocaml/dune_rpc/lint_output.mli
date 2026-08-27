@@ -20,8 +20,8 @@ val findings :
     through [workspace] exactly as stream diagnostics are, an unresolvable
     path keeping the finding and dropping the anchor. A block anchored
     under [_build] is dropped whole: a project lint finding cannot live
-    there, and in the dune-exec world the linter's own failed build renders
-    its sources' compiler blocks on this very output. Leading text before
+    there, and a lint command that runs builds of its own may render
+    compiler blocks for build-tree sources on this very output. Leading text before
     the first block is sliced off; a non-diagnostic line between blocks is
     absorbed into the preceding message's tail, and one past the last block
     ends the parse. A clean run parses to [[]]. *)

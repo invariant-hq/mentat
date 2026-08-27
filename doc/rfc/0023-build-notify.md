@@ -418,21 +418,34 @@ re-arming it.
 **The gate** is the watch's ladder (the trigger is the observer's
 readings — a foreign watch's green settle is as good as our own) plus a
 non-empty command (`[]` disables); reachability is the resolver's,
-consulted at {e every} due settle: the sealed child PATH first (the opam
-world), else the built binary in the project's lock universe
-(`_build/_private/<ctx>/.pkg/<name>.<version>/target/bin/<name>` — the
-dune-pkg world). No dune anywhere in the lint path — a `dune exec` reach
+consulted at {e every} due settle: a path-shaped program as a workspace
+file, else the built binary in the project's lock universe
+(`_build/_private/default/.pkg/<name>.<version>/target/bin/<name>` — the
+default context, the one the watch builds; newest version wins over a
+store that retains superseded dirs), else the sealed child PATH (the
+opam world). No dune anywhere in the lint path — a `dune exec` reach
 was shipped first and died on contact with the product's own normal
 state: the run fires exactly while the supervised watch holds dune's
 lock, and a secondary dune resolves executables from PATH only ("not the
 main instance"), so the reach answered `Program not found` for every
 lock-universe linter in every watched session (§12). Either rung resolves
-through the project's own environment, so the linter found is
-version-matched to the compiler that wrote the artifacts it reads. A
+through the project's own environment; the lock rung is version-matched
+to the compiler by construction, and it outranks the PATH rung — the
+store's presence is the evidence this is the dune-pkg world, and an
+ambient same-named install must not shadow the matched binary. A
+path-shaped command names a workspace file and is probed as one. A
 settle the resolver cannot answer is skipped — lint-absent, never
-lint-clean, never a fossil — and the lane has no death: a lock universe
+lint-clean — and a linter that spoke and then vanished keeps its last
+completed run's word, exactly like a crashed run: absence of a runner is
+not evidence findings resolved. The lane has no death: a lock universe
 built mid-session starts answering at its next settle. A missing linter
 is a normal state (`mentat doctor` owns the reachability story).
+
+A save racing the lint run can rewrite artifacts under `--trust-build`
+mid-read; the next settle's rerun is the bound. Under a read-only sandbox
+posture the lane still runs on foreign green settles — deliberate: the
+default command spawns no dune and litany's result cache degrades
+silently, so a read-only-confined run works.
 
 **Parsing.** The run's output is parsed with `ocamlc-loc` — the library
 dune itself parses compiler output with, already in the lock as dune-rpc's
@@ -462,7 +475,7 @@ claim-window diff is `Tool_observed` evidence, externals coalesce into one
 info notice; `_build` — hence `.sync` and `.rpc` — stays ignored, so the
 watch's own churn never reaches the model. One change: the merged drain
 orders **fswatch → dune → lint**, cause before consequence
-(`bin/composition.ml:2019-2024`, a swap). Native backends stay dormant:
+(`bin/composition.ml`, a swap). Native backends stay dormant:
 consumption is pull-only and nothing off-turn consumes events.
 
 ## 7. The lock-taking one-shots
@@ -561,7 +574,7 @@ palette entry, `/dune`, taking `restart` or `stop` as its argument.
 | `workspace.tooling` | survives; the master gate | `auto` |
 | `notices.dune_build` | **deleted** — declared, never read (`mentat_config.ml:819,885`) | — |
 | `dune.watch` | **added**: `auto` probe-attach-or-spawn; `observe` attach only, never spawn; `off`. Env `MENTAT_DUNE_WATCH`; a read-only sandbox posture demotes `auto` to `observe` | `auto` |
-| `dune.targets` | **added**: the watch's own targets, validated as targets — a leading dash is refused at decode; an empty list is dune's `@default` | `["@check"]` |
+| `dune.targets` | **added**: the watch's own targets, validated as targets — a leading dash is refused at decode; an empty list is dune's `@default`. The default is also the lint default's soundness premise: `--trust-build` at a green settle vouches for what the watch built, which is `@check`; a narrower target set weakens it | `["@check"]` |
 | `dune.lint_command` | **added**: the linter argv the runner executes after each green settle; `[]` disables; a program reachable on neither the sealed PATH nor the lock universe skips settles until it appears | `["litany", "check", "--no-build", "--trust-build"]` |
 | `notices.dune_diagnostics` | survives: build-lane notices (the row still shows) | `true` |
 | `notices.fswatch`, `notices.cr_comments` | untouched | `true` |
@@ -684,11 +697,12 @@ flush on tool-timeout evidence) would mint the state it announces.
   direct lock-store binary probe, which also deleted the not-found string
   match and the echo run (no dune in the loop, nothing advances the
   witness).
-- **Other litany lanes** — the default lane spawns `dune describe` (lock);
-  `--units` needs a roster captured with the server stopped; `--cmt-root` is
-  a second freshness engine racing the watch, project rules withheld; a
-  Mentat-side `--format json` process is a second channel with a second
-  dedup.
+- **Other litany lanes** — (as litany then stood) the default lane spawned
+  `dune describe` (lock) — since deleted in litany itself, which now reads
+  the roster from the build tree; `--units` needed a roster captured with
+  the server stopped; `--cmt-root` is a second freshness engine racing the
+  watch, project rules withheld; a Mentat-side `--format json` process is
+  a second channel with a second dedup.
 - **Lint inside the watch, lanes split by a message-text marker** — the
   original §5: `@<alias>` among the watch's targets, findings classified by
   a ` [rule]` suffix litany would gain upstream. Rejected: the marker was
@@ -762,7 +776,10 @@ the dropped-report paths (observe, foreign, between lives), the
 `Restarting Hung`/`Off Blocked` row renders — the TUI story below owes the
 rows — the lease machine's park/respawn arcs and the `/dune` verbs end to
 end (the codec arms, the doctor rows, and the release bracket are pinned;
-the verb-to-row ride is owed with the TUI story), and, for the lint lane: re-arm mid-run (timing-fragile by nature),
+the verb-to-row ride is owed with the TUI story), the runner-side
+PATH-rung vanish (probe-to-spawn launch failures forfeit and re-resolve —
+doctor pins removal only), the resolver under observe (same path through
+the same gate as auto), and, for the lint lane: re-arm mid-run (timing-fragile by nature),
 the 600 s run bound (no scaling env until a test wants it), the
 transient-launch-failure keep, and the signal-death keep. Unit: `Change.step` properties (idempotence, range and
 count invariance, lane independence, recovery confirmation, no-reading

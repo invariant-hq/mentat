@@ -74,7 +74,7 @@ let goal ~palette ~labelled ~objective =
 (* Fail-honest: a verdict exists only inside a settled phase; the status
    itself is a fact about the watch and renders in every state but the two
    where nothing was attempted — tooling disabled, and no watch to attach to.
-   Status words render muted; unresponsiveness and restarts warn; a foreign
+   Status words render muted; restarts warn; a foreign
    watch carries the [theirs] prefix so an owned one is tellable from it. *)
 let dune_row ~palette segs =
   [ row (Prims.seg (Theme.Palette.muted_style palette) "dune" :: segs) ]

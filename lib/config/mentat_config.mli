@@ -193,6 +193,30 @@ module Mode : sig
   (** [pp ppf t] formats [t]'s spelling. *)
 end
 
+module Tooling : sig
+  (** Workspace tooling posture.
+
+      The values of the [workspace.tooling] field. *)
+
+  type t = Auto | On | Off
+
+  val all : t list
+  (** [all] are the postures in declaration order. *)
+
+  val to_string : t -> string
+  (** [to_string t] is [t]'s config spelling, for example ["auto"]. *)
+
+  val of_string : string -> t option
+  (** [of_string s] is the posture spelled [s], or [None] for an unknown
+      spelling. *)
+
+  val equal : t -> t -> bool
+  (** [equal a b] is [true] iff [a] and [b] are the same posture. *)
+
+  val pp : Format.formatter -> t -> unit
+  (** [pp ppf t] formats [t]'s spelling. *)
+end
+
 module Dune_watch : sig
   (** Build-watch posture.
 
@@ -550,7 +574,7 @@ module Field : sig
       flags fit the trigger (the settle already built), and a default, not a
       coupling: any linter printing compiler-shaped diagnostics fits. *)
 
-  val workspace_tooling : (string, defaulted) t
+  val workspace_tooling : (Tooling.t, defaulted) t
   (** [workspace_tooling] is the [workspace.tooling] field: [auto], [on], or
       [off]. It gates the workspace's OCaml/Dune integration as a whole.
       Defaults to ["auto"]; resolving [auto] for a given root probes the
