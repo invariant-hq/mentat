@@ -5813,10 +5813,20 @@ let notice_title s =
   Session.Notice.make ~source:"fswatch" ~severity:Session.Notice.Severity.Info
     ~title:s ()
 
+let last_user_text st =
+  match List.rev (messages_of (State.model_transcript st)) with
+  | Llm.Message.User content :: _ ->
+      String.concat "\n"
+        (List.filter_map
+           (function Llm.Content.Text text -> Some text | _ -> None)
+           content)
+  | _ -> ""
+
 let workspace_notice_group =
   group "replay: workspace notices"
     [
-      test "a workspace notice appends only while a turn is active" (fun () ->
+      test "a pending notice rides the model view, not yet the journal view"
+        (fun () ->
           expect_step_error ~msg:"a notice with no active turn is rejected"
             (State.Error.Turn State.Error.Turn.No_active) []
             (Event.workspace_notice notice_fixture);
@@ -5827,37 +5837,55 @@ let workspace_notice_group =
                 Event.workspace_notice notice_fixture;
               ]
           in
-          equal int ~msg:"the active turn carries its notice" 1
-            (List.length (State.active_turn_notices st));
-          equal int ~msg:"a notice is not a transcript message" 1
-            (List.length (messages_of (State.full_transcript st))));
-      test "each turn start clears the previous turn's notices" (fun () ->
+          (* Not yet frozen: the durable transcript holds only the turn's
+             input; the model view shows the pending batch as its tail. *)
+          equal int ~msg:"the durable transcript is not yet touched" 1
+            (List.length (messages_of (State.full_transcript st)));
+          equal int ~msg:"the model view carries the pending entry" 2
+            (List.length (messages_of (State.model_transcript st)));
+          is_true ~msg:"the entry is the rendered notice"
+            (String.includes ~affix:"Workspace notices:" (last_user_text st));
+          is_true ~msg:"the body rides the entry"
+            (String.includes ~affix:"Unbound value foo" (last_user_text st)));
+      test "a provider request freezes the batch at its position" (fun () ->
+          let t1 = turn ~id:"turn-1" () in
+          let c = claim ~seed:"freeze-req" (Session.Turn.id t1) in
+          let st =
+            state
+              [
+                Event.turn_started t1;
+                Event.workspace_notice (notice_title "first");
+                Event.workspace_notice (notice_title "second");
+                Event.provider_requested c;
+              ]
+          in
+          (* One entry for the whole pending batch, now durable. *)
+          equal int ~msg:"the batch is one frozen entry" 2
+            (List.length (messages_of (State.full_transcript st)));
+          is_true ~msg:"both notices share the entry"
+            (String.includes ~affix:"first" (last_user_text st)
+            && String.includes ~affix:"second" (last_user_text st)));
+      test "an unstated notice survives its turn and states once" (fun () ->
           let t1 = turn ~id:"turn-1" () in
           let t2 = turn ~id:"turn-2" () in
-          let cleared =
+          let c = claim ~seed:"carry-req" (Session.Turn.id t2) in
+          let st =
             state
               [
                 Event.turn_started t1;
-                Event.workspace_notice (notice_title "first");
+                Event.workspace_notice (notice_title "orphaned");
                 finish t1;
                 Event.turn_started t2;
+                Event.workspace_notice (notice_title "fresh");
+                Event.provider_requested c;
               ]
           in
-          equal int ~msg:"turn 2 starts with no inherited notices" 0
-            (List.length (State.active_turn_notices cleared));
-          let scoped =
-            state
-              [
-                Event.turn_started t1;
-                Event.workspace_notice (notice_title "first");
-                finish t1;
-                Event.turn_started t2;
-                Event.workspace_notice (notice_title "second");
-              ]
-          in
-          equal (list string) ~msg:"turn 2 carries only its own notice"
-            [ "second" ]
-            (List.map Session.Notice.title (State.active_turn_notices scoped)));
+          (* The dying turn's observation pends into the next request — one
+             entry, no duplicate fact, nothing lost. *)
+          is_true ~msg:"the orphaned observation reaches the next request"
+            (String.includes ~affix:"orphaned" (last_user_text st));
+          is_true ~msg:"beside the fresh one, in one entry"
+            (String.includes ~affix:"fresh" (last_user_text st)));
     ]
 
 (* A complete finished user turn: user input, one response, terminal outcome. *)

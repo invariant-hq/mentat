@@ -109,6 +109,19 @@ let request_contains request needle =
   | Ok s -> contains_sub ~sub:needle s
   | Error _ -> false
 
+let request_occurrences request needle =
+  match Jsont_bytesrw.encode_string Llm.Request.jsont request with
+  | Error _ -> 0
+  | Ok s ->
+      let n = String.length needle in
+      let rec go i count =
+        if i + n > String.length s then count
+        else if String.equal (String.sub s i n) needle then
+          go (i + n) (count + 1)
+        else go (i + 1) count
+      in
+      go 0 0
+
 let index_sub ~sub s =
   let ls = String.length s and lsub = String.length sub in
   let rec go i =
@@ -4904,11 +4917,13 @@ let an_observation_outlives_the_turn_that_could_not_state_it () =
             (request_contains first "Build failing");
           is_true ~msg:"the next turn states what its predecessor could not"
             (request_contains wind_down "Build failing");
-          (* Carried once and no further: a turn that has stated an observation
-             owes nothing, so it is not recorded again against every turn that
-             follows. *)
-          is_false ~msg:"a stated observation is not carried on again"
-            (request_contains second "Build failing")
+          (* Stated once, then frozen: later requests carry the entry as
+             durable history at its original position — the model can
+             re-read what it was told — never as a fresh restatement. *)
+          equal int ~msg:"the frozen entry appears exactly once" 1
+            (request_occurrences second "Build failing");
+          equal int ~msg:"and was stated exactly once when told" 1
+            (request_occurrences wind_down "Build failing")
       | requests ->
           failf "expected three provider requests, got %d"
             (List.length requests))
