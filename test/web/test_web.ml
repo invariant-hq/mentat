@@ -24,7 +24,6 @@ module Session = Mentat_session
 module Llm = Mentat_llm
 module Permission = Mentat_permission
 module Tool = Mentat_tool
-module Workspace = Mentat_workspace
 module Json = Jsont.Json
 
 (* Generic helpers. *)
@@ -507,25 +506,6 @@ let progress_tests =
                  (Progress.Model.Assistant_delta { text = "ghost" }))
           in
           not_contains ~sub:"ghost" (live acc));
-      test "workspace notice replaces in place by key" (fun () ->
-          let acc, _ = started () in
-          let notice title =
-            Workspace.Notice.make ~source:"dune"
-              ~severity:Workspace.Notice.Severity.Warning ~title ~key:"build" ()
-          in
-          let acc =
-            Render.progress acc
-              (Progress.Notice
-                 { turn = turn_id "turn-1"; notice = notice "first" })
-          in
-          let acc =
-            Render.progress acc
-              (Progress.Notice
-                 { turn = turn_id "turn-1"; notice = notice "second" })
-          in
-          let html = live acc in
-          contains ~msg:html ~sub:"second" html;
-          not_contains ~sub:"first" html);
     ]
 
 (* ── Cold load ──────────────────────────────────────────────────────────── *)
@@ -767,15 +747,14 @@ let fuzz_tests =
       test "a hostile notice title is escaped in text and attribute" (fun () ->
           let acc, _ = started () in
           let notice =
-            Workspace.Notice.make ~source:"dune"
-              ~severity:Workspace.Notice.Severity.Error ~title:hostile
-              ~key:hostile ()
+            Session.Notice.make ~source:"dune"
+              ~severity:Session.Notice.Severity.Error ~title:hostile
+              ~body:hostile ()
           in
-          let acc =
-            Render.progress acc
-              (Progress.Notice { turn = turn_id "turn-1"; notice })
+          let _acc, blocks =
+            fold acc (position 1) (Fact.Workspace_notice notice)
           in
-          assert_no_injection ~context:"notice" (live acc));
+          assert_no_injection ~context:"notice" (html_of blocks));
       test "a hostile delegation label is escaped" (fun () ->
           let acc, _ = started () in
           let edge =

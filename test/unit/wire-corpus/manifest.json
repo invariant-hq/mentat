@@ -68,7 +68,6 @@
     "progress.model.retrying",
     "progress.model.started",
     "progress.model.usage",
-    "progress.workspace.notice",
     "transcript.page",
     "transcript.tail",
     "update.committed",

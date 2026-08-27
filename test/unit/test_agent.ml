@@ -4870,6 +4870,90 @@ let a_turn_states_every_observation_it_made () =
    The observation is held and leads the next turn instead of being lost with
    the turn that consumed it — the producers cannot be asked again, since a
    watcher has cleared its queue and a build verdict has moved its baseline. *)
+let a_pending_notice_survives_the_compaction_boundary () =
+  (* The headline flow: a notice drained at the boundary is riding the model
+     view's tail when context pressure fires. The summary request's head
+     must exclude it (it is not-yet-history), the compaction claim's own
+     freeze pins it after the carried cut, and the reduced view retains it —
+     never summarized by a summarizer that never saw it. *)
+  let big_usage = Llm.Usage.make ~input:4000 ~output:2000 () in
+  let small_usage = Llm.Usage.make ~input:10 ~output:5 () in
+  let requests = ref [] in
+  let turns = ref 0 in
+  let script =
+    Ports.script @@ fun request ->
+    requests := request :: !requests;
+    if request_contains request "Summarize this conversation" then
+      Ok (plain_response "Conversation summary.")
+    else begin
+      incr turns;
+      Ok
+        (Llm.Response.make ~model ~stop:Llm.Response.Stop.end_turn
+           ~usage:(if !turns = 1 then big_usage else small_usage)
+           (Llm.Message.Assistant.text "Done."))
+    end
+  in
+  let config _ ~latest_model:_ =
+    Ok
+      (Agent.Config.make ~model ~continuation_turn_limit:None
+         ~compaction_pressure_tokens:1000 ())
+  in
+  let workspace =
+    workspace_noticing_on_drain ~on_drain:2
+      [
+        workspace_notice ~source:"dune"
+          ~severity:Mentat_workspace.Notice.Severity.Error
+          ~title:"Build failing (1 diagnostic)";
+      ]
+  in
+  with_engine ~script ~config ~workspace
+    (fun ~sw:_ ~client ~store ~engine:_ ->
+      submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t-1") "hi");
+      let _ = drain_committed (follow_ok client (sid "root")) in
+      let feed = follow_ok ~from:`Now client (sid "root") in
+      submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t-2") "again");
+      let _ = drain_committed feed in
+      (* The FIRST summary is the one built while the batch still rides:
+         it must exclude the entry. A later summary may legitimately cover
+         it — by then it is frozen history. *)
+      (match
+         List.find_opt
+           (fun r -> request_contains r "Summarize this conversation")
+           (List.rev !requests)
+       with
+      | None -> fail "no summary request was issued"
+      | Some summary ->
+          equal int ~msg:"the summarizer never sees the riding batch" 0
+            (request_occurrences summary "Build failing (1 diagnostic)"));
+      (match
+         List.find_opt
+           (fun r ->
+             not (request_contains r "Summarize this conversation"))
+           !requests
+       with
+      | None -> fail "no post-compaction turn request"
+      | Some turn_request ->
+          equal int
+            ~msg:"the frozen entry survives into the reduced view's tail" 1
+            (request_occurrences turn_request "Build failing (1 diagnostic)"));
+      match Hashtbl.find_opt store.sessions "root" with
+      | None -> fail "the root session is missing from the store"
+      | Some session ->
+          is_true ~msg:"the post-install model view retains the entry"
+            (List.exists
+               (function
+                 | Llm.Message.User content ->
+                     List.exists
+                       (function
+                         | Llm.Content.Text text ->
+                             contains_sub ~sub:"Build failing (1 diagnostic)"
+                               text
+                         | _ -> false)
+                       content
+                 | _ -> false)
+               (Llm.Transcript.messages
+                  (Session.State.model_transcript (Session.state session)))))
+
 let an_observation_outlives_the_turn_that_could_not_state_it () =
   let requests = ref [] in
   let script =
@@ -4923,7 +5007,14 @@ let an_observation_outlives_the_turn_that_could_not_state_it () =
           equal int ~msg:"the frozen entry appears exactly once" 1
             (request_occurrences second "Build failing");
           equal int ~msg:"and was stated exactly once when told" 1
-            (request_occurrences wind_down "Build failing")
+            (request_occurrences wind_down "Build failing");
+          (* The head never moves: both requests carry byte-identical
+             prelude content — the entry rode the transcript, not the
+             instructions. *)
+          is_true ~msg:"the prelude is byte-stable across the entry"
+            (List.equal Llm.Message.equal
+               (Llm.Request.Prelude.messages (Llm.Request.prelude wind_down))
+               (Llm.Request.Prelude.messages (Llm.Request.prelude second)))
       | requests ->
           failf "expected three provider requests, got %d"
             (List.length requests))
@@ -6035,11 +6126,31 @@ let structured_output_budget_exhaustion_fails () =
     Ports.script @@ fun _request ->
     Ok (plain_response "Prose again, no tool call.")
   in
-  with_engine ~script (fun ~sw:_ ~client ~store:_ ~engine:_ ->
+  with_engine ~script (fun ~sw:_ ~client ~store ~engine:_ ->
       submit_ok client
         (prompt_schema ~output_schema:answer_schema ~session:(sid "root")
            ~turn:(tid "t-budget") "go");
       let pairs = drain_committed (follow_ok client (sid "root")) in
+      (* The reminder pends and dies with the turn: the durable transcript
+         must not end on a dangling imperative no request ever showed. *)
+      (match Hashtbl.find_opt store.sessions "root" with
+      | None -> fail "the root session is missing from the store"
+      | Some session -> (
+          match
+            List.rev
+              (Llm.Transcript.messages
+                 (Session.State.model_transcript (Session.state session)))
+          with
+          | Llm.Message.User content :: _ ->
+              is_false ~msg:"no dangling reminder after a failed schema turn"
+                (List.exists
+                   (function
+                     | Llm.Content.Text text ->
+                         contains_sub
+                           ~sub:"have not delivered the final answer" text
+                     | _ -> false)
+                   content)
+          | _ -> ()));
       match settled_outcome pairs with
       | Some (Session.Turn.Outcome.Failed { message }) ->
           is_true ~msg:"the failure names the unmet structured output"
@@ -6470,6 +6581,8 @@ let () =
             manual_compact_installs_a_user_requested_summary;
           test "manual compact replays the same turn id"
             manual_compact_replays_the_same_turn_id;
+          test "a pending notice survives the compaction boundary"
+            a_pending_notice_survives_the_compaction_boundary;
           test "manual compact rejects a non-compaction turn id"
             manual_compact_rejects_a_non_compaction_turn_id;
           test "manual compact distinct ids compact independently"

@@ -1116,11 +1116,7 @@ let progress ~now pulse t =
       | Progress.Compaction.Started _ | Progress.Compaction.Summarizing ->
           { t with compacting = true }
       | Progress.Compaction.Failed _ -> { t with compacting = false })
-  (* A notice pulse renders nothing here: the durable transcript block
-     appears in place the moment the fact lands, and a second live-tail
-     glance of the same observation only reads as duplication. *)
-  | Progress.Model _ | Progress.Model_download _ | Progress.Compaction _
-  | Progress.Notice _ ->
+  | Progress.Model _ | Progress.Model_download _ | Progress.Compaction _ ->
       t
 
 (* ── Views ──────────────────────────────────────────────────────────────── *)
@@ -1209,10 +1205,6 @@ let running_block ~now = function
             ]
           ()
 
-(* The ephemeral live glance cue: one row, the headline only. The notice's full
-   multi-line body is now the durable {!Fact.Workspace_notice} transcript entry
-   ({!workspace_notice_block}), so the footer never repeats the file list or
-   diagnostic dump — it shows the title and defers the record to the transcript. *)
 let assistant_text t =
   ( String.concat "" (List.rev t.assistant_stable_rev),
     String.concat "" (List.rev t.assistant_open_rev) )

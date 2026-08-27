@@ -579,12 +579,6 @@ val finish_turn : t -> unit
     replacement remains unreleased. Call {!settle} afterwards before printing
     the settled frame. *)
 
-val notice : t -> Mentat_workspace.Notice.t -> unit
-(** [notice t notice] publishes [notice] as ephemeral progress for the currently
-    held active turn through the harness's main client feed. It raises
-    [Invalid_argument] when no scripted turn is active. Call {!settle}
-    afterwards before printing. *)
-
 val finish_queue_edit_result : t -> unit
 (** [finish_queue_edit_result t] releases the exact result held for the active
     queued-draft replacement or clear. It raises [Invalid_argument] when no

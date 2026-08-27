@@ -96,7 +96,9 @@ module Step : sig
                   without re-derivation. *)
           request : Mentat_llm.Request.t;
               (** Derived from transcript and contract, never stored. *)
-          purpose : [ `Turn | `Compaction of Mentat_session.Compaction.Reason.t ];
+          purpose :
+            [ `Turn
+            | `Compaction of Mentat_session.Compaction.Reason.t * int ];
               (** Why the call is issued. The driver calls the provider the same
                   way for both; the purpose routes the feed-back — a [`Turn]
                   response feeds {!accept_response}, a [`Compaction] response
@@ -353,11 +355,17 @@ val install_summary :
   Mentat_session.Provider_request.Id.t ->
   summary:Mentat_llm.Message.t list ->
   reason:Mentat_session.Compaction.Reason.t ->
+  summarized_upto:int ->
   ?usage:Mentat_llm.Usage.t ->
   Mentat_session.t ->
   (Step.t, Error.t) result
-(** [install_summary env id ~summary ~reason ?usage session] installs the
-    compaction fact for a [`Compaction] response. The fact carries the claim and
+(** [install_summary env id ~summary ~reason ~summarized_upto ?usage session]
+    installs the compaction fact for a [`Compaction] response.
+    [summarized_upto] is the cut decided when the summary request was built,
+    carried on the [`Compaction] purpose — never recomputed at install: the
+    claim's own request may have frozen a pending notices batch into the
+    transcript since, and a recomputed cut could cover messages the
+    summarizer never saw. The fact carries the claim and
     CLOSES it — "summarized-but-not-installed" is unrepresentable; a duplicate
     [(request digest, reason)] key is refused at replay. [usage] is the
     summarizer response's provider-reported usage, folded into session metrics.

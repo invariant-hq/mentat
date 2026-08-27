@@ -13,8 +13,8 @@
     fact arrives.
 
     The fold owns only per-turn presentation state: optimistic submit echo,
-    streaming model text, open tool rows, the pending decision which drives the
-    waiting line, ambient workspace notices, and the live task-board mirror.
+    streaming model text, open tool rows, the pending decision which drives
+    the waiting line, and the live task-board mirror.
     Goal, queue, delegation, and decision-dialog presentation remain dedicated
     surface folds over their exact fact payloads; this module neither mirrors
     nor re-encodes them.
@@ -184,10 +184,10 @@ val tail :
     material; the caller therefore adds no transcript/tail gap.
 
     Collapsed reasoning is a three-visual-line rolling window. [expanded]
-    reveals its complete wrapped body. Running tool rows include elapsed time;
-    prepared rows remain visibly awaiting approval. Workspace notices are
-    explicitly ambient and disappear at turn settlement rather than becoming
-    false durable history.
+    reveals its complete wrapped body. Running tool rows include elapsed
+    time; prepared rows remain visibly awaiting approval. Workspace notices
+    render once, as their durable transcript blocks — no live-tail glance
+    duplicates them.
 
     Mosaic owns allocation, wrapping, and overflow. The collapsed reasoning body
     is a bottom-sticky three-row scroll viewport; expansion replaces it with the

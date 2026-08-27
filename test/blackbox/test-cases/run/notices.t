@@ -14,7 +14,7 @@ A trusted OCaml workspace (a `dune-project` marker present) engages the producer
 `workspace.tooling` defaults to `auto`, which engages on the marker. With no
 `dune build --watch` registered for this root, build health is `disconnected`,
 which is not an error — so the turn's request carries NO `Workspace notices:`
-prelude. The turn completes normally, proving the producer polls without hanging
+entry. The turn completes normally, proving the producer polls without hanging
 or faulting when the endpoint is absent.
 
   $ use_trusted_workspace
@@ -75,3 +75,11 @@ No dune or compiler is on PATH — the endpoint is the fake alone.
   1
   $ grep -c 'This expression has type string' capture-fail/request-2.json
   1
+
+The entry is an ordinary conversation message, never the request head: the
+OpenAI instructions field must not carry it — mutating the head was the
+observed cache failure this design killed.
+
+  $ mentat_cram json '.instructions' < capture-fail/request-2.json | grep -c 'Workspace notices'
+  0
+  [1]

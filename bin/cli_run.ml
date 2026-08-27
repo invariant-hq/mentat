@@ -506,7 +506,7 @@ let render_feed t ~client ~json ~session ~output_schema ~thinking ~terminal
                 | Protocol.Progress.Model.Retrying _ ->
                     loop final_text terminal)
             | Protocol.Progress.Model _ | Protocol.Progress.Model_download _
-            | Protocol.Progress.Compaction _ | Protocol.Progress.Notice _ ->
+            | Protocol.Progress.Compaction _ ->
                 loop final_text terminal)
         | Protocol.Update.Committed { fact; _ } -> (
             match fact with

@@ -1681,19 +1681,6 @@ let finish_turn (t : t) =
           held.Turn_runtime.complete ();
           wake t)
 
-let notice (t : t) notice =
-  match (t.turns.Turn_runtime.held, t.turns.Turn_runtime.session) with
-  | None, _ | _, None ->
-      invalid_arg "Tui.notice: no scripted turn is awaiting release"
-  | Some _, Some document -> (
-      match Session.State.active_turn (Session.state document) with
-      | None -> invalid_arg "Tui.notice: the scripted turn is not active"
-      | Some turn ->
-          Main_feeds.publish_progress t.feed_runtime
-            ~session:(Session.id document)
-            (Protocol.Progress.Notice { turn = Session.Turn.id turn; notice });
-          wake t)
-
 let finish_queue_edit_result (t : t) =
   match t.queue_edits.Queue_runtime.current with
   | None ->

@@ -141,7 +141,6 @@ type acc = {
   tools : tool list;
   pending_decision : Decision.Requested.t option;
   board : Task.Board.t option;
-  notices : Mentat_workspace.Notice.t list;
   workspace : workspace option;
   committed_output : int;
   step_output : int;
@@ -164,7 +163,6 @@ let initial =
     tools = [];
     pending_decision = None;
     board = None;
-    notices = [];
     workspace = None;
     committed_output = 0;
     step_output = 0;
@@ -1034,17 +1032,6 @@ let assistant_delta text acc =
       compacting = false;
     }
 
-let replace_notice notice notices =
-  let key = Mentat_workspace.Notice.key notice in
-  let rec loop acc = function
-    | [] -> List.rev (notice :: acc)
-    | current :: rest
-      when String.equal (Mentat_workspace.Notice.key current) key ->
-        List.rev_append acc (notice :: rest)
-    | current :: rest -> loop (current :: acc) rest
-  in
-  loop [] notices
-
 let progress acc pulse =
   let applies turn =
     match active_id acc.phase with
@@ -1105,10 +1092,7 @@ let progress acc pulse =
       | Progress.Compaction.Started _ | Progress.Compaction.Summarizing ->
           { acc with compacting = true }
       | Progress.Compaction.Failed _ -> { acc with compacting = false })
-  | Progress.Notice { turn; notice } when applies turn ->
-      { acc with notices = replace_notice notice acc.notices }
-  | Progress.Model _ | Progress.Model_download _ | Progress.Compaction _
-  | Progress.Notice _ ->
+  | Progress.Model _ | Progress.Model_download _ | Progress.Compaction _ ->
       acc
 
 (* ── Live region builders ───────────────────────────────────────────────── *)
@@ -1375,29 +1359,6 @@ let board_section acc =
           ];
       ]
 
-let notice_frag notice =
-  let severity =
-    match Mentat_workspace.Notice.severity notice with
-    | Mentat_workspace.Notice.Severity.Error -> "failure"
-    | Mentat_workspace.Notice.Severity.Warning -> "warning"
-    | Mentat_workspace.Notice.Severity.Info -> "info"
-  in
-  let body =
-    match Mentat_workspace.Notice.body notice with
-    | Some body when visible body -> [ Html.El.p [ Html.El.txt body ] ]
-    | Some _ | None -> []
-  in
-  Html.El.aside
-    ~at:
-      [
-        Html.At.class_ ("notice " ^ severity);
-        Html.At.data "key" (Mentat_workspace.Notice.key notice);
-      ]
-    (Html.El.p [ Html.El.txt (Mentat_workspace.Notice.title notice) ] :: body)
-
-let notice_rows acc =
-  match acc.notices with [] -> [] | notices -> List.map notice_frag notices
-
 let goal_row acc =
   match acc.goal with
   | Some (Goal.Update.Declare { objective; _ })
@@ -1504,7 +1465,6 @@ let live ~now:_ ~session acc =
         tool_rows acc;
         decision;
         board_section acc;
-        notice_rows acc;
         goal_row acc;
         queue_row acc;
         download_row acc;

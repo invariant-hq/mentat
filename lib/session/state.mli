@@ -329,6 +329,14 @@ val full_transcript : t -> Mentat_llm.Transcript.t
 (** [full_transcript t] is [t]'s complete display history — every message,
     across compaction boundaries. *)
 
+val pending_entries_riding : t -> int
+(** [pending_entries_riding t] is how many open pending entries (the
+    notices batch, the whiff reminder) {!model_transcript} currently
+    carries at its tail — the one way the model view outgrows the durable
+    positions of {!full_transcript}. Compaction arithmetic subtracts them:
+    they are not yet history, and the request that would freeze them pins
+    them after any summary cut. *)
+
 val model_transcript : t -> Mentat_llm.Transcript.t
 (** [model_transcript t] is the model view the provider sees: the latest
     applicable compaction's summary followed by the retained tail, the full
@@ -402,17 +410,26 @@ val active_turn_id : t -> Turn.Id.t option
     A {!Event.Workspace_notice} is one durable fact with two projections:
     the human transcript's notice row, and an {e ordinary user-role entry}
     in the model view — a [Workspace notices:] header then each pending
-    notice's rendered line and body, one entry per pending batch. The entry
-    joins the durable transcript at the next request-ready seam (a user
-    message cannot sit between a tool call and its result) and its bytes
-    and position freeze the moment a request shows them, so the request
-    prefix never moves and replay reconstructs exactly what the model was
-    shown, where it was shown it. A still-open batch rides the model view's
-    tail until its freezing [Provider_requested]; a batch a dying turn
-    recorded stays pending for the next request by construction. The
-    structured-output whiff reminder follows the same law: it is appended
-    as an ordinary entry directly after a schema turn's response that
-    carried no tool call, derived from the settled event. *)
+    notice's rendered line and body, one entry per flushed batch (drains
+    between seams merge). The entry joins the durable transcript at the
+    next request-ready seam (a user message cannot sit between a tool call
+    and its result) and its bytes and position freeze the moment a request
+    shows them, so the request prefix never moves and replay reconstructs
+    exactly what the model was shown, where it was shown it. The seam may
+    trail younger conversational input: a batch a dying turn recorded
+    stays pending and pins at the next request, after the input that
+    started it. A still-open batch rides the model view's tail until its
+    freezing [Provider_requested] — any claim, a compaction's included:
+    a summary claim pins the batch after its own cut, so the reduced view
+    retains it for the next turn request to show. The one corner this
+    leaves open: two summaries before any turn request (a degenerate
+    pressure threshold, or manual compaction twice in a row) can cover a
+    frozen entry no request ever showed — accepted; the second summary
+    reads it as the history it already is. The structured-output whiff
+    reminder
+    pends the same way after a schema turn whiffs a delivery — shown by
+    the next request, frozen at its claim — and clears with its turn: a
+    turn that dies unstated leaves no dangling imperative. *)
 
 val turn_outcome : Turn.Id.t -> t -> Turn.Outcome.t option
 (** [turn_outcome id t] is the terminal outcome of turn [id], if finished. *)

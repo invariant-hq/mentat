@@ -295,16 +295,14 @@ let%expect_test "a downloading turn shows artifact progress in the working line"
     24 |   ! not logged in · /login · ~/mentat… · openai/gpt-… · ! full access ? for s…
     |}]
 
-let workspace_notice ~source ~severity ~title ?body ~key () =
-  Mentat_workspace.Notice.make ~source ~severity ~title ?body ~key ()
-
 let session_notice ~source ~severity ~title ?body () =
   Mentat_session.Notice.make ~source ~severity ~title ?body ()
 
-let%expect_test "a notice pulse paints nothing; the durable block renders" =
-  (* The live-tail glance the pulse used to paint duplicated the durable
-     transcript block that lands the moment the fact arrives; one
-     observation renders once, in place, and survives settlement. *)
+let%expect_test "one durable block per observation, mid-turn and after" =
+  (* The live-tail pulse glance is gone from the wire: the durable
+     transcript block lands the moment the fact arrives, renders once, in
+     place, and survives settlement. The mid-turn frame is the point — a
+     reintroduced second rendering would show here beside the block. *)
   let turn =
     Tui.Turn_script.complete ~prompt:"inspect workspace health"
       ~notices:
@@ -317,11 +315,34 @@ let%expect_test "a notice pulse paints nothing; the durable block renders" =
   in
   Tui.run ~name:"t" ~turns:[ turn ] @@ fun t ->
   submit t "inspect workspace health";
-  Tui.notice t
-    (workspace_notice ~source:"fswatch"
-       ~severity:Mentat_workspace.Notice.Severity.Warning
-       ~title:"A pulse without a durable fact" ~key:"file-watch" ());
   Tui.settle t;
+  Tui.print t;
+  [%expect {|
+    01 |
+    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium
+    03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-553b9dad
+    04 |
+    05 | ❯ inspect workspace health
+    06 |
+    07 | ⊙ dune — Build is healthy
+    08 |   No diagnostics remain.
+    09 |
+    10 | ⠋ Working… (0s · esc to interrupt)
+    11 |
+    12 |
+    13 |
+    14 |
+    15 |
+    16 |
+    17 |
+    18 |
+    19 |
+    20 |
+    21 | ────────────────────────────────────────────────────────────────────────────────
+    22 | ❯ queue a message — sends after this turn
+    23 | ────────────────────────────────────────────────────────────────────────────────
+    24 |   ! not logged in · /login · ~/mentat… · openai/gpt-… · ! full access ? for s…
+    |}];
   Tui.finish_turn t;
   Tui.settle t;
   Tui.print t;

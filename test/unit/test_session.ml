@@ -5865,6 +5865,61 @@ let workspace_notice_group =
           is_true ~msg:"both notices share the entry"
             (String.includes ~affix:"first" (last_user_text st)
             && String.includes ~affix:"second" (last_user_text st)));
+      test "a batch pins before younger conversational input" (fun () ->
+          let t1 = turn ~id:"turn-1" () in
+          let st =
+            state
+              [
+                Event.turn_started t1;
+                Event.workspace_notice (notice_title "orphaned");
+                finish t1;
+                Event.message_appended
+                  (Llm.Message.user_text "hello afterwards");
+              ]
+          in
+          (* The idle append flushes first: the observation precedes the
+             input that arrived after it. *)
+          match List.rev (messages_of (State.full_transcript st)) with
+          | Llm.Message.User hello :: Llm.Message.User entry :: _ ->
+              is_true ~msg:"input last"
+                (List.exists
+                   (function
+                     | Llm.Content.Text text ->
+                         String.includes ~affix:"hello afterwards" text
+                     | _ -> false)
+                   hello);
+              is_true ~msg:"the entry precedes it"
+                (List.exists
+                   (function
+                     | Llm.Content.Text text ->
+                         String.includes ~affix:"orphaned" text
+                     | _ -> false)
+                   entry)
+          | _ -> fail "expected the entry then the input at the tail");
+      test "the frozen entry is the bytes the ride showed" (fun () ->
+          let t1 = turn ~id:"turn-1" () in
+          let c = claim ~seed:"bytes-req" (Session.Turn.id t1) in
+          let before =
+            state
+              [
+                Event.turn_started t1;
+                Event.workspace_notice notice_fixture;
+              ]
+          in
+          let ridden = last_user_text before in
+          let frozen =
+            state
+              [
+                Event.turn_started t1;
+                Event.workspace_notice notice_fixture;
+                Event.provider_requested c;
+              ]
+          in
+          equal string ~msg:"same bytes, same tail position" ridden
+            (last_user_text frozen);
+          equal int ~msg:"the view did not grow at the freeze"
+            (List.length (messages_of (State.model_transcript before)))
+            (List.length (messages_of (State.model_transcript frozen))));
       test "an unstated notice survives its turn and states once" (fun () ->
           let t1 = turn ~id:"turn-1" () in
           let t2 = turn ~id:"turn-2" () in

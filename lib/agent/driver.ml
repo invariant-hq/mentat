@@ -273,12 +273,11 @@ let session_notice_of_workspace notice =
     ()
 
 let build_env t ~context_prelude ~workspace catalog cfg ~max_steps =
-  (* The context prelude (system prompt, workspace instructions, skills) is the
-     whole request context [Env] holds. Workspace notices are no longer folded in
-     here: they are durable turn-scoped facts ({!Mentat_session.Event.Workspace_notice})
-     that the step engine re-injects for their own turn from the journal, so the
-     model's context reconstructs faithfully on replay and never carries a stale
-     notice into a later turn. *)
+  (* The context prelude (system prompt, workspace instructions, skills) is
+     the whole request context [Env] holds — stable for the session, so the
+     conversation head never moves. Workspace notices are not here: they are
+     durable facts ({!Mentat_session.Event.Workspace_notice}) the session
+     projects into the model transcript as ordinary entries. *)
   Mentat_agent_step.Env.make ~catalog ~sandbox:workspace.Ports.identity
     ~prelude:context_prelude
     ~max_steps:(Option.value max_steps ~default:cfg.Config.max_steps)
@@ -659,10 +658,6 @@ and start_turn t cfg ~mode ~options ~max_steps ~id ~input ~origin ~output_schema
           Atomic.set t.flag false;
           t.interrupt_reason <- None;
           ack (Ok ());
-          List.iter
-            (fun notice ->
-              pulse t (Mentat_protocol.Progress.Notice { turn = id; notice }))
-            notices;
           act t step)
 
 (* The worker. *)
@@ -702,7 +697,7 @@ and exec t eff ~turn ~buffer ~stream_usage ~closer =
           pulse t
             (Mentat_protocol.Progress.Model
                { turn; update = Mentat_protocol.Progress.Model.Started })
-      | `Compaction reason ->
+      | `Compaction (reason, _) ->
           pulse t
             (Mentat_protocol.Progress.Compaction
                {
@@ -890,7 +885,8 @@ and settle_model t ~id ~purpose ~prose ~stream_usage outcome =
       | `Turn ->
           feed_commit t (fun s ->
               Mentat_agent_step.accept_response (env t) id response s)
-      | `Compaction reason -> install_summary t ~id ~reason response)
+      | `Compaction (reason, summarized_upto) ->
+          install_summary t ~id ~reason ~summarized_upto response)
   | Ok (Model_work (Error err)) -> (
       match Mentat_llm.Error.kind err with
       | Mentat_llm.Error.Cancelled
@@ -907,7 +903,7 @@ and settle_model t ~id ~purpose ~prose ~stream_usage outcome =
                  compaction, finishes it Failed. *)
               feed_commit t (fun s ->
                   Mentat_agent_step.settle_provider_overflow (env t) id err s)
-          | `Compaction reason ->
+          | `Compaction (reason, _) ->
               (* A summary request that itself overflows is an ordinary failed
                  compaction — no recovery on the recovery. *)
               compaction_failed t ~reason
@@ -919,7 +915,7 @@ and settle_model t ~id ~purpose ~prose ~stream_usage outcome =
           | `Turn ->
               feed_commit t (fun s ->
                   Mentat_agent_step.settle_provider_failed id err s)
-          | `Compaction reason ->
+          | `Compaction (reason, _) ->
               compaction_failed t ~reason
                 ~message:(Mentat_llm.Error.message err);
               feed_commit t (fun s ->
@@ -936,7 +932,7 @@ and settle_model t ~id ~purpose ~prose ~stream_usage outcome =
          the live Ambiguous mint. *)
       feed_commit t (fun s -> Mentat_agent_step.settle_provider_ambiguous id s)
 
-and install_summary t ~id ~reason response =
+and install_summary t ~id ~reason ~summarized_upto response =
   let usable =
     (not (Mentat_llm.Response.has_tool_calls response))
     && not (String.equal (String.trim (Mentat_llm.Response.text response)) "")
@@ -945,7 +941,7 @@ and install_summary t ~id ~reason response =
     feed_commit t (fun s ->
         Mentat_agent_step.install_summary (env t) id
           ~summary:[ Mentat_llm.Response.message response ]
-          ~reason
+          ~reason ~summarized_upto
           ?usage:(Mentat_llm.Response.usage response)
           s)
   else begin
@@ -978,8 +974,8 @@ and compaction_failed t ~reason ~message =
    reaches the turn that saw it instead of waiting for the next one. A tool
    settlement is the boundary a turn request all but always follows, since the
    model must be shown the tool's result; it is not a guarantee, so what a turn
-   records without stating is held in [unstated_notices] for the next turn
-   rather than lost with the turn that consumed it. *)
+   records without stating pends in session state — replay-derived, no
+   driver memory — and rides the next request whichever turn issues it. *)
 and drain_workspace_notices t =
   match active_turn t with
   | None -> Ok ()
@@ -991,7 +987,7 @@ and drain_workspace_notices t =
      interrupt is a shutdown — and would put a build probe and a workspace walk
      on the path the user is waiting to see stop. *)
   | Some _ when Mentat_session.State.interrupt_requested (state t) -> Ok ()
-  | Some turn -> (
+  | Some _ -> (
       match (workspace t).Ports.drain_notices () with
       | [] -> Ok ()
       | notices -> (
@@ -1004,14 +1000,7 @@ and drain_workspace_notices t =
           in
           match commit_events t events with
           | Error e -> Error e
-          | Ok () ->
-              let id = Mentat_session.Turn.id turn in
-              List.iter
-                (fun notice ->
-                  pulse t
-                    (Mentat_protocol.Progress.Notice { turn = id; notice }))
-                notices;
-              Ok ()))
+          | Ok () -> Ok ()))
 
 and settle_tool_effect t ~id ~turn ~closer outcome =
   let evidence = Option.map (fun close -> close ()) !closer in
@@ -1022,9 +1011,9 @@ and settle_tool_effect t ~id ~turn ~closer outcome =
          ordinary path — the model must be shown the result — so the workspace
          is drained first and rides that same request. The turn can still end at
          this boundary instead (its step cap, a refused review, an interrupt
-         recorded while the tool ran), which is why what a turn records without
-         stating is held rather than lost. A driver-side interrupt or a store
-         failure ends the turn outright and drains nothing. *)
+         recorded while the tool ran); what it recorded without stating then
+         pends in session state for the next request. A driver-side interrupt
+         or a store failure ends the turn outright and drains nothing. *)
       let settling f =
         match drain_workspace_notices t with
         | Error e -> Error e
