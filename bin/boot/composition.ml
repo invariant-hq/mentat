@@ -2327,6 +2327,19 @@ let web_search t =
       in
       Some (backend, api_key)
 
+(* The startup gate: after sealing a workspace, before any credential or
+   session effect, refuse a run whose sealed confinement cannot meet
+   [sandbox.require] — an unenforceable posture fails closed here, not at the
+   first command. Shared by the execution layer's two capabilities and the
+   engine-free daemon-cones seal. *)
+let check_sandbox_requirement t capability =
+  let requirement = Cfg.Resolved.get Cfg.Field.sandbox_require t.config in
+  match Mentat_workspace_io.check capability ~requirement with
+  | Ok () -> Ok ()
+  | Error r ->
+      Error
+        (Exit_status.runtime (Mentat_sandbox.Requirement.Rejection.message r))
+
 (* The offline execution layer: the sealed workspace capabilities, the per-mode
    execution assembly the engine consumes, and the per-mode tool declarations an
    inspector reads. Built without the engine, provider, or store adapters, so
@@ -2360,20 +2373,8 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
     resolve_workspace t ~mode:Cfg.Mode.Read_only
       ~network:Mentat_sandbox.Policy.Network.Restricted
   in
-  (* The startup gate: after sealing the workspace, before any
-     credential or session effect, refuse a run whose sealed confinement cannot
-     meet [sandbox.require] — an unenforceable posture fails closed here, not at
-     the first command. *)
-  let check capability =
-    let requirement = Cfg.Resolved.get Cfg.Field.sandbox_require t.config in
-    match Mentat_workspace_io.check capability ~requirement with
-    | Ok () -> Ok ()
-    | Error r ->
-        Error
-          (Exit_status.runtime (Mentat_sandbox.Requirement.Rejection.message r))
-  in
-  let* () = check build_capability in
-  let* () = check read_capability in
+  let* () = check_sandbox_requirement t build_capability in
+  let* () = check_sandbox_requirement t read_capability in
   let clock = Eio.Stdenv.mono_clock t.shared.stdenv in
   let tool_boot = Tool_boot.make read_capability ~toolchain:(toolchain t) in
   let merlin_program =
@@ -3287,6 +3288,55 @@ let assemble t =
       | Error status -> Error status)
 
 let driver t = Result.map (fun (driver, _, _) -> driver) (assemble t)
+
+(* The engine-free assembly: every executable-filled cone over the staged
+   instance, with no engine, toolchain resolution, or tool catalog behind it —
+   the cones a daemon answers itself when every session's engine runs in the
+   session's own spawned process. The [session] cone is absent, and the two
+   settings writes whose overlays are process-local to the driving process
+   refuse rather than accept a write no engine here would ever read. The review
+   and workspace cones run over one freshly sealed capability at the configured
+   Build authority, the same pair the execution layer seals; on an instance
+   that never assembles an engine, the lifecycle writes commit through the
+   offline fence-taking twin. *)
+type daemon_cones = {
+  accounts : Client.Driver.Accounts.t;
+  settings : Client.Driver.Settings.t;
+  lifecycle : Client.Driver.Lifecycle.t;
+  review : Client.Driver.Review.t;
+  workspace : Client.Driver.Workspace.t;
+}
+
+let daemon_cones t : (daemon_cones, Exit_status.t) result =
+  let ( let* ) = Result.bind in
+  let* capability =
+    resolve_workspace t ~mode:(configured_sandbox_mode t)
+      ~network:(Cfg.Resolved.get Cfg.Field.sandbox_network t.config)
+  in
+  let* () = check_sandbox_requirement t capability in
+  let driving_process_only () =
+    Error
+      (Protocol_error.unavailable
+         "a session-scoped setting is an overlay held by the session's \
+          driving process; this engine-free assembly does not drive sessions")
+  in
+  let settings =
+    {
+      (settings_cone t) with
+      Client.Driver.Settings.set_model =
+        (fun ~session:_ ?reasoning_effort:_ _ -> driving_process_only ());
+      set_permission_review = (fun ~session:_ _ -> driving_process_only ());
+    }
+  in
+  let base_spec = review_base_spec t in
+  Ok
+    {
+      accounts = accounts_cone t;
+      settings;
+      lifecycle = lifecycle_cone t;
+      review = review_cone t capability ~base_spec;
+      workspace = workspace_cone t capability ~base_spec;
+    }
 
 (* The child broker's reach into an instance's engine, as thin wrappers so the
    daemon's broker never holds the engine value itself. The engine exists

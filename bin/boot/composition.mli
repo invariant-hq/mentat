@@ -153,6 +153,40 @@ val retained_hub_count : t -> int
     zeros — an instance with no bound connections, no in-flight call, and no
     retained hub is idle and evictable. *)
 
+type daemon_cones = {
+  accounts : Mentat_client.Driver.Accounts.t;
+  settings : Mentat_client.Driver.Settings.t;
+  lifecycle : Mentat_client.Driver.Lifecycle.t;
+  review : Mentat_client.Driver.Review.t;
+  workspace : Mentat_client.Driver.Workspace.t;
+}
+(** The engine-free cone set: each field is the identically-named sub-record of
+    {!Mentat_client.Driver.t}, with the engine-filled [session] cone absent. *)
+
+val daemon_cones : t -> (daemon_cones, Exit_status.t) result
+(** [daemon_cones t] assembles the cones a daemon answers itself when every
+    session's engine runs in the session's own spawned process and the daemon
+    serves only the engine-free surface. It builds no engine, resolves no
+    toolchain, and seals no tool catalog; it seals one fresh workspace
+    capability at the configured Build authority (the same pair {!client}'s
+    assembly seals) for the review and workspace cones, and fails exactly as
+    {!client}'s prefix does when the workspace cannot seal.
+
+    The daemon-scope/session-scope law: a call is daemon-scope iff the store,
+    the config files, the credential store, or the workspace answers it — the
+    accounts cone whole (login stream included); [configuration],
+    [set_default_model], and [set_ui_theme]; the lifecycle cone over the store,
+    whose metadata writes commit through the offline fence-taking twin on an
+    instance that never assembles an engine; and the review and workspace
+    cones, which are workspace-scoped. Everything session-scoped belongs to the
+    session's driving process alone and is excluded: the whole [session] cone
+    is absent from the record, and [set_model]/[set_permission_review] refuse
+    with a structured error, because the overlays they install are process-local
+    to the driving process — a write accepted here would validate against the
+    shared store, return [Ok], and never be read by any engine. The caller
+    fills the [session] cone and overlays those two writes with its per-session
+    routing. *)
+
 (** {1:accessors Base accessors} *)
 
 val dirs : t -> User_dirs.t
