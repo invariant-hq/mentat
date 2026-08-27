@@ -153,12 +153,13 @@ type hooks = {
           names is resolvable: a feed subscriber that attaches to the child on
           seeing the [Journal_delegation] fact never races the child's creation.
       *)
-  deliver_message : Mentat_agent_step.Step.Child_message.t -> unit;
-      (** Fired after a settled [send_message]/[follow_up] receipt commits: the
-          runtime routes the recorded message to the child driver.
-          Fire-and-forget from the controller's perspective; delivery is
-          idempotent on the id derived from the message's [(turn, call_id)], so
-          a re-fire (recovery's re-drive) cannot deliver twice. *)
+  deliver_message : Mentat_agent_step.Step.Mail.t -> unit;
+      (** Fired after a settled [send]/[follow_up] receipt commits: the
+          runtime routes the recorded message to its target — a child edge,
+          or the recording session's parent. Fire-and-forget from the
+          controller's perspective; delivery is idempotent on the id derived
+          from the message's [(turn, call_id)], so a re-fire (recovery's
+          re-drive) cannot deliver twice. *)
   settled_children :
     Mentat_session.Delegation.Id.t list ->
     (Mentat_session.Delegation.Id.t * Scheduler.child_result) list;

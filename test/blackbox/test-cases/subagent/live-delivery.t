@@ -1,6 +1,6 @@
 A message to a RUNNING brokered child crosses the wire while the child still
 runs — never parked until its exit. The child is held mid-turn by a long
-shell tool; the parent then records a send_message and a follow_up. Both are
+shell tool; the parent then records a send and a follow_up. Both are
 mail: the broker's send dials the serving child's socket and lands each as a
 derived-id queue entry while the first turn is still active, and the
 journal's event order proves it: both queue facts precede the first turn's
@@ -51,7 +51,7 @@ fixture's last three entries are consumed only after the tool is released, so
 the fake is not awaited until then.
 
   $ cat > stage2.jsonl <<JSONL
-  > {"expect":{"body_contains":["PLEASE_MESSAGE"],"body_not_contains":["sm-call"]},"response":{"id":"r3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"sm-item","call_id":"sm-call","name":"send_message","arguments":"{\"child\":\"$DELEG\",\"message\":\"extra context\"}"}]}}
+  > {"expect":{"body_contains":["PLEASE_MESSAGE"],"body_not_contains":["sm-call"]},"response":{"id":"r3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"sm-item","call_id":"sm-call","name":"send","arguments":"{\"to\":\"child:$DELEG\",\"message\":\"extra context\"}"}]}}
   > {"expect":{"body_contains":["sm-call"],"body_not_contains":["fu-call"]},"response":{"id":"r4","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"fu-item","call_id":"fu-call","name":"follow_up","arguments":"{\"child\":\"$DELEG\",\"message\":\"one more thing\"}"}]}}
   > {"expect":{"body_contains":["fu-call"]},"response":{"id":"r5","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"PARENT_DONE"}]}]}}
   > {"expect":{"body_contains":["WAITED"],"body_not_contains":["extra context"]},"response":{"id":"rc2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"CHILD_DONE"}]}]}}

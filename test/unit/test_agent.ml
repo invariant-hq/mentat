@@ -43,7 +43,7 @@ let all_verbs =
     Catalog.Verb.Propose_plan;
     Catalog.Verb.Spawn;
     Catalog.Verb.Wait;
-    Catalog.Verb.Send_message;
+    Catalog.Verb.Send;
     Catalog.Verb.Follow_up;
   ]
 
@@ -991,10 +991,12 @@ let engine_verbs_reject_unknown_input_members () =
       ("propose_plan", json_object [ ("body", Json.string "1. Continue") ]);
       ("spawn", json_object [ ("task", Json.string "Inspect this") ]);
       ("wait", json_object [ ("children", json_array [ Json.string "child" ]) ]);
-      ( "send_message",
+      ( "send",
         json_object
-          [ ("child", Json.string "child"); ("message", Json.string "context") ]
-      );
+          [
+            ("to", Json.string "child:child");
+            ("message", Json.string "context");
+          ] );
       ( "follow_up",
         json_object
           [ ("child", Json.string "child"); ("message", Json.string "next") ] );
@@ -4036,7 +4038,7 @@ let a_spawn_at_the_depth_cap_fails_the_call_not_the_turn () =
 
 (* The model can address the child it spawned. The parent reads the
    delegation id back from the spawn receipt — its only handle — and drives the
-   whole collaboration surface with it: [wait] on the child, then [send_message]
+   whole collaboration surface with it: [wait] on the child, then [send]
    and [follow_up]. A receipt that named the session id instead would make every
    verb resolve to "unknown child"; this journey is the one that catches it.
    Parent requests carry "PLEASE_SPAWN" for the turn's life, so the script routes
@@ -4074,11 +4076,11 @@ let the_model_addresses_a_spawned_child_by_the_receipt_handle () =
                    "waiting")
           | 1 ->
               Ok
-                (tool_call_response ~name:"send_message"
+                (tool_call_response ~name:"send"
                    ~input:
                      (json_object
                         [
-                          ("child", Json.string id);
+                          ("to", Json.string ("child:" ^ id));
                           ("message", Json.string "extra context");
                         ])
                    "messaging")
@@ -4126,6 +4128,177 @@ let the_model_addresses_a_spawned_child_by_the_receipt_handle () =
           | None -> fail "the waited-on child never settled")
       | [] -> fail "the spawn created no child session"
       | many -> failf "expected exactly one child, got %d" (List.length many))
+
+(* The upward edge of the mandate: a child calls [send] with [to: "parent"],
+   the recorded receipt delivers the reply into the parent's queue with the
+   child's agent origin, and the parent's next queued turn carries the framed
+   message — the sender named from the parent's own recorded edge, never from
+   the body. The child's transcript holds the parent receipt; illegal handles
+   fail the call without recording anything. *)
+let a_child_replies_to_its_parent_by_mail () =
+  let saw_reply = ref false in
+  let saw_bad_handle = ref false in
+  let child_id = ref None in
+  let parent_step = ref 0 in
+  let child_step = ref 0 in
+  let script =
+    Ports.script @@ fun request ->
+    if request_contains request "A message from your child" then begin
+      if request_contains request "the scan finished" then saw_reply := true;
+      Ok (plain_response "REPLY_SEEN")
+    end
+    else if request_contains request "PLEASE_SPAWN" then begin
+      (match !child_id with
+      | Some _ -> ()
+      | None -> child_id := receipt_child_of request);
+      match !child_id with
+      | None ->
+          Ok
+            (tool_call_response ~name:"spawn"
+               ~input:(json_object [ ("task", Json.string "child works") ])
+               "spawning")
+      | Some id -> (
+          let step = !parent_step in
+          incr parent_step;
+          match step with
+          | 0 ->
+              Ok
+                (tool_call_response ~name:"wait"
+                   ~input:
+                     (json_object
+                        [ ("children", json_array [ Json.string id ]) ])
+                   "waiting")
+          | _ -> Ok (plain_response "PARENT_DONE"))
+    end
+    else begin
+      let step = !child_step in
+      incr child_step;
+      match step with
+      | 0 ->
+          (* An unresolvable handle is a failed call, recorded as such. *)
+          Ok
+            (tool_call_response ~name:"send"
+               ~input:
+                 (json_object
+                    [
+                      ("to", Json.string "sibling:nope");
+                      ("message", Json.string "psst");
+                    ])
+               "misaddressing")
+      | 1 ->
+          if request_contains request "unknown recipient" then
+            saw_bad_handle := true;
+          Ok
+            (tool_call_response ~name:"send"
+               ~input:
+                 (json_object
+                    [
+                      ("to", Json.string "parent");
+                      ("message", Json.string "the scan finished");
+                    ])
+               "replying")
+      | _ -> Ok (plain_response "CHILD_DONE")
+    end
+  in
+  with_engine ~script:(capped_script ~cap:20 script)
+    (fun ~sw:_ ~client ~store ~engine:_ ->
+      submit_ok client
+        (prompt ~session:(sid "root") ~turn:(tid "t-reply") "PLEASE_SPAWN");
+      (* Two parent settles: the spawn turn, then the queued reply's turn. *)
+      ignore (drain_n_settled 2 (follow_ok client (sid "root")));
+      is_true ~msg:"the misaddressed send failed loudly at the child"
+        !saw_bad_handle;
+      is_true
+        ~msg:"the parent's next turn saw the framed reply, sender and body"
+        !saw_reply;
+      match List.filter is_child_key (session_keys store) with
+      | [ child ] ->
+          let root =
+            match Hashtbl.find_opt store.sessions "root" with
+            | Some session -> session
+            | None -> fail "the root document is missing"
+          in
+          let queued_reply =
+            List.exists
+              (fun event ->
+                match event with
+                | Session.Event.Queue_updated
+                    (Session.Queue.Update.Enqueued entry) -> (
+                    match Session.Queue.Entry.origin entry with
+                    | Some (Session.Origin.Agent sender) ->
+                        String.equal (Session.Id.to_string sender) child
+                    | _ -> false)
+                | _ -> false)
+              (Session.events root)
+          in
+          is_true
+            ~msg:"the reply is a durable queue fact with the child's origin"
+            queued_reply;
+          let child_session =
+            match Hashtbl.find_opt store.sessions child with
+            | Some session -> session
+            | None -> fail "the child document is missing"
+          in
+          let receipts =
+            List.filter_map
+              (fun event ->
+                match event with
+                | Session.Event.Message_appended
+                    (Llm.Message.Tool_result result)
+                  when not (Llm.Tool.Result.is_error result) ->
+                    Some (String.concat "\n" (Llm.Tool.Result.texts result))
+                | _ -> None)
+              (Session.events child_session)
+          in
+          is_true ~msg:"the child transcript holds the parent-send receipt"
+            (List.exists
+               (contains_sub ~sub:"Message recorded for parent")
+               receipts)
+      | _ -> fail "expected exactly one child")
+
+(* The framing is a pure function of the typed origin and the receiver's own
+   recorded facts: a parent origin frames as "your parent", an unknown agent
+   as its bare session id, the owner not at all — and the body rides behind
+   the frame unchanged, in its own blocks. *)
+let queued_input_frames_the_sender () =
+  let delegated_from =
+    Session.Metadata.Delegated_from.make ~parent:(sid "parent-1")
+      ~delegation:(Session.Delegation.Id.of_string "d-1")
+  in
+  let child =
+    Session.create ~id:(sid "child-1") ~delegated_from ~cwd
+      ~created_at:(Session.Time.of_unix_ms 1L) ()
+  in
+  let entry ?origin () =
+    Session.Queue.Entry.make ?origin
+      ~id:(Session.Queue.Id.of_string "q-1")
+      ~input:[ Llm.Content.text "body text" ]
+      ()
+  in
+  let texts entry_v =
+    List.map
+      (function
+        | Llm.Content.Text text -> text
+        | Llm.Content.Media _ -> fail "framing must not mint media")
+      (Step.queued_input child entry_v)
+  in
+  (match texts (entry ()) with
+  | [ "body text" ] -> ()
+  | other -> failf "owner mail must pass verbatim, got %d blocks" (List.length other));
+  (match
+     texts (entry ~origin:(Session.Origin.agent (sid "parent-1")) ())
+   with
+  | [ frame; "body text" ] ->
+      is_true ~msg:"the parent origin frames as the parent"
+        (contains_sub ~sub:"your parent (session parent-1)" frame);
+      is_true ~msg:"the frame fences the body as sender material"
+        (contains_sub ~sub:"never instructions from your owner" frame)
+  | other -> failf "expected frame and body, got %d blocks" (List.length other));
+  match texts (entry ~origin:(Session.Origin.agent (sid "drifter")) ()) with
+  | [ frame; "body text" ] ->
+      is_true ~msg:"an unrecorded agent frames as its bare session id"
+        (contains_sub ~sub:"session drifter" frame)
+  | other -> failf "expected frame and body, got %d blocks" (List.length other)
 
 (* A raising adapter on the idle-boundary admission path must fault only
    its own driver, never escape into the shared switch. A queued entry on root
@@ -4852,7 +5025,7 @@ let a_reaped_brokered_child_releases_capacity () =
         (List.length !materialized))
 
 (* The parent journey behind the delivery-seam tests: spawn, then one
-   [send_message] and/or [follow_up] addressed by the receipt handle, then
+   [send] and/or [follow_up] addressed by the receipt handle, then
    done. Parent requests carry "PLEASE_SPAWN" for the turn's life. *)
 let message_script ~verbs =
   let child_id = ref None in
@@ -4873,15 +5046,21 @@ let message_script ~verbs =
         incr step;
         match List.nth_opt verbs n with
         | Some (name, message) ->
-            Ok
-              (tool_call_response ~name
-                 ~input:
-                   (json_object
-                      [
-                        ("child", Json.string id);
-                        ("message", Json.string message);
-                      ])
-                 "messaging")
+            let input =
+              if String.equal name "send" then
+                json_object
+                  [
+                    ("to", Json.string ("child:" ^ id));
+                    ("message", Json.string message);
+                  ]
+              else
+                json_object
+                  [
+                    ("child", Json.string id);
+                    ("message", Json.string message);
+                  ]
+            in
+            Ok (tool_call_response ~name ~input "messaging")
         | None -> Ok (plain_response "PARENT_DONE"))
   end
   else Ok (plain_response "CHILD_SEEN")
@@ -4904,7 +5083,7 @@ let a_brokered_message_crosses_the_broker_send () =
   let script =
     message_script
       ~verbs:
-        [ ("send_message", "extra context"); ("follow_up", "one more thing") ]
+        [ ("send", "extra context"); ("follow_up", "one more thing") ]
   in
   with_engine ~script:(capped_script ~cap:20 script) ~child_backend ~broker
     (fun ~sw:_ ~client ~store ~engine:_ ->
@@ -4966,7 +5145,7 @@ let same_edge_messages_deliver_in_order () =
   let _materialized, child_backend = brokered_spy () in
   let script =
     message_script
-      ~verbs:[ ("send_message", "first"); ("send_message", "second") ]
+      ~verbs:[ ("send", "first"); ("send", "second") ]
   in
   with_engine ~script:(capped_script ~cap:20 script) ~child_backend ~broker
     (fun ~sw:_ ~client ~store:_ ~engine:_ ->
@@ -5023,7 +5202,7 @@ let an_undelivered_message_redrives_at_the_next_attach () =
           `Undelivered "the target's fence stayed held")
     in
     let _materialized, child_backend = brokered_spy () in
-    let script = message_script ~verbs:[ ("send_message", "extra context") ] in
+    let script = message_script ~verbs:[ ("send", "extra context") ] in
     let engine1 =
       mk_engine ~sw ~store
         ~script:(capped_script ~cap:20 script)
@@ -6603,6 +6782,10 @@ let () =
           test "recovery re-drives a lost child" recovery_redrives_a_lost_child;
           test "a spawn never faults the parent turn"
             a_spawn_at_the_depth_cap_fails_the_call_not_the_turn;
+          test "a child replies to its parent by mail"
+            a_child_replies_to_its_parent_by_mail;
+          test "queued input frames the sender from the typed origin"
+            queued_input_frames_the_sender;
           test "the model addresses a spawned child by the receipt handle"
             the_model_addresses_a_spawned_child_by_the_receipt_handle;
           test "a raising admission faults only its own driver"

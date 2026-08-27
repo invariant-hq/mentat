@@ -34,8 +34,8 @@ type t = private {
   max_spawn_depth : int;
       (** Delegation depth cap: a session at this depth cannot spawn. *)
   max_exchanges : int;
-      (** Model-origin child messages per delegation edge ([send_message] and
-          [follow_up] receipts both count). *)
+      (** Model-origin child messages per delegation edge (child-addressed
+          [send] and [follow_up] receipts both count). *)
 }
 (** The type for resolved per-session engine configuration. *)
 

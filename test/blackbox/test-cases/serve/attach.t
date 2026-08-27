@@ -82,7 +82,7 @@ rendering only, no behavior change).
   $ wait_for_file capture/request-2.json
   $ mentat session archive slow --cwd "$PWD" 2>&1 | censor | mentat_cram subst 'pid \$PID on \S+' 'pid $PID on $HOST'
   mentat: session slow is busy with another driver
-  pid $PID on $HOST
+  serve-mount (pid $PID on $HOST
   the mentat daemon drives this session; re-run with --attach
   [1]
   $ kill -9 "$SLOW_PID" 2>/dev/null; kill -9 "$MENTAT_FAKE_PROVIDER_PID" 2>/dev/null; wait "$SLOW_PID" 2>/dev/null; wait "$MENTAT_FAKE_PROVIDER_PID" 2>/dev/null; true

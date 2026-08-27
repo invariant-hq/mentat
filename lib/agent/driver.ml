@@ -55,7 +55,7 @@ type hooks = {
     [ `Granted | `Refused of Mentat_agent_step.Step.Reservation.Refusal.t ];
   release_permit : delegation:Mentat_session.Delegation.Id.t -> unit;
   observe_delegation : Mentat_session.Delegation.t -> unit;
-  deliver_message : Mentat_agent_step.Step.Child_message.t -> unit;
+  deliver_message : Mentat_agent_step.Step.Mail.t -> unit;
   settled_children :
     Mentat_session.Delegation.Id.t list ->
     (Mentat_session.Delegation.Id.t * Scheduler.child_result) list;
@@ -443,8 +443,8 @@ let commit_step t step =
                             (compaction_result_of_outcome outcome)
                       | Some _ | None -> t.hooks.on_turn_settled ~turn outcome)
                   | Mentat_session.Event.Message_appended _ as event -> (
-                      (* A settled send_message/follow_up receipt commits here;
-                     the runtime routes the recorded message to the child. *)
+                      (* A settled send/follow_up receipt commits here; the
+                     runtime routes the recorded message to its target. *)
                       match Mentat_agent_step.settled_message session event with
                       | Some message -> t.hooks.deliver_message message
                       | None -> ())
@@ -566,10 +566,14 @@ and admission t =
         | None -> (
             match Mentat_agent_step.next_admission (state t) with
             | Mentat_agent_step.Admission.Queued entry ->
+                (* An origin-bearing entry is framed from its typed origin —
+                   the sender named from this session's own recorded facts,
+                   the body fenced as sender material; an owner entry is its
+                   content verbatim. *)
                 start_build_turn t cfg
                   ~input:
                     (Mentat_session.Turn.Input.user
-                       (Mentat_session.Queue.Entry.input entry))
+                       (Mentat_agent_step.queued_input t.session entry))
                   ~origin:
                     (Mentat_session.Turn.Origin.Queued
                        (Mentat_session.Queue.Entry.id entry))
@@ -1107,7 +1111,7 @@ and handle_any t msg ~mid_effect =
       let resolve r = Eio.Promise.resolve ack r in
       match t.phase with
       | Faulted e -> resolve (Error (unavailable e))
-      | _ ->
+      | _ -> (
           let id = Mentat_session.Queue.Entry.id entry in
           let delivered =
             (* A consumed entry's [Enqueued] fact still proves delivery: the
@@ -1117,11 +1121,36 @@ and handle_any t msg ~mid_effect =
           in
           if delivered then resolve (Ok ())
           else
-            journal_commit t ~ack:resolve
-              [
-                Mentat_session.Event.queue_updated
-                  (Mentat_session.Queue.Update.enqueued entry);
-              ])
+            (* The same admit judgment as the wire and fence-held arms — the
+               in-process arm must not be the one admission a full mailbox or
+               an unadmitted sender can slip through. *)
+            match
+              Mentat_session.admits_mail
+                ~origin:(Mentat_session.Queue.Entry.origin entry)
+                t.session
+            with
+            | `Refused_sender ->
+                resolve
+                  (Error
+                     (Mentat_protocol.Error.unavailable
+                        (Printf.sprintf
+                           "session %s does not accept this sender's mail"
+                           (Mentat_session.Id.to_string t.io.session_id))))
+            | `Refused_backlog ->
+                resolve
+                  (Error
+                     (Mentat_protocol.Error.unavailable
+                        (Printf.sprintf
+                           "session %s's mailbox is full for this sender \
+                            (backlog cap %d)"
+                           (Mentat_session.Id.to_string t.io.session_id)
+                           Mentat_session.mail_backlog_cap)))
+            | `Admitted ->
+                journal_commit t ~ack:resolve
+                  [
+                    Mentat_session.Event.queue_updated
+                      (Mentat_session.Queue.Update.enqueued entry);
+                  ]))
   | Stop -> (
       t.stopping <- true;
       if not mid_effect then
@@ -1173,28 +1202,39 @@ and handle_command t command ~mid_effect ~ack =
                  client-minted id makes the at-least-once resubmission
                  idempotent, exactly as the in-process enqueue op's dedup. *)
               ack (Ok ())
-          | Some _ | None ->
-              (* The accept judgment, after the dedup exactly as the broker's
+          | Some _ | None -> (
+              (* The admit judgment, after the dedup exactly as the broker's
                  fence-held append runs it: an origin the session's recorded
-                 facts do not admit is a structured refusal, never a committed
-                 fact. *)
-              if not (Mentat_session.accepts_mail ~origin t.session) then
-                ack
-                  (Error
-                     (Mentat_protocol.Error.unavailable
-                        (Printf.sprintf
-                           "session %s does not accept this sender's mail"
-                           (Mentat_session.Id.to_string t.io.session_id))))
-              else
-                let id =
-                  match id with Some id -> id | None -> mint_queue_id t
-                in
-                journal_commit t ~ack
-                  [
-                    Mentat_session.Event.queue_updated
-                      (Mentat_session.Queue.Update.enqueued
-                         (Mentat_session.Queue.Entry.make ?origin ~id ~input ()));
-                  ]))
+                 facts do not admit, or one whose unconsumed backlog is at the
+                 cap, is a structured refusal, never a committed fact. *)
+              match Mentat_session.admits_mail ~origin t.session with
+              | `Refused_sender ->
+                  ack
+                    (Error
+                       (Mentat_protocol.Error.unavailable
+                          (Printf.sprintf
+                             "session %s does not accept this sender's mail"
+                             (Mentat_session.Id.to_string t.io.session_id))))
+              | `Refused_backlog ->
+                  ack
+                    (Error
+                       (Mentat_protocol.Error.unavailable
+                          (Printf.sprintf
+                             "session %s's mailbox is full for this sender \
+                              (backlog cap %d)"
+                             (Mentat_session.Id.to_string t.io.session_id)
+                             Mentat_session.mail_backlog_cap)))
+              | `Admitted ->
+                  let id =
+                    match id with Some id -> id | None -> mint_queue_id t
+                  in
+                  journal_commit t ~ack
+                    [
+                      Mentat_session.Event.queue_updated
+                        (Mentat_session.Queue.Update.enqueued
+                           (Mentat_session.Queue.Entry.make ?origin ~id ~input
+                              ()));
+                    ])))
   | Mentat_protocol.Command.Replace_queued { inputs; _ } -> (
       let rec externalize_all acc = function
         | [] -> Ok (List.rev acc)

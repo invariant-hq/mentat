@@ -47,7 +47,8 @@ from it, so the store itself is exercised end to end).
 `--latest` scopes to the most recent editing turn; with one turn it names the
 same net change.
 
-  $ mentat session diff rev-run --latest 2>&1 | head -n 1
+  $ mentat session diff rev-run --latest >latest.diff 2>&1
+  $ head -n 1 latest.diff
   M note.txt
 
 A fork copies the parent's mutation ledger and blobs, so the child's diff and

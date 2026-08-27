@@ -1,5 +1,5 @@
 The delegation journey, blackbox through the binary: spawn -> wait ->
-send_message -> follow_up, against the daemon's brokered child backend — the
+send -> follow_up, against the daemon's brokered child backend — the
 child runs as a detached per-session server the daemon's broker spawns, and
 its settlement integrates into the parent through the broker's observation.
 The two content-derived identities — the parent-minted child session id and
@@ -152,7 +152,7 @@ server. Both address the child by the delegation id from the receipt, and
 both keep driving after the parent's turn settles.
 
   $ cat > stage3.jsonl <<JSONL
-  > {"expect":{"body_contains":["PLEASE_MESSAGE"],"body_not_contains":["sm-call"]},"response":{"id":"r5","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"sm-item","call_id":"sm-call","name":"send_message","arguments":"{\"child\":\"$DELEG\",\"message\":\"extra context\"}"}]}}
+  > {"expect":{"body_contains":["PLEASE_MESSAGE"],"body_not_contains":["sm-call"]},"response":{"id":"r5","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"sm-item","call_id":"sm-call","name":"send","arguments":"{\"to\":\"child:$DELEG\",\"message\":\"extra context\"}"}]}}
   > {"expect":{"body_contains":["extra context"],"body_not_contains":["PLEASE_MESSAGE"]},"response":{"id":"rc3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"CHILD_CONTEXT_SEEN"}]}]}}
   > {"expect":{"body_contains":["sm-call"],"body_not_contains":["fu-call"]},"response":{"id":"r6","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"fu-item","call_id":"fu-call","name":"follow_up","arguments":"{\"child\":\"$DELEG\",\"message\":\"one more thing\"}"}]}}
   > {"expect":{"body_contains":["one more thing"],"body_not_contains":["PLEASE_MESSAGE"]},"response":{"id":"rc4","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"CHILD_FOLLOWUP_DONE"}]}]}}

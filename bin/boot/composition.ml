@@ -106,6 +106,11 @@ type t = {
      supplied before the instance exists. [None] is the in-process default —
      the CLI's single-runtime shape; the daemon supplies a brokered backend. *)
   child_backend : (t -> Engine.Ports.child_backend) option;
+  (* Transitional, with the serve-mount bridge itself: whether this instance's
+     engine serves each driven session's derived socket beside its driver.
+     When set, the instance's fence owner carries the serve-mount label, so a
+     send's wire arm dials what the mount serves. *)
+  serve_mount : bool;
   (* The process broker the engine sends through. The daemon passes its one
      node broker; absent, engine assembly constructs an instance-owned one
      whose spawn resolver refuses — this process materializes no per-session
@@ -492,7 +497,14 @@ let stage_store_reported ~stdenv ~sw ~dirs ~getenv ?data_home () =
         | None -> message)
 
 let make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
-    ~review_base ?owner_label ?child_backend ?broker () : t =
+    ~review_base ?owner_label ?child_backend ?broker ?(serve_mount = false) ()
+    : t =
+  let owner_label =
+    match owner_label with
+    | Some _ as label -> label
+    | None when serve_mount -> Some Mentat_broker.serve_mount_owner_label
+    | None -> None
+  in
   {
     shared;
     root;
@@ -508,6 +520,7 @@ let make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
     staged_default = None;
     listing_refresh_at = Hashtbl.create 4;
     child_backend;
+    serve_mount;
     broker;
     owned_broker = None;
     engine = None;
@@ -540,7 +553,8 @@ let build_base ~stdenv ~sw ~cwd ~overrides ?data_home ?review_base () :
   let shared = { dirs; runtime; store; environment; stdenv; sw } in
   Ok
     (make_instance ~shared ~sw ~root ~trusted ~config
-       ~environment:shared.environment ~overrides ~review_base ())
+       ~environment:shared.environment ~overrides ~review_base
+       ~serve_mount:true ())
 
 (* The daemon path: the per-user shared stage opened once under the owning
    switch. It stages the same dirs/runtime/store the CLI path does, in that
@@ -563,7 +577,7 @@ let stage_shared ~stdenv ~sw ?data_home () : (shared, Exit_status.t) result =
    one switch). No store is opened here — the shared handle is reused, which is
    what keeps the fence's same-process half honest. *)
 let instance shared ~sw ~cwd ~overrides ?environment ?review_base ?owner_label
-    ?child_backend ?broker () : (t, Exit_status.t) result =
+    ?child_backend ?broker ?serve_mount () : (t, Exit_status.t) result =
   let ( let* ) = Result.bind in
   let environment = Option.value environment ~default:shared.environment in
   let getenv = environment_get environment in
@@ -575,7 +589,7 @@ let instance shared ~sw ~cwd ~overrides ?environment ?review_base ?owner_label
   in
   Ok
     (make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
-       ~review_base ?owner_label ?child_backend ?broker ())
+       ~review_base ?owner_label ?child_backend ?broker ?serve_mount ())
 
 (* The engine's drivers are long-lived fibers under the instance switch; shut
    them down so the switch can close instead of blocking on idle drivers. The
@@ -2558,7 +2572,7 @@ let build_execution_layer t : (execution_layer, Exit_status.t) result =
   in
   let module Verb = Engine.Catalog.Verb in
   let collaboration =
-    [ Verb.Spawn; Verb.Wait; Verb.Send_message; Verb.Follow_up ]
+    [ Verb.Spawn; Verb.Wait; Verb.Send; Verb.Follow_up ]
   in
   let build_verbs = [ Verb.Todo_write; Verb.Ask_user ] @ collaboration in
   let plan_verbs = [ Verb.Ask_user; Verb.Propose_plan ] @ collaboration in
@@ -3210,6 +3224,33 @@ let expand_command_responder t ~name ~arguments =
                      reason = file_error.Mentat_context.Commands.reason;
                    })))
 
+(* The process's send path. A daemon hands every instance its one node
+   broker; an instance without one (the CLI's single-runtime shape, the
+   per-session server) gets its own, able to send — the fence-held append,
+   the socket dial — but refusing to spawn: nothing hands this process a
+   child to materialize, and a consulted resolver would mean a wiring bug.
+   One construction, shared by engine assembly and the engine-free senders
+   ([mentat session send]); an owned broker is stopped by {!shutdown}, its
+   fibers living under the instance switch. *)
+let mail_broker t =
+  match t.broker with
+  | Some broker -> broker
+  | None -> (
+      match t.owned_broker with
+      | Some broker -> broker
+      | None ->
+          let broker =
+            Mentat_broker.create ~sw:t.switch ~stdenv:t.shared.stdenv
+              ~store:t.shared.store
+              ~resolve_bin:(fun () ->
+                Error "this process materializes no per-session servers")
+              ~socket_base:(User_dirs.daemon_socket_dir t.shared.dirs)
+              ~log_dir:(User_dirs.daemon_dir t.shared.dirs)
+              ~now:(fun () -> now_time t)
+          in
+          t.owned_broker <- Some broker;
+          broker)
+
 (* The raw multi-source driver record and the two execution-layer handles the
    TUI needs alongside it, built once and cached in [t.assembled]. It assembles
    the engine (cached in [t.engine]) and fills the composition-root cones. The
@@ -3266,33 +3307,30 @@ let build_driver t :
     | None -> Engine.Ports.In_process
     | Some backend -> backend t
   in
-  (* The engine's send path. A daemon hands every instance its one node
-     broker; an instance without one (the CLI's single-runtime shape, the
-     per-session server) gets its own, able to send — the fence-held append,
-     the socket dial — but refusing to spawn: nothing hands this process a
-     child to materialize, and a consulted resolver would mean a wiring
-     bug. *)
-  let broker =
-    match t.broker with
-    | Some broker -> broker
-    | None ->
-        let broker =
-          Mentat_broker.create ~sw:t.switch ~stdenv:t.shared.stdenv
-            ~store:t.shared.store
-            ~resolve_bin:(fun () ->
-              Error "this process materializes no per-session servers")
-            ~socket_base:(User_dirs.daemon_socket_dir t.shared.dirs)
-            ~log_dir:(User_dirs.daemon_dir t.shared.dirs)
-            ~now:(fun () -> now_time t)
-        in
-        t.owned_broker <- Some broker;
-        broker
+  let broker = mail_broker t in
+  (* The transitional serve-mount hook: the engine applies it at each driver
+     registration, so a session this instance drives is dialable over its
+     derived socket while driven. It closes over the driver record assembled
+     below through a set-once cell — a mount can only fire at a driver
+     attach, which is only reachable after assembly returns. *)
+  let mounted_driver = ref None in
+  let serve_mount =
+    if not t.serve_mount then None
+    else
+      Some
+        (fun ~session ->
+          match !mounted_driver with
+          | None -> None
+          | Some driver ->
+              Serve_mount.mount ~sw:t.switch ~stdenv:t.shared.stdenv
+                ~store:t.shared.store ~dirs:t.shared.dirs ~driver ~root:t.root
+                ~session)
   in
   let engine =
     Engine.create ~sw:t.switch ~store:store_port ~provider:provider_call
       ~config:(config_callback t ~product_rules:build_product_rules)
       ~now:(fun () -> now_time t)
-      ~max_children ~child_backend ~broker ~execution_for_mode
+      ~max_children ~child_backend ~broker ?serve_mount ~execution_for_mode
       ~delegated_execution ()
   in
   t.engine <- Some engine;
@@ -3307,6 +3345,7 @@ let build_driver t :
         workspace_cone t build_capability ~base_spec:(review_base_spec t);
     }
   in
+  mounted_driver := Some driver_record;
   Ok (driver_record, read_capability, shell)
 
 let assemble t =

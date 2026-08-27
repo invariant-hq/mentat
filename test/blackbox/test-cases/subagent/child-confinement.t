@@ -56,7 +56,7 @@ session, submitted straight at the child endpoint.
 The lifecycle cone is refused whole.
 
   $ MENTAT_DAEMON_SOCKET="$SOCK" mentat session list --attach --cwd "$PWD/work" 2>&1 | censor
-  mentat: this server serves one delegated session; accounts, settings, lifecycle, review, and workspace operations belong to the daemon
+  mentat: this server serves one session; accounts, settings, lifecycle, review, and workspace operations belong to its owner
   [1]
 
 The positive control: the child's own id passes the confinement and reaches

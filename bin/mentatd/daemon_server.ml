@@ -122,7 +122,12 @@ let boot registry ~root ~environment =
           ~overrides:[] ?environment
           ~child_backend:(fun instance ->
             Mentat_agent.Ports.Brokered (broker_ops registry.broker instance))
-          ~broker:registry.broker ()
+          ~broker:registry.broker
+            (* The transitional serve-mount: a session this instance's engine
+               drives — a brokered child's parent above all — is dialable
+               over its derived socket, so a child's reply crosses the wire
+               instead of dying against the daemon's held fence. *)
+          ~serve_mount:true ()
       with
       | Error status -> Eio.Promise.resolve set_ready (Error status)
       | Ok instance -> (

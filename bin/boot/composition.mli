@@ -105,6 +105,7 @@ val instance :
   ?owner_label:string ->
   ?child_backend:(t -> Mentat_agent.Ports.child_backend) ->
   ?broker:Mentat_broker.t ->
+  ?serve_mount:bool ->
   unit ->
   (t, Exit_status.t) result
 (** [instance shared ~sw ~cwd ~overrides ?environment ?review_base ()] stages
@@ -132,7 +133,14 @@ val instance :
     single-runtime path. [broker] is the process broker the instance's engine
     sends recorded child messages through; a daemon passes its one node
     broker, and an instance without one gets its own at engine assembly —
-    able to send, refusing to spawn. A staging failure (an unresolvable root,
+    able to send, refusing to spawn. [serve_mount] (default [false];
+    {!with_base} sets it) is the transitional serve-mount bridge: the
+    instance's engine serves each driven session's derived socket beside its
+    driver, and the instance's fence owner carries
+    {!Mentat_broker.serve_mount_owner_label} so a send's wire arm dials what
+    the mount serves; an explicit [owner_label] wins over the mount label.
+    The per-session child server leaves it off — it serves its one socket
+    itself, under the serving label. A staging failure (an unresolvable root,
     malformed config) is an {!Exit_status.Runtime_error}. *)
 
 val shutdown : t -> unit
@@ -272,6 +280,16 @@ val driver : t -> (Mentat_client.Driver.t, Exit_status.t) result
     [mentat.server] ever hold it: [bin] wraps it with {!Mentat_client.make} and
     the daemon serves it over the wire, so a frontend only ever receives a
     {!Mentat_client.t}. [Error] exactly as {!client}'s prefix. *)
+
+val mail_broker : t -> Mentat_broker.t
+(** [mail_broker t] is the broker this process sends mail through — the
+    daemon-passed node broker when the instance was staged with one, else an
+    instance-owned broker built (and cached) on first use: able to send — the
+    fence-held append, the socket dial — while refusing to spawn. It is the
+    same broker engine assembly links, and it never assembles the engine:
+    an engine-free command ([mentat session send]) reaches
+    {!Mentat_broker.send} through it directly. An owned broker's fibers live
+    under the instance switch and are stopped by {!shutdown}. *)
 
 (** {2:broker The child broker's engine reach}
 
