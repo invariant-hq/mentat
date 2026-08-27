@@ -4300,11 +4300,12 @@ let delegation_group =
 (* Replay algebra. *)
 
 let mail_group =
-  group "mail acceptance"
+  let admitted verdict = match verdict with `Admitted -> true | _ -> false in
+  group "mail admission"
     [
-      test "the accept judgment admits kin and the owner, and only them"
+      test "the admit judgment admits kin and the owner, and only them"
         (fun () ->
-          (* A parent holding a recorded edge accepts its child's mail. *)
+          (* A parent holding a recorded edge admits its child's mail. *)
           let t, base = mid_turn [ tool_call () ] in
           let edge =
             Session.Delegation.make ~child:(session_id "child-1")
@@ -4315,24 +4316,27 @@ let mail_group =
           let parent =
             saved ~id:"parent-1" (base @ [ Event.delegation_recorded edge ])
           in
-          is_true ~msg:"the owner (no origin) is accepted"
-            (Session.accepts_mail ~origin:None parent);
-          is_true ~msg:"a recorded child is accepted"
-            (Session.accepts_mail
-               ~origin:(Some (Session.Origin.agent (session_id "child-1")))
-               parent);
-          is_false ~msg:"a stranger is refused"
-            (Session.accepts_mail
+          is_true ~msg:"the owner (no origin) is admitted"
+            (admitted (Session.admits_mail ~origin:None parent));
+          is_true ~msg:"a recorded child is admitted"
+            (admitted
+               (Session.admits_mail
+                  ~origin:(Some (Session.Origin.agent (session_id "child-1")))
+                  parent));
+          is_true ~msg:"a stranger is refused"
+            (Session.admits_mail
                ~origin:(Some (Session.Origin.agent (session_id "stranger")))
-               parent);
-          is_false ~msg:"a trigger origin is refused"
-            (Session.accepts_mail
+               parent
+            = `Refused_sender);
+          is_true ~msg:"a trigger origin is refused"
+            (Session.admits_mail
                ~origin:
                  (Some
                     (Session.Origin.trigger ~source:"nightly" ~digest:"d0"
                        ~key:"k0"))
-               parent);
-          (* A delegated child accepts its recorded parent. *)
+               parent
+            = `Refused_sender);
+          (* A delegated child admits its recorded parent. *)
           let child =
             ok_or "child session"
               (Session.make ~id:(session_id "child-1")
@@ -4345,14 +4349,76 @@ let mail_group =
                       ~cwd ~created_at:(time 1) ~updated_at:(time 2) ())
                  ~events:[])
           in
-          is_true ~msg:"the recorded parent is accepted"
-            (Session.accepts_mail
-               ~origin:(Some (Session.Origin.agent (session_id "parent-1")))
-               child);
-          is_false ~msg:"a sibling is refused"
-            (Session.accepts_mail
+          is_true ~msg:"the recorded parent is admitted"
+            (admitted
+               (Session.admits_mail
+                  ~origin:(Some (Session.Origin.agent (session_id "parent-1")))
+                  child));
+          is_true ~msg:"a sibling is refused"
+            (Session.admits_mail
                ~origin:(Some (Session.Origin.agent (session_id "child-2")))
-               child));
+               child
+            = `Refused_sender));
+      test "the backlog cap refuses a sender's unconsumed pile, and only its own"
+        (fun () ->
+          (* A parent with a recorded edge holds unconsumed entries from its
+             child: at the cap the child is refused, the owner and a second
+             child stay admitted, and consumption frees the slot. *)
+          let t, base = mid_turn [ tool_call () ] in
+          let edge child call =
+            Session.Delegation.make ~child:(session_id child)
+              ~source_turn:(Session.Turn.id t) ~source_call:call
+              ~task:[ Llm.Content.text "Explore." ]
+              ()
+          in
+          let origin child = Some (Session.Origin.agent (session_id child)) in
+          let enqueued i =
+            Event.queue_updated
+              (Session.Queue.Update.enqueued
+                 (Session.Queue.Entry.make
+                    ?origin:(origin "child-1")
+                    ~id:(queue_id (Printf.sprintf "q-%d" i))
+                    ~input:[ Llm.Content.text "ping" ]
+                    ()))
+          in
+          let backlog =
+            List.init Session.mail_backlog_cap (fun i -> enqueued i)
+          in
+          let events =
+            base
+            @ [
+                Event.delegation_recorded (edge "child-1" "call-1");
+                Event.delegation_recorded (edge "child-2" "call-2");
+              ]
+            @ backlog
+          in
+          let parent = saved ~id:"parent-1" events in
+          is_true ~msg:"the piled-up sender is refused at the cap"
+            (Session.admits_mail ~origin:(origin "child-1") parent
+            = `Refused_backlog);
+          is_true ~msg:"a different child is not charged for the pile"
+            (admitted (Session.admits_mail ~origin:(origin "child-2") parent));
+          is_true ~msg:"the owner is never capped"
+            (admitted (Session.admits_mail ~origin:None parent));
+          (* Consuming one entry frees exactly one slot: the receipt of the
+             consumed entry persists, so the cap provably counts the pending
+             queue, never the lifetime record. *)
+          let consumed =
+            saved ~id:"parent-1"
+              (events
+              @ [
+                  Event.message_appended
+                    (Llm.Message.tool_result
+                       (Llm.Tool.Result.text (tool_call ()) "done"));
+                  finish t;
+                  Event.turn_started
+                    (turn ~id:"t-consume"
+                       ~origin:(Session.Turn.Origin.Queued (queue_id "q-0"))
+                       ());
+                ])
+          in
+          is_true ~msg:"consumption frees the sender's slot"
+            (admitted (Session.admits_mail ~origin:(origin "child-1") consumed)));
     ]
 
 let replay_group =

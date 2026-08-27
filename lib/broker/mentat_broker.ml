@@ -33,6 +33,14 @@ let socket_dir ~base ~session =
    tell a preemptable child server from a holder it must never signal. *)
 let serve_owner_label = "serve-session"
 
+(* Transitional (dies at the eviction rung, with the in-process drivers it
+   labels): the serving label an in-process driver host — an interactive
+   process or a daemon-hosted engine — holds its fences under while its
+   serve-mount bridge serves the derived socket beside the driver. Dialable
+   like the child-server label, but never preemptable: the holder is a live
+   host the escalation ladder must not signal. *)
+let serve_mount_owner_label = "serve-mount"
+
 (* The custodial label a send acquires the target's fence under while it
    appends mail to a dormant session's journal. A custodial hold is a brief
    labeled hold that releases on its own — never a driver — so every probe
@@ -47,20 +55,23 @@ let custodial_label label =
 
 (* The one fence-owner classification: a custodial label is a transient the
    observer re-probes; the serving label on a same-host owner is a dialable
-   per-session child server; anything else — an interactive driver, an
-   unreadable label, a foreign host — is a holder no loop here may reach.
-   [probe_fence] maps it onto the decision table's vocabulary and the send
-   loop matches it directly, so the two can never drift on the host
-   conjunction. *)
+   per-session child server; the mount label on a same-host owner is a
+   dialable in-process host the ladder must never signal; anything else — an
+   unlabeled interactive driver, an unreadable label, a foreign host — is a
+   holder no loop here may reach. [probe_fence] maps it onto the decision
+   table's vocabulary and the send loop matches it directly, so the two can
+   never drift on the host conjunction. *)
 let classify_owner owner =
+  let same_host () =
+    String.equal (Mentat_store.Run_lock.Owner.host owner) (Unix.gethostname ())
+  in
   match Mentat_store.Run_lock.Owner.label owner with
   | Some label when custodial_label label -> `Custodial
-  | Some label
-    when String.equal label serve_owner_label
-         && String.equal
-              (Mentat_store.Run_lock.Owner.host owner)
-              (Unix.gethostname ()) ->
+  | Some label when String.equal label serve_owner_label && same_host () ->
       `Server (Mentat_store.Run_lock.Owner.pid owner)
+  | Some label when String.equal label serve_mount_owner_label && same_host ()
+    ->
+      `Mount
   | Some _ | None -> `Other
 
 module Engine = struct
@@ -168,7 +179,7 @@ let probe_fence t entry () : Reconcile.fence =
         match classify_owner owner with
         | `Custodial -> `Custodial
         | `Server pid -> `Held (Some pid)
-        | `Other -> `Held None)
+        | `Mount | `Other -> `Held None)
 
 let root_string entry = Lpath.Abs.to_string entry.engine.Engine.root
 
@@ -765,30 +776,42 @@ let append_under_fence t ?origin ~target ~id ~input () =
           let session = Mentat_store.Session.Document.session document in
           let state = Mentat_session.state session in
           if Mentat_session.State.enqueue_recorded id state then `Delivered
-          else if not (Mentat_session.accepts_mail ~origin session) then
-            `Undelivered
-              (Printf.sprintf "session %s does not accept this sender's mail"
-                 (Mentat_session.Id.to_string target))
           else
-            let entry = Mentat_session.Queue.Entry.make ?origin ~id ~input () in
-            match
-              Mentat_session.append_all
-                [
-                  Mentat_session.Event.queue_updated
-                    (Mentat_session.Queue.Update.enqueued entry);
-                ]
-                session
-            with
-            | Error e -> `Undelivered (Mentat_session.Error.message e)
-            | Ok appended -> (
-                let stamped = Mentat_session.touch (t.now ()) appended in
+            match Mentat_session.admits_mail ~origin session with
+            | `Refused_sender ->
+                `Undelivered
+                  (Printf.sprintf
+                     "session %s does not accept this sender's mail"
+                     (Mentat_session.Id.to_string target))
+            | `Refused_backlog ->
+                `Undelivered
+                  (Printf.sprintf
+                     "session %s's mailbox is full for this sender (backlog \
+                      cap %d)"
+                     (Mentat_session.Id.to_string target)
+                     Mentat_session.mail_backlog_cap)
+            | `Admitted -> (
+                let entry =
+                  Mentat_session.Queue.Entry.make ?origin ~id ~input ()
+                in
                 match
-                  Mentat_store.Session.commit t.store ~fence:guard document
-                    stamped
+                  Mentat_session.append_all
+                    [
+                      Mentat_session.Event.queue_updated
+                        (Mentat_session.Queue.Update.enqueued entry);
+                    ]
+                    session
                 with
-                | Ok (_ : Mentat_store.Session.Document.t) -> `Delivered
-                | Error e ->
-                    `Undelivered (Mentat_store.Session.Error.message e))))
+                | Error e -> `Undelivered (Mentat_session.Error.message e)
+                | Ok appended -> (
+                    let stamped = Mentat_session.touch (t.now ()) appended in
+                    match
+                      Mentat_store.Session.commit t.store ~fence:guard document
+                        stamped
+                    with
+                    | Ok (_ : Mentat_store.Session.Document.t) -> `Delivered
+                    | Error e ->
+                        `Undelivered (Mentat_store.Session.Error.message e)))))
 
 (* The wire arm, for a target a per-session server drives: dial the derived
    socket and submit the entry as a [Queue_next] on one short-lived
@@ -886,7 +909,7 @@ let send t ?origin ?(budget_s = grace_s) ~target ~id ~input () =
               (* Another brief hold is in flight; never dial, never
                  preempt. *)
               retry (Some owner)
-          | `Server _ -> (
+          | `Server _ | `Mount -> (
               (* One dial may not outrun what remains of the budget. *)
               let timeout_s =
                 Float.min grace_s (Float.max 0. (budget_s -. elapsed ()))

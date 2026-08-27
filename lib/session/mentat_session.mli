@@ -190,15 +190,28 @@ val events : t -> Event.t list
 val state : t -> State.t
 (** [state t] is [t]'s validated replay projection. *)
 
-val accepts_mail : origin:Origin.t option -> t -> bool
-(** [accepts_mail ~origin t] is [true] iff [t] accepts a queue entry
-    attributed to [origin] — the one accept judgment every queue admission
-    runs, whether a live driver admits the entry or a sender appends it to
-    [t]'s dormant journal under the run fence, so the two admissions cannot
-    drift. Admitted: the owner (an absent origin, {!Origin}), [t]'s recorded
-    delegation parent, and [t]'s own recorded delegation children; a
-    {!Origin.Trigger} origin is refused. Acceptance gates admission only —
-    an admitted origin remains attribution, never authority. *)
+val mail_backlog_cap : int
+(** [mail_backlog_cap] is the per-sender bound on unconsumed queue entries one
+    session will hold — the count {!admits_mail} refuses at, [8]. Admission
+    consumes one entry per turn boundary, so a full backlog is already several
+    turns of unread mail from one sender; consumption frees the sender's
+    slots. The owner's own entries are never counted or capped. *)
+
+val admits_mail :
+  origin:Origin.t option ->
+  t ->
+  [ `Admitted | `Refused_sender | `Refused_backlog ]
+(** [admits_mail ~origin t] judges a queue entry attributed to [origin] — the
+    one admit judgment every queue admission runs, whether a live driver
+    admits the entry or a sender appends it to [t]'s dormant journal under
+    the run fence, so the admissions cannot drift. The owner (an absent
+    origin, {!Origin}) is always [`Admitted]. [t]'s recorded delegation
+    parent and [t]'s own recorded delegation children are [`Admitted] while
+    fewer than {!mail_backlog_cap} of the sender's entries are still
+    unconsumed, [`Refused_backlog] at the cap. Any other sender — a
+    {!Origin.Trigger} origin included — is [`Refused_sender]. Admission gates
+    delivery only — an admitted origin remains attribution, never
+    authority. *)
 
 val media_refs : t -> Mentat_digest.Content_ref.t list
 (** [media_refs t] is the content references of every model-visible media block

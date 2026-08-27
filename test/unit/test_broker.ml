@@ -324,6 +324,49 @@ let loud_refusals () =
   | `Undelivered _ -> ());
   equal int ~msg:"no refusal committed anything" 0 (event_count store ~id:"child")
 
+(* The backlog cap runs at admission under the target's fence: the cap-th
+   unconsumed entry from one sender lands, the next is a loud undelivered
+   answer that commits nothing, and the owner's mail stays uncapped through
+   the same full mailbox. *)
+let a_full_mailbox_is_a_loud_send_failure () =
+  let contains_sub ~sub s =
+    let ls = String.length s and lsub = String.length sub in
+    let rec go i =
+      i + lsub <= ls && (String.equal (String.sub s i lsub) sub || go (i + 1))
+    in
+    go 0
+  in
+  with_broker "backlog" @@ fun ~sw:_ ~clock:_ ~store ~broker ~socket_base:_ ->
+  create_root store ~id:"parent";
+  create_child store ~id:"child" ~parent:"parent";
+  let origin = Session.Origin.agent (sid "parent") in
+  for i = 1 to Session.mail_backlog_cap do
+    match
+      Broker.send broker ~origin ~target:(sid "child")
+        ~id:(qid (Printf.sprintf "q-%d" i))
+        ~input:(text "ping") ()
+    with
+    | `Delivered -> ()
+    | `Undelivered reason -> failf "send %d undelivered: %s" i reason
+  done;
+  let events = event_count store ~id:"child" in
+  (match
+     Broker.send broker ~origin ~target:(sid "child") ~id:(qid "q-over")
+       ~input:(text "one too many") ()
+   with
+  | `Delivered -> fail "a full mailbox must refuse the sender"
+  | `Undelivered reason ->
+      is_true ~msg:"the refusal names the full mailbox"
+        (contains_sub ~sub:"mailbox is full" reason));
+  equal int ~msg:"the refusal committed nothing" events
+    (event_count store ~id:"child");
+  match
+    Broker.send broker ~target:(sid "child") ~id:(qid "q-owner")
+      ~input:(text "owner mail") ()
+  with
+  | `Delivered -> ()
+  | `Undelivered reason -> failf "the owner must never be capped: %s" reason
+
 let () =
   run "mentat.broker"
     [
@@ -340,5 +383,7 @@ let () =
           test "racing sends commit in acquisition order"
             racing_sends_commit_in_acquisition_order;
           test "loud refusals" loud_refusals;
+          test "a full mailbox is a loud send failure"
+            a_full_mailbox_is_a_loud_send_failure;
         ];
     ]

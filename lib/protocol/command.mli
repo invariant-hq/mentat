@@ -133,9 +133,10 @@ type t = private
               commits. Absent means the owner sent the input
               ({!Mentat_session.Origin}). Admission judges it — the engine
               refuses an entry whose sender the target session's recorded
-              facts do not admit ({!Mentat_session.accepts_mail}) — but an
-              admitted origin is attribution, never authority: it changes
-              nothing about how the entry is consumed. *)
+              facts do not admit, or whose unconsumed backlog is at the cap
+              ({!Mentat_session.admits_mail}) — but an admitted origin is
+              attribution, never authority: it changes nothing about how the
+              entry is consumed. *)
       input : Mentat_llm.Content.t list;
     }
   | Replace_queued of {

@@ -173,25 +173,43 @@ let metadata t = t.metadata
 let events t = List.rev t.events_rev
 let state t = t.state
 
-(* The accept judgment over the target's own recorded facts — the honest floor
+(* The admit judgment over the target's own recorded facts — the honest floor
    while only delegation kin and the owner send. One home, consumed by every
    queue admission (a live driver's, and a fence-held append on a dormant
-   journal), so the arms cannot drift. *)
-let accepts_mail ~origin t =
+   journal), so the arms cannot drift. The backlog cap counts unconsumed
+   entries only — consumption frees the sender's slots — and never counts the
+   owner: backpressure bounds agents, not the human whose account this is. *)
+let mail_backlog_cap = 8
+
+let admits_mail ~origin t =
   match origin with
-  | None -> true
-  | Some (Origin.Trigger _) -> false
-  | Some (Origin.Agent sender) ->
+  | None -> `Admitted
+  | Some (Origin.Trigger _) -> `Refused_sender
+  | Some (Origin.Agent sender as sender_origin) ->
       let is_parent =
         match Metadata.delegated_from t.metadata with
         | None -> false
         | Some lineage ->
             Id.equal (Metadata.Delegated_from.parent lineage) sender
       in
-      is_parent
-      || List.exists
-           (fun edge -> Id.equal (Delegation.child edge) sender)
-           (State.delegations t.state)
+      let is_kin =
+        is_parent
+        || List.exists
+             (fun edge -> Id.equal (Delegation.child edge) sender)
+             (State.delegations t.state)
+      in
+      if not is_kin then `Refused_sender
+      else
+        let backlog =
+          List.length
+            (List.filter
+               (fun entry ->
+                 match Queue.Entry.origin entry with
+                 | Some o -> Origin.equal o sender_origin
+                 | None -> false)
+               (State.pending_queue t.state))
+        in
+        if backlog >= mail_backlog_cap then `Refused_backlog else `Admitted
 
 let require_not_deleted t =
   if Metadata.is_deleted t.metadata then Error Error.Deleted else Ok ()
