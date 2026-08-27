@@ -1143,7 +1143,7 @@ let all_verbs =
       Propose_plan;
       Spawn;
       Wait;
-      Send_message;
+      Send;
       Follow_up;
     ]
 

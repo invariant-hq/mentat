@@ -1105,10 +1105,13 @@ let argument_projections =
         [ ("children", Json.list [ Json.string "a"; Json.string "b" ]) ],
       Some "a, b" );
     ( "send message recipient",
-      "send_message",
+      "send",
       json_object
-        [ ("child", Json.string "worker-1"); ("message", Json.string "hi") ],
-      Some "worker-1" );
+        [
+          ("to", Json.string "child:worker-1");
+          ("message", Json.string "hi");
+        ],
+      Some "child:worker-1" );
     ( "follow up recipient",
       "follow_up",
       json_object

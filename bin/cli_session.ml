@@ -1793,6 +1793,80 @@ let compact_cmd =
          const compact $ Cli_common.json $ compact_model_opt
          $ Cli_common.session_arg $ Cli_common.last $ Cli_common.cwd))
 
+(* send. *)
+
+(* The owner's mail surface: an owner-origin send (no origin member — absence
+   is the one spelling of "the owner sent this") to any session in the store,
+   through the broker's one delivery loop. The returned [`Undelivered] IS the
+   handling — the printed reason and a nonzero exit; nothing pretends to
+   retry. Sending never wakes: a dormant target keeps the mail durably until
+   something next runs it. *)
+let send json session_arg text cwd =
+  Composition.with_base ~cwd ~overrides:[] (fun t ->
+      match Session_locate.resolve t ~session:(Some session_arg) ~last:false with
+      | Error error -> Session_locate.status error
+      | Ok d ->
+          if String.equal (String.trim text) "" then
+            Exit_status.usage "message must not be empty"
+          else
+            let target = Document.id d in
+            let id =
+              Session.Queue.Id.of_string (Session_meta.fresh_id ~prefix:"q" ())
+            in
+            let input = [ Mentat_llm.Content.text text ] in
+            match
+              Mentat_broker.send (Composition.mail_broker t) ~target ~id ~input
+                ()
+            with
+            | `Undelivered reason -> Exit_status.runtime reason
+            | `Delivered ->
+                if json then
+                  Output.stdout_printf "%s\n"
+                    (Output.Json.to_string
+                       (Output.Json.envelope ~type_:"session.send"
+                          [
+                            ("session", Output.Json.string (Id.to_string target));
+                            ("result", Output.Json.string "delivered");
+                          ]))
+                else
+                  Output.stdout_printf "delivered %s\n" (Id.to_string target);
+                Exit_status.Success)
+
+let send_session_arg =
+  Arg.(
+    required
+    & pos 0 (some string) None
+    & info [] ~docv:"SESSION" ~doc:"The target session id or unique prefix.")
+
+let send_text_arg =
+  Arg.(
+    required
+    & pos 1 (some string) None
+    & info [] ~docv:"TEXT" ~doc:"The message text.")
+
+let send_cmd =
+  let doc = "Mail a message into a session's queue." in
+  let man =
+    [
+      `S "DESCRIPTION";
+      `P
+        "$(b,mentat session send) lands TEXT durably in the target session's \
+         next-turn queue, as the session owner. The session reads it at its \
+         next turn boundary; sending never starts a turn — a dormant session \
+         keeps the mail until something next runs it.";
+      `P
+        "Delivery is durable-or-loud: success means the queue entry is in \
+         the target's journal; an undelivered send prints the reason and \
+         exits nonzero.";
+    ]
+  in
+  Cmd.v
+    (Cmd.info "send" ~doc ~man ~docs ~exits:Cli_common.exits)
+    (Exit_status.term
+       Term.(
+         const send $ Cli_common.json $ send_session_arg $ send_text_arg
+         $ Cli_common.cwd))
+
 let cmd =
   let doc = "Manage sessions." in
   Cmd.group
@@ -1813,4 +1887,5 @@ let cmd =
       revert_cmd;
       export_cmd;
       compact_cmd;
+      send_cmd;
     ]
