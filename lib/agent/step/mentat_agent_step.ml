@@ -1115,78 +1115,24 @@ let last_provider_failure_is_overflow session turn_id =
     false
     (active_turn_events session turn_id)
 
-(* The active turn's workspace observations, rendered as one system message
-   leading the request. Each notice is a durable {!Event.Workspace_notice} the
-   turn saw; the request injects this turn's own and no other's, the windowed,
-   replay-faithful record of what the turn was told. The body is the notice's
-   whole multi-line text — the model reads the full observation, exactly what
-   the transcript renders for the human.
-
-   Every one of the turn's observations is stated, in the order they arrived,
-   and none is dropped in favour of a later one from the same producer. A
-   producer is free to report a state ({e the build is failing}) or a delta
-   ({e these six files changed since the last scan}), and the port does not say
-   which: collapsing a source to its latest reading would be right for the first
-   and would silently discard the earlier file lists of the second. Producers
-   that would otherwise repeat themselves suppress their own unchanged readings
-   at the drain, so the sequence a turn accumulates is already the sequence
-   worth reading. *)
-let render_notices notices =
-  let render notice =
-    let severity =
-      Format.asprintf "%a" Mentat_session.Notice.Severity.pp
-        (Mentat_session.Notice.severity notice)
-    in
-    let body =
-      match Mentat_session.Notice.body notice with
-      | Some body -> "\n" ^ body
-      | None -> ""
-    in
-    Printf.sprintf "- [%s] %s: %s%s" severity
-      (Mentat_session.Notice.source notice)
-      (Mentat_session.Notice.title notice)
-      body
-  in
-  Mentat_prompts.Notices.header ^ "\n"
-  ^ String.concat "\n" (List.map render notices)
-
-(* A turn's request carries two kinds of host prelude alongside the durable
-   context [env] holds: the active turn's workspace notices (this turn's own,
-   read from the durable journal, never a later turn's), and — for a
-   schema-constrained turn — the structured-output delivery instruction, escalated
-   with a pointed reminder once the model has whiffed ([output_nudges]). The
-   session admits injected user messages only at turn boundaries, so the prelude
-   is the sanctioned mid-turn host channel; the escalation also keeps successive
-   re-issues distinct alongside the growing transcript. Notices lead the
-   output-tool messages, matching the durable-context-first, ephemeral-last read
-   order. *)
-let request_prelude env session turn_id contract =
-  let notice_messages =
-    match
-      Mentat_session.State.active_turn_notices (Mentat_session.state session)
-    with
-    | [] -> []
-    | notices -> [ Mentat_llm.Message.system (render_notices notices) ]
-  in
-  let output_messages =
-    match Mentat_session.Contract.output_tool contract with
-    | None -> []
-    | Some output_tool ->
-        Mentat_llm.Message.system
-          Mentat_prompts.Tools.structured_output_instruction
-        ::
-        (if output_nudges (Mentat_llm.Tool.name output_tool) session turn_id > 0
-         then
-           [
-             Mentat_llm.Message.system
-               Mentat_prompts.Tools.structured_output_reminder;
-           ]
-         else [])
-  in
-  match notice_messages @ output_messages with
-  | [] -> env.Env.prelude
-  | messages -> (
-      match Mentat_llm.Request.Prelude.append env.Env.prelude messages with
+(* The request prelude is the durable context [env] holds plus, for a
+   schema-constrained turn, the structured-output delivery instruction —
+   stable content only, so the conversation head never moves between
+   requests and the provider prefix cache survives the session. Everything
+   time-varying the model must see — workspace notices, the whiff
+   reminder — is an ordinary entry in the durable transcript, projected by
+   {!Mentat_session.State} at its event position. *)
+let request_prelude env _session _turn_id contract =
+  match Mentat_session.Contract.output_tool contract with
+  | None -> env.Env.prelude
+  | Some _ -> (
+      match
+        Mentat_llm.Request.Prelude.append env.Env.prelude
+          [
+            Mentat_llm.Message.system
+              Mentat_prompts.Tools.structured_output_instruction;
+          ]
+      with
       | Ok prelude -> prelude
       | Error _ -> env.Env.prelude)
 

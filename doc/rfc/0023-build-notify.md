@@ -379,15 +379,45 @@ the stated set is silent; a different set is stated as the difference from
 the last notice, however old — the model was told nothing in between, so
 nothing in between is owed.
 
-**Model-visible text** (`render_notices`, `lib/agent/step/
-mentat_agent_step.ml:1133-1150`, unchanged): title `Build failing (n errors
+**Model-visible delivery.** The law: {e what the model was shown is part
+of the model's durable transcript — bytes and position frozen the moment a
+request shows them}. A notice is one journal fact (`Workspace_notice`)
+with two projections: the human transcript's ⊙ row, and an {e ordinary
+user-role conversation entry} in the model view — `Workspace notices:`
+then every pending notice as `- [severity] source: title` plus its body,
+one entry per drain batch, placed in event order at the next request-ready
+seam (a user message cannot sit between a tool call and its result, so a
+notice recorded mid-settlement waits the few events until results
+complete). Entries append at the tail of history and are frozen once any
+later message lands, so the request prefix — the system prompt above all —
+never moves and the provider cache survives every notice. Replay
+reconstructs the same bytes at the same positions: the model can re-read
+what it was told, whenever it was told it.
+
+This law replaced a request-scoped {e prelude} injection that carried the
+active turn's notices before the transcript on every request — and, on
+OpenAI, hoisted them into the `instructions` field. Two failures, both
+observed live: the model's later history carried no trace of what it had
+been shown (it quoted a notice correctly, then recanted as
+"hallucinated" — faithful to a falsified history), and every notice change
+mutated the conversation head, invalidating the whole prefix cache. The
+same law covers the structured-output nudge — the schema-delivery reminder
+escalated after a whiff — which rode the same prelude and mutated the head
+mid-turn; it too is an ordinary entry now. The driver's carried
+"unstated notices" memory and its duplicate re-record against the next
+turn delete: a pending entry is replay-derived state, and a turn that dies
+before a request leaves it pending for the next one by construction.
+Old journals replay under the new projection — their historical requests
+did not carry these entries; the discontinuity is accepted rather than
+versioned (pre-release).
+
+**Body text** (unchanged shape): title `Build failing (n errors
 [, m warnings]: k new, r resolved)`; body = every fresh finding as
 `path:l:c-l:c: head`, the path workspace-relative (dune reports absolute
 paths; columns are ocamlc's 0-based end-exclusive offsets), then
-`n unchanged since the last notice`; at most 20
-findings then `… and k more` — a notice rides every continuation request of
-its turn, and 20 lines is ≈ 0.5 KTok per request. Sources `dune` and `lint`;
-keys `dune.build`, `dune.lint`, `dune.watch` (coalescing per
+`n unchanged since the last notice`; at most 20 findings then `… and k
+more` — ≈ 0.5 KTok, paid once per batch, not per request. Sources `dune`
+and `lint`; keys `dune.build`, `dune.lint`, `dune.watch` (coalescing per
 `notice.mli:64-79`).
 
 **The drain.** `drain_notices` (`lib/agent/ports.mli:335-347`) becomes a
