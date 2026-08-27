@@ -201,7 +201,14 @@ val make :
     and [["ocamlfind"]]. The composition root owns executable discovery and
     supplies [opam_switch_prefix] only when its [lib/] is admitted as a readable
     root of [workspace_io]. [None] deliberately disables the classic-switch
-    source fallback while preserving project-tree dependencies.
+    source fallback while preserving project-tree dependencies. The fallback
+    is an opam-world affordance by design: it exists for switch-installed
+    dependencies whose sources never enter the project tree. A dune-pkg
+    project never arms it and loses nothing — every locked package, the
+    compiler package included, materializes beneath the project build tree
+    and is read through the workspace capability, so the fallback's
+    precondition (an external dependency with no in-workspace source) does
+    not arise for lock dependencies.
 
     Raises [Invalid_argument] if a program prefix is empty; a program token is
     empty or contains NUL; or [opam_switch_prefix] is empty, contains NUL, or is
