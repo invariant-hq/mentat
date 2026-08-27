@@ -17,6 +17,7 @@ module Model = struct
     | Assistant_delta of { text : string }
     | Reasoning_delta of { text : string }
     | Usage of Mentat_llm.Usage.t
+    | Tool_input of { name : string option; received : int }
     | Retrying of Mentat_llm.Event.Retry.t
 
   let equal a b =
@@ -27,8 +28,12 @@ module Model = struct
     | Reasoning_delta { text = a }, Reasoning_delta { text = b } ->
         String.equal a b
     | Usage a, Usage b -> Mentat_llm.Usage.equal a b
+    | Tool_input a, Tool_input b ->
+        Option.equal String.equal a.name b.name
+        && Int.equal a.received b.received
     | Retrying a, Retrying b -> Mentat_llm.Event.Retry.equal a b
-    | ( (Started | Assistant_delta _ | Reasoning_delta _ | Usage _ | Retrying _),
+    | ( ( Started | Assistant_delta _ | Reasoning_delta _ | Usage _
+        | Tool_input _ | Retrying _ ),
         _ ) ->
         false
 end
@@ -110,6 +115,7 @@ let pp ppf t =
     | Model { update = Model.Assistant_delta _; _ } -> "model.assistant_delta"
     | Model { update = Model.Reasoning_delta _; _ } -> "model.reasoning_delta"
     | Model { update = Model.Usage _; _ } -> "model.usage"
+    | Model { update = Model.Tool_input _; _ } -> "model.tool_input"
     | Model { update = Model.Retrying _; _ } -> "model.retrying"
     | Model_download { update = { Model_download.phase; _ }; _ } -> (
         match phase with
@@ -198,6 +204,25 @@ let jsont =
     |> Jsont.Object.error_unknown |> Jsont.Object.finish
     |> Jsont.Object.Case.map "model.usage" ~dec:Fun.id
   in
+  let tool_input_case =
+    Jsont.Object.map ~kind:"tool-input progress" (fun turn name received ->
+        Option.iter
+          (fun name ->
+            if String.is_empty name then
+              decode_error "name must not be empty when present")
+          name;
+        if received < 1 then decode_error "received must be positive";
+        Model { turn; update = Model.Tool_input { name; received } })
+    |> turn_mem
+    |> Jsont.Object.opt_mem "name" Jsont.string ~enc:(function
+      | Model { update = Model.Tool_input { name; _ }; _ } -> name
+      | _ -> assert false)
+    |> Jsont.Object.mem "received" Jsont.int ~enc:(function
+      | Model { update = Model.Tool_input { received; _ }; _ } -> received
+      | _ -> assert false)
+    |> Jsont.Object.error_unknown |> Jsont.Object.finish
+    |> Jsont.Object.Case.map "model.tool_input" ~dec:Fun.id
+  in
   let retrying_case =
     let retry = function
       | Model { update = Model.Retrying retry; _ } -> retry
@@ -258,6 +283,7 @@ let jsont =
         assistant_delta_case;
         reasoning_delta_case;
         usage_case;
+        tool_input_case;
         retrying_case;
         model_download_case;
         compaction_started_case;
@@ -274,6 +300,8 @@ let jsont =
         Jsont.Object.Case.value reasoning_delta_case p
     | Model { update = Model.Usage _; _ } as p ->
         Jsont.Object.Case.value usage_case p
+    | Model { update = Model.Tool_input _; _ } as p ->
+        Jsont.Object.Case.value tool_input_case p
     | Model { update = Model.Retrying _; _ } as p ->
         Jsont.Object.Case.value retrying_case p
     | Model_download _ as p -> Jsont.Object.Case.value model_download_case p

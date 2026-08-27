@@ -131,6 +131,13 @@ type retrying = {
   retry_reason : string;
 }
 
+type writing = {
+  writing_name : string option; (* The tool once the stream has named it. *)
+  writing_received : int;
+      (* Cumulative input bytes of that call — each pulse carries the whole
+         count, so the latest pulse alone is rendered. *)
+}
+
 type acc = {
   phase : phase;
   turn_started : float;
@@ -146,6 +153,7 @@ type acc = {
   step_output : int;
   compacting : bool;
   downloading : Progress.Model_download.t option;
+  writing : writing option;
   retrying : retrying option;
   provider_failure_reported : Provider_request.Id.t option;
   goal : Goal.Update.t option;
@@ -168,6 +176,7 @@ let initial =
     step_output = 0;
     compacting = false;
     downloading = None;
+    writing = None;
     retrying = None;
     provider_failure_reported = None;
     goal = None;
@@ -195,6 +204,12 @@ let token_text count =
       else text
     in
     text ^ "k"
+
+let byte_text bytes =
+  if bytes < 1024 then string_of_int bytes ^ " B"
+  else if bytes < 1024 * 1024 then
+    Printf.sprintf "%.1f KB" (Float.of_int bytes /. 1024.)
+  else Printf.sprintf "%.1f MB" (Float.of_int bytes /. (1024. *. 1024.))
 
 let duration_text seconds =
   if seconds < 60 then string_of_int seconds ^ "s"
@@ -700,6 +715,7 @@ let clear_model acc =
     step_output = 0;
     compacting = false;
     downloading = None;
+    writing = None;
     retrying = None;
   }
 
@@ -1051,6 +1067,7 @@ let progress acc pulse =
             step_output = 0;
             compacting = false;
             downloading = None;
+            writing = None;
             retrying = None;
           }
       | Progress.Model.Assistant_delta { text } ->
@@ -1067,6 +1084,13 @@ let progress acc pulse =
           {
             acc with
             step_output = Mentat_llm.Usage.output_total usage;
+            retrying = None;
+          }
+      | Progress.Model.Tool_input { name; received } ->
+          {
+            acc with
+            writing = Some { writing_name = name; writing_received = received };
+            compacting = false;
             retrying = None;
           }
       | Progress.Model.Retrying retry ->
@@ -1436,7 +1460,15 @@ let working_row acc =
               (String.capitalize_ascii retry.retry_reason)
               retry.retry_attempt retry.retry_limit
               (Float.round retry.retry_delay)
-        | None -> if acc.compacting then "Compacting…" else "Working…"
+        | None -> (
+            if acc.compacting then "Compacting…"
+            else
+              match acc.writing with
+              | Some { writing_name; writing_received } ->
+                  Printf.sprintf "Writing %s… · %s"
+                    (Option.value writing_name ~default:"tool call")
+                    (byte_text writing_received)
+              | None -> "Working…")
     in
     [
       Html.El.div

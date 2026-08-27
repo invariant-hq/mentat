@@ -2758,6 +2758,56 @@ let the_feed_ring_drops_oldest_progress_keeping_committed () =
         (List.init capacity (fun i -> string_of_int (i + 44)))
         deltas)
 
+(* Tool-input streaming reaches the feed as liveness only: each pulse carries
+   the tool's name and that call's cumulative byte count — never the input
+   text — and a second call's counts start from zero. Follow [`Now] before
+   submit so the ring holds every pulse; drain like the flood test, since
+   committed facts serve before ring progress. *)
+let tool_input_streaming_pulses_cumulative_liveness () =
+  let input key name delta =
+    Llm.Event.tool_input_delta
+      (Llm.Event.Tool_input.make ~key ~name ~input_delta:delta ())
+  in
+  let script _request ~on_event ~on_download:_ ~cancelled:_ =
+    on_event (input "item-1" "edit_file" "{\"pa");
+    on_event (input "item-1" "edit_file" "th\":1}");
+    on_event (input "item-2" "shell" "{}");
+    Ok (plain_response "done")
+  in
+  with_engine ~script (fun ~sw:_ ~client ~store:_ ~engine:_ ->
+      let feed = follow_ok ~from:`Now client (sid "root") in
+      submit_ok client
+        (prompt ~session:(sid "root") ~turn:(tid "t-tool-input") "go");
+      let pulses = ref [] and settled = ref false in
+      let rec loop () =
+        if !settled && List.length !pulses >= 3 then ()
+        else
+          match Client.Feed.next feed with
+          | Error e -> failf "feed next: %a" Protocol.Error.pp e
+          | Ok Client.Feed.Closed -> ()
+          | Ok (Client.Feed.Item (Protocol.Update.Committed { fact; _ })) ->
+              if is_settled fact then settled := true;
+              loop ()
+          | Ok (Client.Feed.Item (Protocol.Update.Progress p)) ->
+              (match p with
+              | Protocol.Progress.Model
+                  {
+                    update =
+                      Protocol.Progress.Model.Tool_input { name; received };
+                    _;
+                  } ->
+                  pulses := (name, received) :: !pulses
+              | _ -> ());
+              loop ()
+      in
+      loop ();
+      Client.Feed.close feed;
+      equal
+        (list (pair (option string) int))
+        ~msg:"cumulative per-call snapshots, in stream order"
+        [ (Some "edit_file", 4); (Some "edit_file", 10); (Some "shell", 2) ]
+        (List.rev !pulses))
+
 (* Runtime: command admission. *)
 
 let a_queue_entry_is_admitted_at_the_idle_boundary () =
@@ -6513,6 +6563,8 @@ let () =
             follow_now_before_submit_delivers_the_turn;
           test "the feed ring drops oldest progress, keeping committed"
             the_feed_ring_drops_oldest_progress_keeping_committed;
+          test "tool-input streaming pulses cumulative liveness"
+            tool_input_streaming_pulses_cumulative_liveness;
           test "two feeds on one hub each read their own full suffix"
             two_feeds_on_one_hub_each_read_their_own_suffix;
           test "a follow-only hub is released when its last feed closes"

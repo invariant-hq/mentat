@@ -122,6 +122,13 @@ type retrying = {
          arrival plus its delay. Rendering counts down against [now]. *)
 }
 
+type writing = {
+  writing_name : string option; (* The tool once the stream has named it. *)
+  writing_received : int;
+      (* Cumulative input bytes of that call — each pulse carries the whole
+         count, so the latest pulse alone is rendered. *)
+}
+
 type t = {
   phase : phase;
   turn_started : float;
@@ -146,6 +153,9 @@ type t = {
   downloading : Progress.Model_download.t option;
       (* The latest artifact-preparation pulse of the active model call, or
          [None] once the artifact is ready or nothing needed preparing. *)
+  writing : writing option;
+      (* The latest tool-input pulse of the active model call, or [None]
+         outside tool-input streaming. *)
   retrying : retrying option;
       (* The latest retry announcement of the active model call, or [None]
          once an attempt gets through and the stream produces a pulse. *)
@@ -171,6 +181,7 @@ let idle =
     step_output = 0;
     compacting = false;
     downloading = None;
+    writing = None;
     retrying = None;
     provider_failure_reported = None;
   }
@@ -256,6 +267,7 @@ let clear_model t =
     step_output = 0;
     compacting = false;
     downloading = None;
+    writing = None;
   }
 
 let add_saturating a b = if b > max_int - a then max_int else a + b
@@ -676,6 +688,12 @@ let token_text count =
     in
     text ^ "k"
 
+let byte_text bytes =
+  if bytes < 1024 then string_of_int bytes ^ " B"
+  else if bytes < 1024 * 1024 then
+    Printf.sprintf "%.1f KB" (Float.of_int bytes /. 1024.)
+  else Printf.sprintf "%.1f MB" (Float.of_int bytes /. (1024. *. 1024.))
+
 (* The settled-turn receipt: the working line's live "(elapsed · ↓ tokens)"
    resolves into one muted event line so a completed turn confirms its cost
    instead of vanishing. Sub-second turns carry no receipt. *)
@@ -1074,6 +1092,7 @@ let progress ~now pulse t =
             step_output = 0;
             compacting = false;
             downloading = None;
+            writing = None;
             retrying = None;
           }
       | Progress.Model.Assistant_delta { text } ->
@@ -1091,6 +1110,13 @@ let progress ~now pulse t =
           {
             t with
             step_output = Mentat_llm.Usage.output_total usage;
+            retrying = None;
+          }
+      | Progress.Model.Tool_input { name; received } ->
+          {
+            t with
+            writing = Some { writing_name = name; writing_received = received };
+            compacting = false;
             retrying = None;
           }
       | Progress.Model.Retrying retry ->
@@ -1370,7 +1396,16 @@ let working_line ~palette ~now ~spinner t =
           if output = 0 then []
           else [ Printf.sprintf "↓ %s tokens" (token_text output) ]
         in
-        working (if reasoning_only then "Thinking" else "Working") extras
+        match t.writing with
+        | Some { writing_name; writing_received } ->
+            let verb =
+              match writing_name with
+              | Some name -> "Writing " ^ name
+              | None -> "Writing tool call"
+            in
+            working verb (byte_text writing_received :: extras)
+        | None ->
+            working (if reasoning_only then "Thinking" else "Working") extras
     in
     Some
       (box ~flex_direction:Flex_direction.Row ~min_size:zero_size

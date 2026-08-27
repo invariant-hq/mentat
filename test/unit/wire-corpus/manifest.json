@@ -67,6 +67,7 @@
     "progress.model.reasoning_delta",
     "progress.model.retrying",
     "progress.model.started",
+    "progress.model.tool_input",
     "progress.model.usage",
     "transcript.page",
     "transcript.tail",

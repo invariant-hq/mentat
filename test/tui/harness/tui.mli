@@ -80,6 +80,7 @@ module Turn_script : sig
     ?assistant_deltas:string list ->
     ?downloads:Mentat_protocol.Progress.Model_download.t list ->
     ?retries:Mentat_llm.Event.Retry.t list ->
+    ?tool_inputs:(string option * int) list ->
     ?reasoning_summary:string list ->
     ?usage:Mentat_llm.Usage.t ->
     ?task_boards:Mentat_session.Task.Board.t list ->
@@ -97,14 +98,18 @@ module Turn_script : sig
       [Started] pulse, so a held frame with no assistant deltas renders the live
       download line. [retries], when present, are folded as retry-announcement
       pulses after [downloads] and before any delta, so a held frame with no
-      assistant deltas renders the live retry line. The first [task_boards]
-      value, when present, enters as the durable
-      {!Mentat_protocol.Fact.Journal_task_board} fact; release subsequent
-      whole-board replacements in order with {!next_task_board}. Each [notices]
-      value enters as a durable {!Mentat_session.Event.Workspace_notice}
-      recorded against the turn immediately after its [Turn_started], exactly as
-      the engine records the observations a turn starts with; a script places
-      none later in the turn. Each [tools] entry is emitted through the real
+      assistant deltas renders the live retry line. Each [tool_inputs] entry is
+      a tool-input liveness pulse — the tool name (when the stream had named it)
+      and the call's cumulative input byte count — folded after the deltas, so
+      the held frame renders the live writing line the way a step generating
+      tool calls does. The first [task_boards] value, when present, enters as
+      the durable {!Mentat_protocol.Fact.Journal_task_board} fact; release
+      subsequent whole-board replacements in order with {!next_task_board}. Each
+      [notices] value enters as a durable
+      {!Mentat_session.Event.Workspace_notice} recorded against the turn
+      immediately after its [Turn_started], exactly as the engine records the
+      observations a turn starts with; a script places none later in the turn.
+      Each [tools] entry is emitted through the real
       [Tool_started]/[Tool_returned] lifecycle before the terminal assistant
       response; {!ambiguous_tool} emits [Tool_ambiguous] instead. [mutations] is
       an independent mutation-owner script whose call ids must name unique

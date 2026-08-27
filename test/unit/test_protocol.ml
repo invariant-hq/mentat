@@ -1514,6 +1514,14 @@ let all_progress =
           turn = fix_turn_id;
           update = Protocol.Progress.Model.Usage (usage ~input:9 ~output:4);
         } );
+    ( "model.tool_input",
+      Protocol.Progress.Model
+        {
+          turn = fix_turn_id;
+          update =
+            Protocol.Progress.Model.Tool_input
+              { name = Some "edit_file"; received = 4096 };
+        } );
     ( "model.retrying",
       Protocol.Progress.Model
         {
@@ -1824,6 +1832,17 @@ let progress_codec_group =
           assert_decode_error ~contains:"must not be empty" "empty message"
             Protocol.Progress.jsont
             (set_member "message" (Json.string "") failed));
+      test "decode rejects a malformed tool-input pulse" (fun () ->
+          let tool_input =
+            encode Protocol.Progress.jsont
+              (List.assoc "model.tool_input" all_progress)
+          in
+          assert_decode_error ~contains:"positive" "zero received"
+            Protocol.Progress.jsont
+            (set_member "received" (Json.int 0) tool_input);
+          assert_decode_error ~contains:"must not be empty" "empty name"
+            Protocol.Progress.jsont
+            (set_member "name" (Json.string "") tool_input));
       test "decode rejects malformed retry announcements" (fun () ->
           let retrying =
             encode Protocol.Progress.jsont

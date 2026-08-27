@@ -704,9 +704,15 @@ and exec t eff ~turn ~buffer ~stream_usage ~closer =
                  turn;
                  update = Mentat_protocol.Progress.Compaction.Started { reason };
                }));
+      (* Per-call cumulative input bytes, keyed by the provider's stream-local
+         output key. Scoped to this one call: a fresh effect streams fresh
+         counts. *)
+      let tool_input_bytes = Hashtbl.create 4 in
       Model_work
         (t.io.provider_call request
-           ~on_event:(model_event t ~turn ~purpose ~buffer ~stream_usage)
+           ~on_event:
+             (model_event t ~turn ~purpose ~buffer ~stream_usage
+                ~tool_input_bytes)
            ~on_download:(fun update ->
              pulse t (Mentat_protocol.Progress.Model_download { turn; update }))
            ~cancelled:(fun () -> Atomic.get t.flag))
@@ -720,7 +726,7 @@ and exec t eff ~turn ~buffer ~stream_usage ~closer =
       Tool_work
         (Mentat_tool.Call.run call ~cancelled:(fun () -> Atomic.get t.flag))
 
-and model_event t ~turn ~purpose ~buffer ~stream_usage event =
+and model_event t ~turn ~purpose ~buffer ~stream_usage ~tool_input_bytes event =
   match purpose with
   | `Compaction _ -> (
       match event with
@@ -748,8 +754,25 @@ and model_event t ~turn ~purpose ~buffer ~stream_usage event =
           stream_usage := Some usage;
           model (Mentat_protocol.Progress.Model.Usage usage)
       | Mentat_llm.Event.Retry retry ->
+          (* The announced attempt restarts the stream, so its input counts
+             restart with it. *)
+          Hashtbl.reset tool_input_bytes;
           model (Mentat_protocol.Progress.Model.Retrying retry)
-      | Mentat_llm.Event.Tool_input_delta _ | Mentat_llm.Event.Tool_call _ ->
+      | Mentat_llm.Event.Tool_input_delta input ->
+          (* Liveness only: the input text never crosses — the canonical call
+             is reconciled durably from the terminal response. The pulse is a
+             cumulative per-call snapshot, so the ring dropping any prefix of
+             pulses leaves the latest one whole. *)
+          let key = Mentat_llm.Event.Tool_input.key input in
+          let received =
+            Option.value (Hashtbl.find_opt tool_input_bytes key) ~default:0
+            + String.length (Mentat_llm.Event.Tool_input.input_delta input)
+          in
+          Hashtbl.replace tool_input_bytes key received;
+          model
+            (Mentat_protocol.Progress.Model.Tool_input
+               { name = Mentat_llm.Event.Tool_input.name input; received })
+      | Mentat_llm.Event.Tool_call _ ->
           (* Reconciled durably from the terminal response; never early-run. *)
           ())
 

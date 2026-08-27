@@ -215,6 +215,77 @@ let%expect_test "a retrying turn shows the announced wait in the working line" =
     24 |   ! not logged in · /login · ~/mentat… · openai/gpt-… · ! full access ? for s…
     |}]
 
+(* A step that generates tool calls streams no prose — only tool-input pulses.
+   The working line must name the tool being written and the input's byte
+   count rather than an opaque "Working…" that reads as a hang; each pulse
+   carries the whole count, so the latest alone is rendered. *)
+let%expect_test "a tool-writing turn names the tool in the working line" =
+  let turn =
+    Tui.Turn_script.complete ~prompt:"edit the file"
+      ~tool_inputs:[ (None, 213); (Some "edit_file", 4096) ]
+      "Edited."
+  in
+  Tui.run ~name:"writing" ~turns:[ turn ] @@ fun t ->
+  submit t "edit the file";
+  Tui.print t;
+  [%expect
+    {|
+    01 |
+    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium
+    03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-6c5c2486
+    04 |
+    05 | ❯ edit the file
+    06 |
+    07 | ⠋ Writing edit_file… (0s · 4.0 KB · esc to interrupt)
+    08 |
+    09 |
+    10 |
+    11 |
+    12 |
+    13 |
+    14 |
+    15 |
+    16 |
+    17 |
+    18 |
+    19 |
+    20 |
+    21 | ────────────────────────────────────────────────────────────────────────────────
+    22 | ❯ queue a message — sends after this turn
+    23 | ────────────────────────────────────────────────────────────────────────────────
+    24 |   ! not logged in · /login · ~/mentat… · openai/gpt-… · ! full access ? for s…
+    |}];
+  Tui.finish_turn t;
+  Tui.settle t;
+  Tui.print t;
+  [%expect
+    {|
+    01 |
+    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium
+    03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-6c5c2486
+    04 |
+    05 | ❯ edit the file
+    06 |
+    07 | ⏺ Edited.
+    08 |
+    09 |
+    10 |
+    11 |
+    12 |
+    13 |
+    14 |
+    15 |
+    16 |
+    17 |
+    18 |
+    19 |
+    20 |
+    21 | ────────────────────────────────────────────────────────────────────────────────
+    22 | ❯ message mentat
+    23 | ────────────────────────────────────────────────────────────────────────────────
+    24 |   ! not logged in · /login · ~/mentat… · openai/gpt-… · ! full access ? for s…
+    |}]
+
 (* A local model auto-downloads its weights on first use, inside the turn's
    first provider call. The working line must name the artifact and its byte
    progress rather than an opaque "Working…", and the interrupt affordance is

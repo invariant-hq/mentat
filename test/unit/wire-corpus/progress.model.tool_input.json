@@ -1,0 +1,7 @@
+{
+  "type": "model.tool_input",
+  "v": 1,
+  "turn": "turn-c",
+  "name": "edit_file",
+  "received": 4096
+}

@@ -503,6 +503,7 @@ let render_feed t ~client ~json ~session ~output_schema ~thinking ~terminal
                 | Protocol.Progress.Model.Assistant_delta _
                 | Protocol.Progress.Model.Reasoning_delta _
                 | Protocol.Progress.Model.Usage _
+                | Protocol.Progress.Model.Tool_input _
                 | Protocol.Progress.Model.Retrying _ ->
                     loop final_text terminal)
             | Protocol.Progress.Model _ | Protocol.Progress.Model_download _

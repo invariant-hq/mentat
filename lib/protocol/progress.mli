@@ -28,10 +28,16 @@
     [Text_delta] and [Reasoning_summary_delta] to {!Model.Assistant_delta} and
     {!Model.Reasoning_delta}, carries [Usage] and [Retry] (as {!Model.Retrying})
     verbatim, adds a synthetic {!Model.Started} the provider vocabulary has no
-    arm for, and deliberately omits [Tool_input_delta] and [Tool_call]: a tool
-    call's canonical input is reconciled durably from the terminal response and
-    projects as the {!Fact.Tool_started}/{!Fact.Tool_returned} facts, never an
-    early-run pulse, so streaming it here would race the durable projection.
+    arm for, and projects [Tool_input_delta] onto {!Model.Tool_input} with the
+    input text deliberately stripped: a tool call's canonical input is
+    reconciled durably from the terminal response and projects as the
+    {!Fact.Tool_started}/{!Fact.Tool_returned} facts, never an early-run pulse,
+    so the pulse carries only the call's liveness — the tool name and a
+    cumulative byte count, a snapshot whose latest arrival is the whole display
+    truth, never an increment a consumer accumulates. [Tool_call] stays omitted
+    entirely, superseded by those same facts. The liveness arm exists because a
+    step that streams only tool input would otherwise pulse nothing for its
+    whole generation, and the frontend would show an apparently hung call.
 
     The sums are non-private: an empty message is locally constructible and
     rejected by {!jsont}'s strict decode; the engine's pulse producers are the
@@ -50,6 +56,15 @@ module Model : sig
     | Reasoning_delta of { text : string }
     | Usage of Mentat_llm.Usage.t
         (** Per-step snapshot; the durable totals ride the turn's facts. *)
+    | Tool_input of { name : string option; received : int }
+        (** The stream is writing a tool call's input: [name] is the tool being
+            called once the provider has named it, and [received] is the
+            cumulative input bytes of that call so far — positive, and a
+            snapshot, so a dropped pulse only coarsens the latest count. A
+            provider retry restarts the stream and its counts with it.
+            Superseded by the {!Fact.Tool_started} the terminal response
+            commits; the input text itself is never carried (the omission law
+            above). *)
     | Retrying of Mentat_llm.Event.Retry.t
         (** The provider adapter announced an upcoming call retry; superseded by
             the next pulse of the same call — a delta once an attempt succeeds —

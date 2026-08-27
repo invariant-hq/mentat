@@ -149,6 +149,7 @@ module Turn_script = struct
     assistant_deltas : string list;
     downloads : Protocol.Progress.Model_download.t list;
     retries : Mentat_llm.Event.Retry.t list;
+    tool_inputs : (string option * int) list;
     usage : Mentat_llm.Usage.t option;
     task_boards : Session.Task.Board.t list;
     notices : Session.Notice.t list;
@@ -182,8 +183,8 @@ module Turn_script = struct
 
   let complete ?model ?reasoning_effort ?(reasoning_deltas = [])
       ?(assistant_deltas = []) ?(downloads = []) ?(retries = [])
-      ?reasoning_summary ?usage ?(task_boards = []) ?(notices = [])
-      ?(tools = []) ?(mutations = []) ~prompt text =
+      ?(tool_inputs = []) ?reasoning_summary ?usage ?(task_boards = [])
+      ?(notices = []) ?(tools = []) ?(mutations = []) ~prompt text =
     validate_prompt prompt;
     if String.equal text "" then
       invalid_arg "Tui.Turn_script.complete: response text must not be empty";
@@ -199,6 +200,7 @@ module Turn_script = struct
       assistant_deltas;
       downloads;
       retries;
+      tool_inputs;
       usage;
       task_boards;
       notices;
@@ -217,6 +219,7 @@ module Turn_script = struct
       assistant_deltas;
       downloads = [];
       retries = [];
+      tool_inputs = [];
       usage = None;
       task_boards;
       notices = [];
@@ -2157,6 +2160,10 @@ let dispatch_turn_progress fixture session turn (script : Turn_script.t) =
   List.iter
     (fun text -> emit (Protocol.Progress.Model.Assistant_delta { text }))
     script.Turn_script.assistant_deltas;
+  List.iter
+    (fun (name, received) ->
+      emit (Protocol.Progress.Model.Tool_input { name; received }))
+    script.Turn_script.tool_inputs;
   Option.iter
     (fun usage -> emit (Protocol.Progress.Model.Usage usage))
     script.Turn_script.usage
