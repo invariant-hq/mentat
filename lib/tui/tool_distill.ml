@@ -43,7 +43,7 @@ let verb_of_name = function
   | "propose_plan" -> Tool_block.Plan
   | "spawn" -> Tool_block.Task
   | "wait" -> Tool_block.Wait
-  | "send_message" -> Tool_block.Message
+  | "send" | "send_message" -> Tool_block.Message
   | "follow_up" -> Tool_block.Follow_up
   | name -> Tool_block.Other name
 

@@ -12,9 +12,11 @@
 
     Engine verbs are dispatch vocabulary, never executable tools: a verb call is
     evaluated by the step as a pure function of decoded input and session state.
-    The verb spellings are stable: [spawn], [wait], [send_message], and
-    [follow_up] for delegation, [todo_write], [ask_user], and [propose_plan]
-    for the product-native verbs. *)
+    The verb spellings are stable: [spawn], [wait], [send], and [follow_up]
+    for the collaboration verbs, [todo_write], [ask_user], and [propose_plan]
+    for the product-native verbs. Recorded calls under the retired
+    [send_message] spelling stay readable — the step's receipt scan decodes
+    them forever — but the name is no longer declared or dispatched. *)
 
 (** {1:verbs Engine verbs} *)
 
@@ -26,7 +28,9 @@ module Verb : sig
     | Propose_plan  (** Park a plan-proposal decision. *)
     | Spawn  (** Reserve and record a child delegation. *)
     | Wait  (** Park on named children until they settle. *)
-    | Send_message  (** Durable context into a child's journal. *)
+    | Send  (** Durable mail into a kin session's queue — a spawned child
+                ([to: "child:<id>"]) or this session's parent
+                ([to: "parent"]). *)
     | Follow_up  (** One new turn on an idle child. *)
 
   val name : t -> string

@@ -147,21 +147,31 @@ module Step : sig
         call's own decoded input — never from a journal heuristic. *)
   end
 
-  module Child_message : sig
+  module Mail : sig
+    (** Whom a recorded message addresses, resolved from the recording
+        session's own facts. *)
+    type target =
+      | Child of Mentat_session.Delegation.Id.t
+          (** One of the session's own recorded delegation edges. *)
+      | Parent
+          (** The session's recorded delegation parent — its
+              [delegated_from] lineage. *)
+
     type t = private {
       turn : Mentat_session.Turn.Id.t;
-          (** The parent turn whose verb call recorded the message. *)
+          (** The turn whose verb call recorded the message. *)
       call_id : string;  (** The recording model tool-call id. *)
       kind : [ `Context | `Follow_up ];
-          (** [`Context] is [send_message]; [`Follow_up] is [follow_up]. *)
-      child : Mentat_session.Delegation.Id.t;
-          (** The delegation edge the message targets. *)
+          (** [`Context] is [send] (and the retired [send_message]
+              spelling); [`Follow_up] is [follow_up], always to a
+              {!Child}. *)
+      target : target;  (** Whom the message addresses. *)
       message : string;  (** The message text, non-empty. *)
     }
-    (** A recorded parent-to-child message, decoded from the verb call whose
-        successful receipt is durable in the parent transcript — the delivery
-        carrier. [(turn, call_id)] is the stable key delivery derives its
-        idempotency id from. *)
+    (** A recorded model-origin message, decoded from the verb call whose
+        successful receipt is durable in the recording transcript — the
+        delivery carrier. [(turn, call_id)] is the stable key delivery
+        derives its idempotency id from. *)
   end
 
   (** The type for the single action after a commit. *)
@@ -479,26 +489,41 @@ val deliver_child :
     returns an empty-commit step re-reporting the same [Await_children ~wait]
     (idempotent). *)
 
-(** {1:messages Recorded child messages}
+(** {1:messages Recorded mail}
 
-    The durable carrier of a parent-to-child message is the parent transcript:
-    the [send_message]/[follow_up] call's decoded input plus its successful
-    receipt. The step records honestly — the receipt promises delivery at
+    The durable carrier of a recorded message is the recording transcript:
+    the [send]/[follow_up] call's decoded input plus its successful receipt.
+    The step records honestly — the receipt promises delivery at
     settlement — and the driver detects each settled receipt and routes
-    delivery; recovery re-drives receipts whose delivery never reached the child
-    journal. *)
+    delivery; recovery re-drives receipts whose delivery never reached the
+    target journal. Receipts recorded under the retired [send_message]
+    spelling decode forever — old journals redrive through the same path. *)
 
 val settled_message :
-  Mentat_session.t -> Mentat_session.Event.t -> Step.Child_message.t option
-(** [settled_message session event] is the recorded child message when [event]
-    is a successful [send_message]/[follow_up] receipt, paired with its call in
+  Mentat_session.t -> Mentat_session.Event.t -> Step.Mail.t option
+(** [settled_message session event] is the recorded message when [event] is a
+    successful [send]/[follow_up] receipt, paired with its call in
     [session]'s journal (the committed head containing [event]); [None]
     otherwise. The driver's per-commit delivery detector. *)
 
-val settled_messages : Mentat_session.t -> Step.Child_message.t list
-(** [settled_messages session] is every recorded child message in [session]'s
-    journal, in journal order — the recovery scan's input and the exchange cap's
-    per-edge count. *)
+val settled_messages : Mentat_session.t -> Step.Mail.t list
+(** [settled_messages session] is every recorded message in [session]'s
+    journal, in journal order — the recovery scan's input and the exchange
+    cap's per-edge count. *)
+
+val queued_input :
+  Mentat_session.t ->
+  Mentat_session.Queue.Entry.t ->
+  Mentat_llm.Content.t list
+(** [queued_input session entry] is the turn input admission mints when it
+    consumes [entry] from [session]'s queue. An owner entry (no origin) is
+    its content verbatim — today's queued input, unchanged. An origin-bearing
+    entry is framed: a leading text block names the sender from the typed
+    origin alone — [session]'s own recorded lineage and edges name a parent
+    or child where they can, the raw id otherwise — and fences the body as
+    material from that sender, never as the owner's instructions; the body
+    blocks follow unchanged. The body never influences the framing, so a
+    hostile body cannot imitate a better sender. *)
 
 val interrupt :
   ?reason:string ->

@@ -49,7 +49,9 @@ val headline : tool:string -> input:Jsont.json -> string option
     - [skill]: the skill [name].
     - [spawn]: the [description] when present, else the [task].
     - [wait]: the waited-for [children], comma-joined.
-    - [send_message], [follow_up]: the recipient [child].
+    - [send]: the recipient handle [to].
+    - [follow_up] (and the retired [send_message] spelling, which recorded
+      calls in old journals still carry): the recipient [child].
 
     [None] is returned for:
 

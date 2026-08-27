@@ -41,19 +41,11 @@ module Verb = struct
     | Propose_plan
     | Spawn
     | Wait
-    | Send_message
+    | Send
     | Follow_up
 
   let reserved =
-    [
-      Todo_write;
-      Ask_user;
-      Propose_plan;
-      Spawn;
-      Wait;
-      Send_message;
-      Follow_up;
-    ]
+    [ Todo_write; Ask_user; Propose_plan; Spawn; Wait; Send; Follow_up ]
 
   let name = function
     | Todo_write -> "todo_write"
@@ -61,7 +53,7 @@ module Verb = struct
     | Propose_plan -> "propose_plan"
     | Spawn -> "spawn"
     | Wait -> "wait"
-    | Send_message -> "send_message"
+    | Send -> "send"
     | Follow_up -> "follow_up"
 
   let description = function
@@ -70,7 +62,7 @@ module Verb = struct
     | Propose_plan -> Mentat_prompts.Tools.propose_plan
     | Spawn -> Mentat_prompts.Tools.spawn
     | Wait -> Mentat_prompts.Tools.wait
-    | Send_message -> Mentat_prompts.Tools.send_message
+    | Send -> Mentat_prompts.Tools.send
     | Follow_up -> Mentat_prompts.Tools.follow_up
 
   let input_schema = function
@@ -106,7 +98,10 @@ module Verb = struct
     | Wait ->
         object_schema ~required:[ "children" ]
           [ ("children", array_schema string_schema) ]
-    | Send_message | Follow_up ->
+    | Send ->
+        object_schema ~required:[ "to"; "message" ]
+          [ ("to", string_schema); ("message", string_schema) ]
+    | Follow_up ->
         object_schema ~required:[ "child"; "message" ]
           [ ("child", string_schema); ("message", string_schema) ]
 

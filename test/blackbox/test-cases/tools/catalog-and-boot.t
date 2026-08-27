@@ -49,7 +49,7 @@ OCaml tools, and keeps [propose_plan] reserved for Plan mode.
   ocaml_type_at
   read_file
   search_text
-  send_message
+  send
   shell
   shell_kill
   shell_output
@@ -168,7 +168,7 @@ families: `write_file`, `edit_file`, `apply_patch`, `ocaml_ast_edit`,
   ocaml_search_expressions
   read_file
   search_text
-  send_message
+  send
   shell
   shell_kill
   shell_output
@@ -190,7 +190,7 @@ families: `write_file`, `edit_file`, `apply_patch`, `ocaml_ast_edit`,
   ocaml_type_at
   read_file
   search_text
-  send_message
+  send
   shell
   shell_kill
   shell_output
