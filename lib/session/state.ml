@@ -561,6 +561,8 @@ let settled_head t =
   | last :: _, None ->
       Option.map (fun r -> (r.turn, r.outcome)) (Turn_map.find_opt last t.turns)
 
+let finished t = Option.is_some (settled_head t) && t.queue = []
+
 let turn_response_count id t =
   Option.map (fun r -> r.response_count) (Turn_map.find_opt id t.turns)
 

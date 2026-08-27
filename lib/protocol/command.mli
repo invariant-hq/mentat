@@ -131,9 +131,11 @@ type t = private
       origin : Mentat_session.Origin.t option;
           (** Optional message provenance, recorded into the entry the engine
               commits. Absent means the owner sent the input
-              ({!Mentat_session.Origin}). Attribution, never authority: the
-              origin changes nothing about how the entry is admitted or
-              consumed. *)
+              ({!Mentat_session.Origin}). Admission judges it — the engine
+              refuses an entry whose sender the target session's recorded
+              facts do not admit ({!Mentat_session.accepts_mail}) — but an
+              admitted origin is attribution, never authority: it changes
+              nothing about how the entry is consumed. *)
       input : Mentat_llm.Content.t list;
     }
   | Replace_queued of {

@@ -4119,6 +4119,27 @@ let queue_group =
           equal (list queue_entry_value) ~msg:"replacement reuses the id"
             [ queue_entry ~id:"q-1" "rewritten" ]
             (State.pending_queue st));
+      test "finished is a settled head with an empty queue" (fun () ->
+          is_false ~msg:"an empty session is not finished"
+            (State.finished (state []));
+          let t = turn () in
+          let c = claim (Session.Turn.id t) in
+          let started = [ Event.turn_started t; Event.provider_requested c ] in
+          is_false ~msg:"an active turn is not finished"
+            (State.finished (state started));
+          let settled = started @ [ respond c "Done."; finish t ] in
+          is_true ~msg:"a settled head with an empty queue is finished"
+            (State.finished (state settled));
+          let mailed =
+            settled
+            @ [
+                Event.queue_updated
+                  (Session.Queue.Update.enqueued (queue_entry ~id:"q-1" "more"));
+              ]
+          in
+          is_false
+            ~msg:"unconsumed mail buys another turn: not finished"
+            (State.finished (state mailed)));
     ]
 
 let delegation_group =
@@ -4277,6 +4298,62 @@ let delegation_group =
     ]
 
 (* Replay algebra. *)
+
+let mail_group =
+  group "mail acceptance"
+    [
+      test "the accept judgment admits kin and the owner, and only them"
+        (fun () ->
+          (* A parent holding a recorded edge accepts its child's mail. *)
+          let t, base = mid_turn [ tool_call () ] in
+          let edge =
+            Session.Delegation.make ~child:(session_id "child-1")
+              ~source_turn:(Session.Turn.id t) ~source_call:"call-1"
+              ~task:[ Llm.Content.text "Explore." ]
+              ()
+          in
+          let parent =
+            saved ~id:"parent-1" (base @ [ Event.delegation_recorded edge ])
+          in
+          is_true ~msg:"the owner (no origin) is accepted"
+            (Session.accepts_mail ~origin:None parent);
+          is_true ~msg:"a recorded child is accepted"
+            (Session.accepts_mail
+               ~origin:(Some (Session.Origin.agent (session_id "child-1")))
+               parent);
+          is_false ~msg:"a stranger is refused"
+            (Session.accepts_mail
+               ~origin:(Some (Session.Origin.agent (session_id "stranger")))
+               parent);
+          is_false ~msg:"a trigger origin is refused"
+            (Session.accepts_mail
+               ~origin:
+                 (Some
+                    (Session.Origin.trigger ~source:"nightly" ~digest:"d0"
+                       ~key:"k0"))
+               parent);
+          (* A delegated child accepts its recorded parent. *)
+          let child =
+            ok_or "child session"
+              (Session.make ~id:(session_id "child-1")
+                 ~metadata:
+                   (Session.Metadata.make
+                      ~delegated_from:
+                        (Session.Metadata.Delegated_from.make
+                           ~parent:(session_id "parent-1")
+                           ~delegation:(Session.Delegation.Id.of_string "d-1"))
+                      ~cwd ~created_at:(time 1) ~updated_at:(time 2) ())
+                 ~events:[])
+          in
+          is_true ~msg:"the recorded parent is accepted"
+            (Session.accepts_mail
+               ~origin:(Some (Session.Origin.agent (session_id "parent-1")))
+               child);
+          is_false ~msg:"a sibling is refused"
+            (Session.accepts_mail
+               ~origin:(Some (Session.Origin.agent (session_id "child-2")))
+               child));
+    ]
 
 let replay_group =
   group "replay algebra"
@@ -5987,6 +6064,7 @@ let () =
       board_group;
       queue_group;
       delegation_group;
+      mail_group;
       undo_group;
       replay_group;
       journal_machine_group;

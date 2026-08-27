@@ -7,6 +7,13 @@ let invalid fn message = Import.invalid_arg' "Mentat_store.Run_lock" fn message
 
 module Owner = Owner
 
+(* The custodial label a session removal holds the fence under while it
+   deletes the session's tree. Spelled once and exported: an observer that
+   classifies fence owners must read this hold as a transient that releases
+   on its own, and a drifted copy would silently demote it to an untouchable
+   foreign driver. *)
+let remove_owner_label = "remove"
+
 type guard = Handle.guard
 type acquire_error = [ `Held of Owner.t option | `Io of Io.t ]
 

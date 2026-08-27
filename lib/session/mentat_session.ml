@@ -173,6 +173,26 @@ let metadata t = t.metadata
 let events t = List.rev t.events_rev
 let state t = t.state
 
+(* The accept judgment over the target's own recorded facts — the honest floor
+   while only delegation kin and the owner send. One home, consumed by every
+   queue admission (a live driver's, and a fence-held append on a dormant
+   journal), so the arms cannot drift. *)
+let accepts_mail ~origin t =
+  match origin with
+  | None -> true
+  | Some (Origin.Trigger _) -> false
+  | Some (Origin.Agent sender) ->
+      let is_parent =
+        match Metadata.delegated_from t.metadata with
+        | None -> false
+        | Some lineage ->
+            Id.equal (Metadata.Delegated_from.parent lineage) sender
+      in
+      is_parent
+      || List.exists
+           (fun edge -> Id.equal (Delegation.child edge) sender)
+           (State.delegations t.state)
+
 let require_not_deleted t =
   if Metadata.is_deleted t.metadata then Error Error.Deleted else Ok ()
 

@@ -302,7 +302,7 @@ let remove t document =
   Eio.Switch.run @@ fun sw ->
   match
     Run_lock.try_acquire ~sw t ~session:id
-      ~owner:(Owner.make ~label:"remove" ())
+      ~owner:(Owner.make ~label:Run_lock.remove_owner_label ())
   with
   | Error (`Held holder) -> Error (Error.Locked { id; holder })
   | Error (`Io io) -> Error (Error.Io io)

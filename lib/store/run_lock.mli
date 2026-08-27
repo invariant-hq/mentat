@@ -32,6 +32,15 @@
 module Owner = Owner
 (** Ephemeral driver identities. *)
 
+val remove_owner_label : string
+(** The run-fence owner label {!Session.remove} acquires the fence under while
+    it deletes a session's tree — a brief custodial hold that releases on its
+    own, never a driver. Exported so an observer that classifies fence owners
+    (a mail delivery's probe, a child activation's first attach) treats the
+    hold as a transient to re-probe shortly, never a holder to preempt, dial,
+    or fail over; one spelling, because a drifted copy would silently demote a
+    removal hold to an untouchable foreign driver. *)
+
 type guard = Handle.guard
 (** The type for a held run lock: one close-on-exec descriptor plus one
     confirmed registry reservation, matched by the witness token the guard

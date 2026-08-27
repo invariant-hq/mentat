@@ -190,6 +190,16 @@ val events : t -> Event.t list
 val state : t -> State.t
 (** [state t] is [t]'s validated replay projection. *)
 
+val accepts_mail : origin:Origin.t option -> t -> bool
+(** [accepts_mail ~origin t] is [true] iff [t] accepts a queue entry
+    attributed to [origin] — the one accept judgment every queue admission
+    runs, whether a live driver admits the entry or a sender appends it to
+    [t]'s dormant journal under the run fence, so the two admissions cannot
+    drift. Admitted: the owner (an absent origin, {!Origin}), [t]'s recorded
+    delegation parent, and [t]'s own recorded delegation children; a
+    {!Origin.Trigger} origin is refused. Acceptance gates admission only —
+    an admitted origin remains attribution, never authority. *)
+
 val media_refs : t -> Mentat_digest.Content_ref.t list
 (** [media_refs t] is the content references of every model-visible media block
     [t]'s document carries — across the prompt's [Turn_started], queued inputs,
