@@ -1,6 +1,6 @@
 A trigger host records its provenance on the turn it admits: `run start
---triggered <charter>@<digest>:<key>` mints a triggered origin instead of a
-user one, so the journal attributes the turn to the charter. Provenance is
+--triggered <source>@<digest>:<key>` mints a triggered origin instead of a
+user one, so the journal attributes the turn to the trigger. Provenance is
 attribution, never authority — the turn runs as an ordinary prompt turn.
 
   $ use_trusted_workspace
@@ -18,12 +18,12 @@ attribution, never authority — the turn runs as an ordinary prompt turn.
 A malformed --triggered value is a usage error before any run.
 
   $ mentat run start --triggered "not-a-provenance" --cwd "$PWD" --id trigbad "x" 2>&1
-  mentat: invalid --triggered value not-a-provenance: expected <charter>@<digest>:<key>
+  mentat: invalid --triggered value not-a-provenance: expected <source>@<digest>:<key>
   [2]
 
 The digest is pinned to the charter policy digest's 16 lowercase hex
 characters; any other length is refused the same way.
 
   $ mentat run start --triggered "nightly-review@0f9a4c1d:delivery-42" --cwd "$PWD" --id trigshort "x" 2>&1
-  mentat: invalid --triggered value nightly-review@0f9a4c1d:delivery-42: expected <charter>@<digest>:<key>
+  mentat: invalid --triggered value nightly-review@0f9a4c1d:delivery-42: expected <source>@<digest>:<key>
   [2]

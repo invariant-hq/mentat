@@ -1345,10 +1345,10 @@ let triggered_opt =
   Arg.(
     value
     & opt (some string) None
-    & info [ "triggered" ] ~docv:"CHARTER@DIGEST:KEY"
+    & info [ "triggered" ] ~docv:"SOURCE@DIGEST:KEY"
         ~doc:
           "Internal: record trigger provenance for this turn, as \
-           $(i,charter)@$(i,digest):$(i,key). Set by trigger hosts; not for \
+           $(i,source)@$(i,digest):$(i,key). Set by trigger hosts; not for \
            direct use.")
 
 let start_term =

@@ -62,13 +62,14 @@ val review_behavior :
 val triggered :
   string -> (Mentat_protocol.Command.triggered, Exit_status.t) result
 (** [triggered raw] parses the [run start] [--triggered] value as
-    [<charter>@<digest>:<key>]: a charter name of letters, digits, ['.'],
-    ['_'], or ['-']; the charter policy digest — exactly 16 lowercase
-    hexadecimal characters, the length {!Mentat_charter.Charter.policy_digest}
-    renders (the two must move together); and a non-empty trigger key. The
-    key may itself contain ['@'] or [':'] — the first ['@'] and the first
-    [':'] after it delimit the parts. Anything else is a
-    {!Exit_status.Usage_error} naming the grammar. *)
+    [<source>@<digest>:<key>]: a trigger source of letters, digits, ['.'],
+    ['_'], or ['-'] (the charter name, as mentatd mints it); the charter
+    policy digest — exactly 16 lowercase hexadecimal characters, the length
+    {!Mentat_charter.Charter.policy_digest} renders (the two must move
+    together); and a non-empty trigger key. The key may itself contain ['@']
+    or [':'] — the first ['@'] and the first [':'] after it delimit the
+    parts. Anything else is a {!Exit_status.Usage_error} naming the
+    grammar. *)
 
 val charter_name : string -> (string, Exit_status.t) result
 (** [charter_name raw] validates [raw] as an installed charter's name:

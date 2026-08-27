@@ -59,11 +59,12 @@ module Origin : sig
     | User  (** A user prompt started the turn. *)
     | Queued of Queue.Id.t
         (** The turn admits queued entry [id]; admission consumes it. *)
-    | Triggered of { charter : string; digest : string; key : string }
-        (** A trigger host admitted the turn on behalf of the charter named
-            [charter], sealed at charter-content digest [digest], for trigger
-            key [key]. Provenance is attribution, never authority: the origin
-            records who admitted the prompt and grants nothing — the turn
+    | Triggered of { source : string; digest : string; key : string }
+        (** A trigger host admitted the turn on behalf of trigger [source] —
+            the trigger's identity as the scheduling host defines it. [digest]
+            seals the policy content the trigger fired under; [key] names the
+            event it fired on. Provenance is attribution, never authority: the
+            origin records who admitted the prompt and grants nothing — the turn
             executes under its sealed contract exactly as a {!User} turn does,
             and a forged provenance misleads only its own journal. All members
             are non-empty. *)
@@ -82,8 +83,8 @@ module Origin : sig
             and state where the work stands. A turn carrying this origin never
             admits another wind-down, so the mechanism cannot repeat. *)
 
-  val triggered : charter:string -> digest:string -> key:string -> t
-  (** [triggered ~charter ~digest ~key] is {!Triggered} with every member
+  val triggered : source:string -> digest:string -> key:string -> t
+  (** [triggered ~source ~digest ~key] is {!Triggered} with every member
       checked non-empty — the one construction that validates, and the path
       the codec decodes through, so a producer that minted through it can
       never write a [Triggered] origin its own replay rejects.

@@ -20,16 +20,17 @@ type t =
   | Agent of Id.t
       (** Another agent sent this; the id is the sending session's — an
           agent's id is its address. *)
-  | Trigger of { charter : string; digest : string; key : string }
-      (** A trigger host sent this on behalf of the charter named [charter],
-          sealed at charter-content digest [digest], for trigger key [key].
-          All members are non-empty. *)
+  | Trigger of { source : string; digest : string; key : string }
+      (** A trigger host sent this on behalf of trigger [source] — the
+          trigger's identity as the scheduling host defines it. [digest] seals
+          the policy content the trigger fired under; [key] names the event it
+          fired on. All members are non-empty. *)
 
 val agent : Id.t -> t
 (** [agent sender] is {!Agent}[ sender]. *)
 
-val trigger : charter:string -> digest:string -> key:string -> t
-(** [trigger ~charter ~digest ~key] is {!Trigger} with every member checked
+val trigger : source:string -> digest:string -> key:string -> t
+(** [trigger ~source ~digest ~key] is {!Trigger} with every member checked
     non-empty — the one construction that validates, and the path the codec
     decodes through.
 

@@ -52,24 +52,25 @@ let review_behavior = function
         (Printf.sprintf "unknown permission mode %S; expected default or bypass"
            other)
 
-(* Trigger provenance, parsed strictly from <charter>@<digest>:<key>: the
-   charter name a token, the digest the 16 lowercase hex characters of the
-   charter policy digest ([Mentat_charter.Charter.policy_digest] renders
-   exactly 16; the two lengths move together), the key non-empty. A key may
-   itself contain '@' or ':', so the first '@' and the first ':' after it are
-   the delimiters. The flag is minted by trigger hosts; a sloppy value means
-   the host is wrong. *)
+(* Trigger provenance, parsed strictly from <source>@<digest>:<key>: the
+   trigger source a token — the charter name as mentatd mints it — the digest
+   the 16 lowercase hex characters of the charter policy digest
+   ([Mentat_charter.Charter.policy_digest] renders exactly 16; the two
+   lengths move together), the key non-empty. A key may itself contain '@' or
+   ':', so the first '@' and the first ':' after it are the delimiters. The
+   flag is minted by trigger hosts; a sloppy value means the host is
+   wrong. *)
 let triggered raw =
   let malformed () =
     usage
       (Printf.sprintf
-         "invalid --triggered value %s: expected <charter>@<digest>:<key>" raw)
+         "invalid --triggered value %s: expected <source>@<digest>:<key>" raw)
   in
   let hex c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') in
   match String.index_opt raw '@' with
   | None -> malformed ()
   | Some at -> (
-      let charter = String.sub raw 0 at in
+      let source = String.sub raw 0 at in
       let rest = String.sub raw (at + 1) (String.length raw - at - 1) in
       match String.index_opt rest ':' with
       | None -> malformed ()
@@ -79,13 +80,13 @@ let triggered raw =
             String.sub rest (colon + 1) (String.length rest - colon - 1)
           in
           if
-            String.length charter = 0
-            || not (String.for_all id_char charter)
+            String.length source = 0
+            || not (String.for_all id_char source)
             || String.length digest <> 16
             || not (String.for_all hex digest)
             || String.length key = 0
           then malformed ()
-          else Ok { Mentat_protocol.Command.charter; digest; key })
+          else Ok { Mentat_protocol.Command.source; digest; key })
 
 let charter_name raw =
   if String.length raw = 0 then usage "charter name must not be empty"

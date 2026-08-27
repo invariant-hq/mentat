@@ -560,7 +560,7 @@ let journey () =
   let t2 =
     turn ~id:"turn-2"
       ~origin:
-        (Session.Turn.Origin.triggered ~charter:"nightly" ~digest:"d0"
+        (Session.Turn.Origin.triggered ~source:"nightly" ~digest:"d0"
            ~key:"k0")
       ~input:Session.Turn.Input.continue
       ~contract:(make_contract ~declarations ())
@@ -1887,7 +1887,7 @@ let command_codec_group =
                 (decode Protocol.Command.jsont json))
             [
               Session.Origin.agent (session_id "session-b");
-              Session.Origin.trigger ~charter:"nightly-review"
+              Session.Origin.trigger ~source:"nightly-review"
                 ~digest:"0f9a4c1d2e3b4a5f" ~key:"delivery-42";
             ]);
       test "retired goal vocabulary is a loud decode error" (fun () ->
@@ -1941,7 +1941,7 @@ let command_codec_group =
                prompt));
       test "a prompt carries optional trigger provenance round-trip" (fun () ->
           (* Trigger provenance rides the prompt payload: the wire tag stays
-             [prompt], the optional [triggered] member carries charter, digest,
+             [prompt], the optional [triggered] member carries source, digest,
              and key, and an absent member decodes as none — the
              backward-compatible codec addition. *)
           let with_triggered =
@@ -1951,7 +1951,7 @@ let command_codec_group =
                  ~input:[ Llm.Content.text "Review the diff." ]
                  ~triggered:
                    {
-                     Protocol.Command.charter = "nightly-review";
+                     Protocol.Command.source = "nightly-review";
                      digest = "0f9a4c1d2e3b4a5f";
                      key = "delivery-42";
                    }
@@ -1962,14 +1962,14 @@ let command_codec_group =
           equal command_value ~msg:"prompt.triggered round-trip" with_triggered
             (decode Protocol.Command.jsont json);
           (* An empty member is rejected by the constructor. *)
-          is_true ~msg:"empty triggered charter rejected"
+          is_true ~msg:"empty triggered source rejected"
             (Result.is_error
                (Protocol.Command.prompt ~session:fix_session_id
                   ~turn:(turn_id "turn-trig2")
                   ~input:[ Llm.Content.text "x" ]
                   ~triggered:
                     {
-                      Protocol.Command.charter = "";
+                      Protocol.Command.source = "";
                       digest = "0f9a4c1d2e3b4a5f";
                       key = "delivery-42";
                     }
@@ -2083,14 +2083,14 @@ let command_parity_group =
                       json_array [];
                     ])));
       test "prompt rejects an empty triggered member" (fun () ->
-          parity ~msg:"empty triggered charter"
+          parity ~msg:"empty triggered source"
             ~constructor:(fun () ->
               Protocol.Command.prompt ~session:fix_session_id
                 ~turn:(turn_id "turn-cmd")
                 ~input:[ Llm.Content.text "Go." ]
                 ~triggered:
                   {
-                    Protocol.Command.charter = "";
+                    Protocol.Command.source = "";
                     digest = "0f9a4c1d2e3b4a5f";
                     key = "delivery-42";
                   }
@@ -2100,7 +2100,7 @@ let command_parity_group =
               (add_member "triggered"
                  (json_object
                     [
-                      ("charter", Json.string "");
+                      ("source", Json.string "");
                       ("digest", Json.string "0f9a4c1d2e3b4a5f");
                       ("key", Json.string "delivery-42");
                     ])));
@@ -2673,7 +2673,7 @@ let variant_shapes =
            (Protocol.Command.queue_next
               ~id:(Session.Queue.Id.of_string "q-derived")
               ~origin:
-                (Session.Origin.trigger ~charter:"nightly-review"
+                (Session.Origin.trigger ~source:"nightly-review"
                    ~digest:"0f9a4c1d2e3b4a5f" ~key:"delivery-42")
               ~session:fix_session_id
               ~input:[ Llm.Content.text "Next." ]
@@ -2697,7 +2697,7 @@ let variant_shapes =
               ~origin:
                 (Session.Turn.Origin.Triggered
                    {
-                     charter = "nightly-review";
+                     source = "nightly-review";
                      digest = "0f9a4c1d2e3b4a5f";
                      key = "delivery-42";
                    })

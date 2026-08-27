@@ -1259,8 +1259,8 @@ and prompt t ~turn ~input ~options ~mode ~max_steps ~triggered ~output_schema
                     let origin =
                       match triggered with
                       | None -> Mentat_session.Turn.Origin.User
-                      | Some { Mentat_protocol.Command.charter; digest; key } ->
-                          Mentat_session.Turn.Origin.triggered ~charter ~digest
+                      | Some { Mentat_protocol.Command.source; digest; key } ->
+                          Mentat_session.Turn.Origin.triggered ~source ~digest
                             ~key
                     in
                     start_turn t cfg

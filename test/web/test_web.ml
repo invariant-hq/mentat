@@ -158,7 +158,7 @@ let turn_family_tests =
                     ~origin:
                       (Session.Turn.Origin.Triggered
                          {
-                           charter = "nightly-review";
+                           source = "nightly-review";
                            digest = "0123456789abcdef";
                            key = "2026-08-25T06:00";
                          })

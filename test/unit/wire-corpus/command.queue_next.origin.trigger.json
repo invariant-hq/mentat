@@ -5,7 +5,7 @@
   "id": "q-derived",
   "origin": {
     "type": "trigger",
-    "charter": "nightly-review",
+    "source": "nightly-review",
     "digest": "0f9a4c1d2e3b4a5f",
     "key": "delivery-42"
   },

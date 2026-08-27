@@ -48,7 +48,7 @@ module Invalid = struct
   let pp ppf t = Format.pp_print_string ppf (message t)
 end
 
-type triggered = { charter : string; digest : string; key : string }
+type triggered = { source : string; digest : string; key : string }
 
 type t =
   | Prompt of {
@@ -87,8 +87,8 @@ let prompt ~session ~turn ~input ?options ?mode ?max_steps ?triggered
     | Some n when n < 1 -> Error (Invalid.Non_positive_max_steps n)
     | Some _ | None -> (
         match triggered with
-        | Some { charter; _ } when String.is_empty charter ->
-            Error (Invalid.Empty_triggered_member "charter")
+        | Some { source; _ } when String.is_empty source ->
+            Error (Invalid.Empty_triggered_member "source")
         | Some { digest; _ } when String.is_empty digest ->
             Error (Invalid.Empty_triggered_member "digest")
         | Some { key; _ } when String.is_empty key ->
@@ -166,8 +166,8 @@ let jsont =
   in
   let triggered_jsont =
     Jsont.Object.map ~kind:"prompt trigger provenance"
-      (fun charter digest key -> { charter; digest; key })
-    |> Jsont.Object.mem "charter" Jsont.string ~enc:(fun t -> t.charter)
+      (fun source digest key -> { source; digest; key })
+    |> Jsont.Object.mem "source" Jsont.string ~enc:(fun t -> t.source)
     |> Jsont.Object.mem "digest" Jsont.string ~enc:(fun t -> t.digest)
     |> Jsont.Object.mem "key" Jsont.string ~enc:(fun t -> t.key)
     |> Jsont.Object.error_unknown |> Jsont.Object.finish

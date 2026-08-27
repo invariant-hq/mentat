@@ -73,10 +73,11 @@ end
 
 (** {1:commands Commands} *)
 
-type triggered = { charter : string; digest : string; key : string }
-(** Trigger provenance declared at turn start: the charter name, the sealed
-    charter-content digest, and the trigger key a trigger host acted on. When
-    present on {!Prompt}, the engine mints the turn's origin as
+type triggered = { source : string; digest : string; key : string }
+(** Trigger provenance declared at turn start: the trigger's identity as the
+    scheduling host defines it, the digest sealing the policy content it fired
+    under, and the key naming the event it fired on. When present on
+    {!Prompt}, the engine mints the turn's origin as
     {!Mentat_session.Turn.Origin.Triggered} instead of
     {!Mentat_session.Turn.Origin.User}. Provenance is attribution, never
     authority: it changes nothing about how the turn is admitted or executed.

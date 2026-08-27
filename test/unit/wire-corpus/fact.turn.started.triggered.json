@@ -5,7 +5,7 @@
     "id": "turn-c",
     "origin": {
       "type": "triggered",
-      "charter": "nightly-review",
+      "source": "nightly-review",
       "digest": "0f9a4c1d2e3b4a5f",
       "key": "delivery-42"
     },

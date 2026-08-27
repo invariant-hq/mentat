@@ -9,32 +9,32 @@ let invalid fn message = invalid_arg' "Mentat_session.Origin" fn message
 
 type t =
   | Agent of Id.t
-  | Trigger of { charter : string; digest : string; key : string }
+  | Trigger of { source : string; digest : string; key : string }
 
 let agent sender = Agent sender
 
-let trigger ~charter ~digest ~key =
+let trigger ~source ~digest ~key =
   let reject field value =
     if String.is_empty value then invalid "trigger" (field ^ " must not be empty")
   in
-  reject "charter" charter;
+  reject "source" source;
   reject "digest" digest;
   reject "key" key;
-  Trigger { charter; digest; key }
+  Trigger { source; digest; key }
 
 let equal a b =
   match (a, b) with
   | Agent a, Agent b -> Id.equal a b
   | Trigger a, Trigger b ->
-      String.equal a.charter b.charter
+      String.equal a.source b.source
       && String.equal a.digest b.digest
       && String.equal a.key b.key
   | (Agent _ | Trigger _), _ -> false
 
 let pp ppf = function
   | Agent sender -> Format.fprintf ppf "agent(%a)" Id.pp sender
-  | Trigger { charter; digest; key } ->
-      Format.fprintf ppf "trigger(%s@%s:%s)" charter digest key
+  | Trigger { source; digest; key } ->
+      Format.fprintf ppf "trigger(%s@%s:%s)" source digest key
 
 let jsont =
   let agent_case =
@@ -46,10 +46,10 @@ let jsont =
     |> Jsont.Object.Case.map "agent" ~dec:Fun.id
   in
   let trigger_case =
-    Jsont.Object.map ~kind:"trigger origin" (fun charter digest key ->
-        decode_invalid_arg (fun () -> trigger ~charter ~digest ~key))
-    |> Jsont.Object.mem "charter" Jsont.string ~enc:(function
-      | Trigger { charter; _ } -> charter
+    Jsont.Object.map ~kind:"trigger origin" (fun source digest key ->
+        decode_invalid_arg (fun () -> trigger ~source ~digest ~key))
+    |> Jsont.Object.mem "source" Jsont.string ~enc:(function
+      | Trigger { source; _ } -> source
       | Agent _ -> assert false)
     |> Jsont.Object.mem "digest" Jsont.string ~enc:(function
       | Trigger { digest; _ } -> digest

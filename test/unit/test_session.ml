@@ -583,7 +583,7 @@ let journal () =
   let t2 =
     turn ~id:"turn-2"
       ~origin:
-        (Session.Turn.Origin.triggered ~charter:"nightly" ~digest:"d0"
+        (Session.Turn.Origin.triggered ~source:"nightly" ~digest:"d0"
            ~key:"k0")
       ~input:Session.Turn.Input.continue
       ~contract:(make_contract ~declarations ())
@@ -758,8 +758,8 @@ let origin_gen =
       Gen.pure Session.Turn.Origin.User;
       Gen.map (fun s -> Session.Turn.Origin.Queued (queue_id s)) ident_gen;
       Gen.(
-        let+ charter = ident_gen and+ digest = ident_gen and+ key = ident_gen in
-        Session.Turn.Origin.Triggered { charter; digest; key });
+        let+ source = ident_gen and+ digest = ident_gen and+ key = ident_gen in
+        Session.Turn.Origin.Triggered { source; digest; key });
       Gen.pure Session.Turn.Origin.Plan_build;
       Gen.pure Session.Turn.Origin.Compaction;
       Gen.pure Session.Turn.Origin.Step_limit_wind_down;
@@ -1199,7 +1199,7 @@ let turn_group =
               Session.Turn.Origin.Queued (queue_id "q-1");
               Session.Turn.Origin.Triggered
                 {
-                  charter = "nightly-review";
+                  source = "nightly-review";
                   digest = "0f9a4c1d2e3b4a5f";
                   key = "delivery-42";
                 };
@@ -1217,7 +1217,7 @@ let turn_group =
             (json_object
                [
                  ("type", Json.string "triggered");
-                 ("charter", Json.string "nightly-review");
+                 ("source", Json.string "nightly-review");
                  ("digest", Json.string "0f9a4c1d2e3b4a5f");
                ]);
           assert_decode_error "triggered origin with an empty member"
@@ -1225,7 +1225,7 @@ let turn_group =
             (json_object
                [
                  ("type", Json.string "triggered");
-                 ("charter", Json.string "");
+                 ("source", Json.string "");
                  ("digest", Json.string "0f9a4c1d2e3b4a5f");
                  ("key", Json.string "delivery-42");
                ]);
@@ -1234,7 +1234,7 @@ let turn_group =
             (json_object
                [
                  ("type", Json.string "triggered");
-                 ("charter", Json.string "nightly-review");
+                 ("source", Json.string "nightly-review");
                  ("digest", Json.string "0f9a4c1d2e3b4a5f");
                  ("key", Json.string "delivery-42");
                  ("actor", Json.string "host");
@@ -1582,7 +1582,7 @@ let turn_replay_group =
           let origin =
             Session.Turn.Origin.Triggered
               {
-                charter = "nightly-review";
+                source = "nightly-review";
                 digest = "0f9a4c1d2e3b4a5f";
                 key = "delivery-42";
               }
@@ -4035,7 +4035,7 @@ let queue_group =
           let from_trigger =
             Session.Queue.Entry.make
               ~origin:
-                (Session.Origin.trigger ~charter:"nightly-review"
+                (Session.Origin.trigger ~source:"nightly-review"
                    ~digest:"0f9a4c1d2e3b4a5f" ~key:"delivery-42")
               ~id:(queue_id "q-trigger")
               ~input:[ Llm.Content.text "from the trigger" ]
@@ -4078,7 +4078,7 @@ let queue_group =
             (json_object
                [
                  ("type", Json.string "trigger");
-                 ("charter", Json.string "");
+                 ("source", Json.string "");
                  ("digest", Json.string "0f9a4c1d2e3b4a5f");
                  ("key", Json.string "delivery-42");
                ]);
