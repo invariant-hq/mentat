@@ -226,10 +226,14 @@ still owed all render above the fold, each
 linking to its session; below sits the routine record, one row per charter —
 state, digest, spend and rate against their fences, last disposition, and
 the webhook ingress address. Every value is read fresh per request. The
-page renders no controls; changing anything stays with the CLI. The
-installed service unit does not carry `--web`, so the dashboard is available
-when you run `mentatd --web` yourself; under the service, the CLI verbs
-below are the status surface.
+page renders no controls; changing anything stays with the CLI. Under the
+service, pass `--web` (and `--web-port` to pin the port) to
+`mentatd install`, which bakes the frontend into the unit's exec line —
+only one daemon claims a store, so this is the only way a service-managed
+node serves the dashboard; the URL to open, bootstrap token included, is
+recorded in `daemon.json`, never printed to the service log. Running
+`mentatd --web` yourself works the same without the service, and the CLI
+verbs below are the status surface either way.
 
 ```sh
 mentat charter list          # roster: name, digest, state, last disposition

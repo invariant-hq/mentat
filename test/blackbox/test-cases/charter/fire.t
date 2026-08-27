@@ -13,43 +13,12 @@ The repository fixture: a base branch, a feature head, and a bare remote
 carrying refs/pull/7/head — what the derived https remote would serve, as a
 local path the owner-named URL override points at.
 
-  $ git init -q work
-  $ git -C work config user.email t@test.invalid
-  $ git -C work config user.name T
-  $ printf 'hello\n' > work/lib.txt
-  $ git -C work add lib.txt
-  $ git -C work commit -qm base
-  $ git -C work branch -m main
-  $ git -C work checkout -qb feature
-  $ printf 'hello\nnew line\n' > work/lib.txt
-  $ git -C work commit -qam change
-  $ HEAD_SHA=$(git -C work rev-parse HEAD)
-  $ git clone -q --bare work origin.git
-  $ git -C origin.git update-ref refs/pull/7/head "$HEAD_SHA"
+  $ make_pr_fixture
   $ export MENTAT_CHARTER_GIT_URL="$PWD/origin.git"
 
 The charter, installed, with both credentials in place.
 
-  $ mkdir proposal
-  $ cat > proposal/charter.json <<'EOF'
-  > { "charter": 1, "name": "pr-review",
-  >   "workspace": { "repo": "acme/widgets" },
-  >   "trigger": [
-  >     { "kind": "github_webhook", "events": ["pull_request.opened"] },
-  >     { "kind": "cli" } ],
-  >   "run": { "mode": "review", "prompt": "prompt.md",
-  >            "output_schema": "findings.schema.json" },
-  >   "budget": { "per_run": { "wall_clock": "5m" } },
-  >   "publish": { "github": "review-threads" } }
-  > EOF
-  $ printf 'Review the diff for defects.\n' > proposal/prompt.md
-  $ printf '{"type":"object"}\n' > proposal/findings.schema.json
-  $ mentat charter add proposal >/dev/null
-  $ CDIR="$PWD/config/mentat/charters/pr-review"
-  $ printf 'test-read-token\n' > "$CDIR/secrets/read-token"
-  $ chmod 600 "$CDIR/secrets/read-token"
-  $ printf 'test-write-token\n' > "$CDIR/secrets/write-token"
-  $ chmod 600 "$CDIR/secrets/write-token"
+  $ install_review_charter
 
 The saved delivery names the fixture head.
 

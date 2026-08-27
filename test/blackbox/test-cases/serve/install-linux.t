@@ -11,27 +11,35 @@ daemon, which adopts them at its next boot.
   # run children detach into their own sessions and must outlive it, so
   # stopping or restarting this unit may signal only the daemon itself — it
   # adopts the survivors when it next boots. The default control-group kill
-  # would take mid-turn runs down with the unit.
+  # would take mid-turn runs down with the unit. The restart pacing is
+  # load-bearing too: a daemon spawned outside the service holds the per-user
+  # claim and this unit's daemon then exits nonzero, so the manager must retry
+  # until the claim frees — the default burst limit would park the unit failed
+  # after five fast exits instead.
   
   [Unit]
   Description=mentat daemon
+  StartLimitIntervalSec=0
   
   [Service]
   ExecStart="MENTATD"
   KillMode=process
   Restart=on-failure
+  RestartSec=10
   StandardOutput=append:$TESTCASE_ROOT/data/mentat/daemon/daemon.log
   StandardError=append:$TESTCASE_ROOT/data/mentat/daemon/daemon.log
   
   [Install]
   WantedBy=default.target
 
-The daemon's serve flags bake into the exec line: --ingress-port and
---github-base-url ride ExecStart as further quoted arguments, so the
-resident daemon starts with them at every boot.
+The daemon's serve flags bake into the exec line: --ingress-port,
+--github-base-url, --charter-git-base, --web, and --web-port ride
+ExecStart as further quoted arguments, so the resident daemon starts with
+them at every boot — --web is the only way a service-managed daemon serves
+the charters dashboard, since only one daemon claims a store.
 
-  $ mentatd install --print --ingress-port 8080 --github-base-url https://ghe.example.test/api/v3 | grep '^ExecStart=' | sed -E 's#^ExecStart="[^"]*"#ExecStart="MENTATD"#'
-  ExecStart="MENTATD" "--ingress-port=8080" "--github-base-url=https://ghe.example.test/api/v3"
+  $ mentatd install --print --ingress-port 8080 --github-base-url https://ghe.example.test/api/v3 --charter-git-base https://ghe.example.test --web --web-port 8081 | grep '^ExecStart=' | sed -E 's#^ExecStart="[^"]*"#ExecStart="MENTATD"#'
+  ExecStart="MENTATD" "--ingress-port=8080" "--github-base-url=https://ghe.example.test/api/v3" "--charter-git-base=https://ghe.example.test" "--web" "--web-port=8081"
 
 --print touched nothing: no unit directory, no daemon directory.
 

@@ -68,14 +68,17 @@ module Unit_file = struct
 
   (* systemd expands [%] specifiers in every directive, so it is doubled;
      quoting rules for double quotes and backslashes differ between
-     directives, so paths carrying them are refused rather than guessed at. *)
+     directives, so paths carrying them are refused rather than guessed at —
+     as is ['$'], which systemd substitutes from the service environment
+     even inside double quotes (only [$$] survives literally), silently
+     rewriting the value. *)
   let systemd_path ~what path =
     let* () = carriable ~what path in
-    if String.exists (fun c -> c = '"' || c = '\\') path then
+    if String.exists (fun c -> c = '"' || c = '\\' || c = '$') path then
       Error
         (Printf.sprintf
-           "%s %s contains a quote or backslash, which this unit render does \
-            not escape for systemd"
+           "%s %s contains a quote, backslash, or dollar sign, which this \
+            unit render does not escape for systemd"
            what path)
     else begin
       let b = Buffer.create (String.length path) in
@@ -165,15 +168,21 @@ module Unit_file = struct
 # run children detach into their own sessions and must outlive it, so
 # stopping or restarting this unit may signal only the daemon itself — it
 # adopts the survivors when it next boots. The default control-group kill
-# would take mid-turn runs down with the unit.
+# would take mid-turn runs down with the unit. The restart pacing is
+# load-bearing too: a daemon spawned outside the service holds the per-user
+# claim and this unit's daemon then exits nonzero, so the manager must retry
+# until the claim frees — the default burst limit would park the unit failed
+# after five fast exits instead.
 
 [Unit]
 Description=mentat daemon
+StartLimitIntervalSec=0
 
 [Service]
 ExecStart=%s
 KillMode=process
 Restart=on-failure
+RestartSec=10
 StandardOutput=append:%s
 StandardError=append:%s
 
@@ -383,17 +392,28 @@ let unsupported =
    unit in [--flag=value] form so the resident daemon starts with them at
    every boot. Re-running install with different flags renders different
    bytes, which the standing classifies as replaceable. *)
-let exec_args ~ingress_port ~github_base_url =
+let exec_args ~ingress_port ~github_base_url ~charter_git_base ~web ~web_port
+    =
   (match ingress_port with
   | Some port -> [ Printf.sprintf "--ingress-port=%d" port ]
   | None -> [])
+  @ (match github_base_url with
+    | Some url -> [ "--github-base-url=" ^ url ]
+    | None -> [])
+  @ (match charter_git_base with
+    | Some base -> [ "--charter-git-base=" ^ base ]
+    | None -> [])
+  @ (if web then [ "--web" ] else [])
   @
-  match github_base_url with
-  | Some url -> [ "--github-base-url=" ^ url ]
+  match web_port with
+  | Some port -> [ Printf.sprintf "--web-port=%d" port ]
   | None -> []
 
-let install ~print ~ingress_port ~github_base_url =
-  let args = exec_args ~ingress_port ~github_base_url in
+let install ~print ~ingress_port ~github_base_url ~charter_git_base ~web
+    ~web_port =
+  let args =
+    exec_args ~ingress_port ~github_base_url ~charter_git_base ~web ~web_port
+  in
   match Platform.detect () with
   | None -> Exit_status.runtime unsupported
   | Some platform when print -> (

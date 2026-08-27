@@ -9,41 +9,11 @@ re-enters the publisher only. With an enabled webhook charter installed the
 idle watchdog stands down — the charter is a standing commission, so the
 node stays resident where a charterless daemon would stop itself.
 
-The fixture: the fire.t repository, charter, and delivery.
+The fixture: the fire.t repository, charter, and delivery — the remote laid
+out under a git base so the daemon half can derive it per charter.
 
-  $ git init -q work
-  $ git -C work config user.email t@test.invalid
-  $ git -C work config user.name T
-  $ printf 'hello\n' > work/lib.txt
-  $ git -C work add lib.txt
-  $ git -C work commit -qm base
-  $ git -C work branch -m main
-  $ git -C work checkout -qb feature
-  $ printf 'hello\nnew line\n' > work/lib.txt
-  $ git -C work commit -qam change
-  $ HEAD_SHA=$(git -C work rev-parse HEAD)
-  $ git clone -q --bare work origin.git
-  $ git -C origin.git update-ref refs/pull/7/head "$HEAD_SHA"
-  $ mkdir proposal
-  $ cat > proposal/charter.json <<'EOF'
-  > { "charter": 1, "name": "pr-review",
-  >   "workspace": { "repo": "acme/widgets" },
-  >   "trigger": [
-  >     { "kind": "github_webhook", "events": ["pull_request.opened"] },
-  >     { "kind": "cli" } ],
-  >   "run": { "mode": "review", "prompt": "prompt.md",
-  >            "output_schema": "findings.schema.json" },
-  >   "budget": { "per_run": { "wall_clock": "5m" } },
-  >   "publish": { "github": "review-threads" } }
-  > EOF
-  $ printf 'Review the diff for defects.\n' > proposal/prompt.md
-  $ printf '{"type":"object"}\n' > proposal/findings.schema.json
-  $ mentat charter add proposal >/dev/null
-  $ CDIR="$PWD/config/mentat/charters/pr-review"
-  $ printf 'test-read-token\n' > "$CDIR/secrets/read-token"
-  $ chmod 600 "$CDIR/secrets/read-token"
-  $ printf 'test-write-token\n' > "$CDIR/secrets/write-token"
-  $ chmod 600 "$CDIR/secrets/write-token"
+  $ make_pr_fixture remotes/acme/widgets.git
+  $ install_review_charter
   $ cat > event.json <<EOF
   > { "action": "opened",
   >   "repository": { "full_name": "acme/widgets" },
@@ -68,7 +38,7 @@ run child keeps the provider connection and settles on its own.
   $ start_fake_server github-head.jsonl capture-gh gh-port
   $ GH1_PID=$MENTAT_FAKE_PROVIDER_PID
   $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
-  $ export MENTAT_CHARTER_GIT_URL="$PWD/origin.git"
+  $ export MENTAT_CHARTER_GIT_URL="$PWD/remotes/acme/widgets.git"
   $ RECEIPTS="$PWD/state/mentat/charters/pr-review/receipts.jsonl"
 
 The fire is spawned from a command substitution so the harness shell never
@@ -96,13 +66,14 @@ boots so the fence reads free.
   $ kill "$LOCK_HELPER" 2>/dev/null
   $ wait "$LOCK_HELPER" 2>/dev/null || true
 
-The node boots over the record: the boot pass settles the orphan — reaped,
-cause recovered, exit 0 off the settled head — then the sweep finds the
-settled run with findings and no egress and re-enters the publisher; the
-reconcile beat's own first pass re-reads the completed record and leaves it
-alone. The ambient base URL is poisoned again: the flags are the node's
-only configuration. MENTAT_DAEMON_MAX_IDLE is one second — the enabled
-webhook charter pins residency, so the backstop never fires.
+The node boots over the record: the settle-only boot pass settles the
+orphan — reaped, cause recovered, exit 0 off the settled head — before the
+first delivery could be admitted, then the reconcile beat's immediate
+first pass performs the boot's one open-PR listing, finds the settled run
+with findings and no egress, and re-enters the publisher only. The ambient
+base URL is poisoned again: the flags are the node's only configuration.
+MENTAT_DAEMON_MAX_IDLE is one second — the enabled webhook charter pins
+residency, so the backstop never fires.
 
   $ cat > github-recover.jsonl <<EOF
   > {"expect": {"request_line": "GET /repos/acme/widgets/pulls?state=open&per_page=100 HTTP/1.1"}, "http": {"status": 200, "json": [{"number": 7, "draft": false, "author_association": "OWNER", "head": {"sha": "$HEAD_SHA"}, "base": {"ref": "main"}}]}}
@@ -111,7 +82,6 @@ webhook charter pins residency, so the backstop never fires.
   > {"expect": {"request_line": "GET /repos/acme/widgets/issues/7/comments?per_page=100 HTTP/1.1"}, "http": {"status": 200, "json": []}}
   > {"expect": {"request_line": "POST /repos/acme/widgets/pulls/7/comments HTTP/1.1"}, "http": {"status": 201, "json": {"id": 9001}}}
   > {"expect": {"request_line": "POST /repos/acme/widgets/issues/7/comments HTTP/1.1"}, "http": {"status": 201, "json": {"id": 9002}}}
-  > {"expect": {"request_line": "GET /repos/acme/widgets/pulls?state=open&per_page=100 HTTP/1.1"}, "http": {"status": 200, "json": [{"number": 7, "draft": false, "author_association": "OWNER", "head": {"sha": "$HEAD_SHA"}, "base": {"ref": "main"}}]}}
   > EOF
   $ start_fake_server github-recover.jsonl capture-gh2 gh-port2
   $ GH_URL="http://127.0.0.1:$(cat gh-port2)"
@@ -119,7 +89,7 @@ webhook charter pins residency, so the backstop never fires.
   $ unset MENTAT_CHARTER_GIT_URL
   $ trap stop_daemon EXIT
   $ export MENTAT_DAEMON_MAX_IDLE=1
-  $ mentatd --github-base-url "$GH_URL" --charter-git-url "$PWD/origin.git" \
+  $ mentatd --github-base-url "$GH_URL" --charter-git-base "$PWD/remotes" \
   >   >daemon-serve.out 2>&1 &
   $ MENTAT_DAEMON_PID=$!
   $ mentat_cram wait-line '"cause":"recovered"' "$RECEIPTS"

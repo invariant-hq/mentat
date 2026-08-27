@@ -212,6 +212,58 @@ wait_captured () { mentat_cram wait-file "capture/request-$1.json"; }
 # Reap $1 and echo its exit code.
 wait_exit () { wait "$1"; echo $?; }
 
+# --- charter fixtures ----------------------------------------------------------
+
+# The shared pull-request repository fixture: a base branch, a feature head,
+# and a bare remote carrying refs/pull/7/head — what the derived https remote
+# would serve, as a local path at $1 (default origin.git; parents created, so
+# a git-base layout like remotes/acme/widgets.git works). Exports HEAD_SHA.
+make_pr_fixture () {
+  local remote="${1:-origin.git}"
+  git init -q work
+  git -C work config user.email t@test.invalid
+  git -C work config user.name T
+  printf 'hello\n' > work/lib.txt
+  git -C work add lib.txt
+  git -C work commit -qm base
+  git -C work branch -m main
+  git -C work checkout -qb feature
+  printf 'hello\nnew line\n' > work/lib.txt
+  git -C work commit -qam change
+  HEAD_SHA=$(git -C work rev-parse HEAD)
+  mkdir -p "$(dirname "$remote")"
+  git clone -q --bare work "$remote"
+  git -C "$remote" update-ref refs/pull/7/head "$HEAD_SHA"
+}
+
+# Install the standard pr-review charter (webhook + cli arms over
+# acme/widgets, wall clock $1, default 5m) with both credentials in place.
+# Exports CDIR. Proposals that differ from this shape stay inline in their
+# .t — the divergence is the test's own meaning.
+install_review_charter () {
+  local wall_clock="${1:-5m}"
+  mkdir -p proposal
+  cat > proposal/charter.json <<EOF
+{ "charter": 1, "name": "pr-review",
+  "workspace": { "repo": "acme/widgets" },
+  "trigger": [
+    { "kind": "github_webhook", "events": ["pull_request.opened"] },
+    { "kind": "cli" } ],
+  "run": { "mode": "review", "prompt": "prompt.md",
+           "output_schema": "findings.schema.json" },
+  "budget": { "per_run": { "wall_clock": "$wall_clock" } },
+  "publish": { "github": "review-threads" } }
+EOF
+  printf 'Review the diff for defects.\n' > proposal/prompt.md
+  printf '{"type":"object"}\n' > proposal/findings.schema.json
+  mentat charter add proposal >/dev/null
+  CDIR="$PWD/config/mentat/charters/pr-review"
+  printf 'test-read-token\n' > "$CDIR/secrets/read-token"
+  chmod 600 "$CDIR/secrets/read-token"
+  printf 'test-write-token\n' > "$CDIR/secrets/write-token"
+  chmod 600 "$CDIR/secrets/write-token"
+}
+
 # --- daemon (mentatd) ----------------------------------------------------------
 
 # find_or_spawn resolves mentatd as a sibling of the running mentat binary.

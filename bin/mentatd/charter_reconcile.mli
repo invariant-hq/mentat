@@ -3,149 +3,55 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(** The node's charter reconcile fold — the decisions a resident pass owes a
-    charter's durable record, as pure tables over probe thunks, so the full
-    tables are unit-testable with no store, fence, or child behind them.
+(** The node's charter reconcile drivers — the thin interpreters that read
+    a charter's durable record fresh and drive the pure reconcile tables
+    ({!Mentat_charter.Record}, the receipt folds) through the fire
+    pipeline.
 
-    A charter's record is its receipt log plus the per-session run fence;
-    the fold holds no state of its own and reads both fresh on every pass,
-    so running it twice is running it once. Its unit of judgment is one
-    event identity's record, split across two tables:
+    One charter's pass owes its record four things, judged in order: every
+    pending run — a spawned disposition with no reaped line
+    ({!Mentat_charter.Receipt.pending_runs}) — is settled honestly when its
+    fence reads free ([Charter_fire.settle_recovered]) and narrated when
+    held past budget or unprobeable; every reaped disposition still owed
+    its alert re-fires it — the reap and the alert are two appends with an
+    external hook between them, so a crash window between them is repaired
+    here, idempotently, off the receipt-log dedup; every delivery receipt
+    with no disposition — an acknowledged arrival a dead process never
+    decided, which the sender will not redeliver — is rebuilt from its own
+    members and re-driven through the ordinary dispose, or closed with a
+    skipped line when it cannot be rebuilt; and, for an enabled charter,
+    [Charter_fire.fire_sweep] drives the sweep half of the fold. A disabled
+    charter still settles pending runs, repairs alerts, and closes its open
+    deliveries as skipped-disabled — the money is already spent and the
+    record is owed — but sweeps nothing and publishes nothing.
 
-    - {!run_action} judges a {e pending} run — a spawned disposition with
-      no reaped line, the record left behind whenever the reaping process
-      is stopped, killed, or crashes while a run child lives. The row is
-      total: free, held, and unprobeable fences each have a decision, so
-      the process driving the pipeline may be cancelled at any instant and
-      the next pass settles whatever was left open.
-    - {!sweep_action} states the sweep's law over an identity's receipts:
-      drive it through the pipeline, re-enter the publisher, or leave the
-      completed record alone. Its interpreter is [Charter_fire.fire_sweep]'s
-      own fold; it is stated and tested here so the node's whole decision
-      surface is enumerable in one place. *)
-
-type fence =
-  [ `Free  (** No process holds the run fence — the child is gone. *)
-  | `Held
-    (** Some process holds it: the run child, or the owner resuming the
-        session interactively. The node never signals a holder — a run
-        driver's owner line cannot be told apart from the owner's own
-        resume, and killing the owner's session to enforce a budget is a
-        worse failure than narrating an overdue run. *)
-  | `Io of string  (** The fence could not be probed. *) ]
-(** The type for a run-fence probe's answer, in the table's vocabulary. The
-    fence, never a stored pid, is the liveness truth: fences release on
-    holder death, so a free fence over a spawned-but-unreaped run means no
-    process anywhere is left to write the record's reaped line. *)
-
-type run =
-  [ `Settle
-    (** The fence is free: the child is gone, no reaper survives it, and
-        the record owes its one honest reaped line
-        ([Charter_fire.settle_recovered]). *)
-  | `Leave
-    (** A live holder within the run's wall-clock budget: its own reaper —
-        or a later pass — owes the record; touch nothing. *)
-  | `Overdue
-    (** A live holder past the run's wall-clock budget, with no reaper
-        left to enforce it: say so loudly and keep leaving it — the run's
-        own step bound still limits it, and the record settles when the
-        fence frees. *)
-  | `Skip of string
-    (** The fence was unprobeable: never settle over a fence that may
-        still be held; say why and leave the record for the next pass. *)
-  ]
-(** The type for the pending-run decision. *)
-
-val run_action : fence:(unit -> fence) -> overdue:(unit -> bool) -> run
-(** [run_action ~fence ~overdue] is the pending-run table over lazy
-    probes — [overdue] (the clock read against the spawned receipt's
-    timestamp) is consulted only under a held fence, so the clock is never
-    spent on an arm that cannot use it. *)
-
-type sweep =
-  [ `Drive
-    (** Commit the identity through the fire pipeline: it never claimed,
-        or its claim has no spawned line — a committer that died between
-        claim and spawn — which the pipeline's admission adopts. *)
-  | `Republish of string
-    (** The named session ran to a publishable settle and no egress line
-        exists: re-enter the publisher only — the upsert is idempotent, so
-        finishing an interrupted publication spends nothing and mints no
-        run. *)
-  | `Done  (** The record is complete; nothing is owed. *) ]
-(** The type for the sweep decision over one identity's receipts. *)
-
-val sweep_action :
-  claimed:bool ->
-  spawned:(unit -> bool) ->
-  egress:(unit -> bool) ->
-  settled:(unit -> string option) ->
-  sweep
-(** [sweep_action ~claimed ~spawned ~egress ~settled] is the sweep table
-    over lazy probes: [spawned] (whether the log carries the claim's
-    spawned line) is consulted only under a held claim, [egress] only under
-    a committed spawn, and [settled] (the publishable session, if any) only
-    when no egress line exists. A pending run answers [`Done] here — its
-    fate belongs to {!run_action}, never to the sweep. *)
-
-(** One spawned run with no reaped line. *)
-module Pending : sig
-  type t = {
-    identity : string;  (** The triggering event's identity string. *)
-    digest : string;
-        (** The charter policy digest the run was spawned under. *)
-    session : string;  (** The run's derived session id. *)
-    spawned_at : float;
-        (** The spawned receipt's timestamp, seconds since the epoch — what
-            a pass re-arms the wall-clock judgment from. *)
-  }
-  (** The type for pending runs. *)
-end
-
-val pending_runs : Mentat_charter.Receipt.t list -> Pending.t list
-(** [pending_runs receipts] is the runs whose record is open: every spawned
-    disposition in [receipts] with no reaped disposition under the same
-    charter digest and event identity, in log order. Pairing is by digest
-    and identity together — never by session — so each policy's record is
-    whole on its own: a policy edit's re-run neither adopts nor closes an
-    earlier policy's run. *)
-
-(** {1:drivers Drivers}
-
-    The thin interpreters over the tables. All of them narrate refusals and
-    failures through the environment's line sink and never raise: a broken
-    charter or an unreachable remote must not stop the resident, and the
-    next beat retries for free. Every line one charter's pass speaks — the
-    fold's own and the fire pipeline's — is prefixed with that charter's
-    name: one pass speaks for many charters, so the prefix is the line's
-    provenance. Passes never run concurrently: {!reconcile} and {!pass}
-    serialize under one module-level gate — one node runs per process, and
-    a pass arriving while another is in flight waits its turn rather than
-    doubling the GitHub listings and racing the publisher re-entry into
-    its upsert. The gate makes every caller — the boot pass, the periodic
-    beat, the after-reap re-entry — correct by construction. *)
+    All drivers narrate refusals and failures through the environment's
+    line sink and never raise: a broken charter or an unreachable remote
+    must not stop the resident, and the next beat retries for free. Every
+    line one charter's pass speaks — the drivers' own and the fire
+    pipeline's — is prefixed with that charter's name: one pass speaks for
+    many charters, so the prefix is the line's provenance. Passes never run
+    concurrently: {!pass} and {!pass_settle} serialize under one
+    module-level gate — one node runs per process — while {!reconcile}, the
+    after-reap re-entry, {e tries} the gate and yields to a pass in flight
+    rather than parking its caller behind a full roster pass. *)
 
 val reconcile :
   Charter_fire.env ->
   repo_for:(Charter_store.Loaded.t -> (Charter_fire.Repo.t, string) result) ->
   Charter_store.Loaded.t ->
   unit
-(** [reconcile env ~repo_for loaded] is one charter's pass. Every pending
-    run ({!pending_runs} over a fresh receipt read) is judged by
-    {!run_action} and interpreted: the honest settle for a freed fence
-    ([Charter_fire.settle_recovered]), narration for an overdue or
-    unprobeable one, silence for a live run within budget. Then, for an
-    enabled charter, [repo_for loaded] builds the repository connection —
-    fresh on every pass, so an owner's credential or configuration edit is
-    in force at the next beat — and [Charter_fire.fire_sweep] drives the
-    sweep half of the fold. A disabled charter still settles its pending
-    runs — the money is already spent and the record is owed — but sweeps
-    nothing and publishes nothing. This is the re-entry a caller runs for
-    one charter after reaping one of its runs: a publication that failed
-    after the reap is finished here promptly instead of waiting out the
-    periodic beat, and heads whose deliveries were refused at a full
-    intake queue re-enter as soon as the pump frees. *)
+(** [reconcile env ~repo_for loaded] is one charter's pass — the re-entry a
+    caller runs for one charter after reaping one of its runs, so a
+    publication that failed after the reap, or a delivery refused at a full
+    intake queue, converges now instead of waiting out the periodic beat.
+    [repo_for loaded] builds the repository connection fresh, so an owner's
+    credential or configuration edit is in force at the next entry. The
+    re-entry never waits: when the module gate is already held — a full
+    roster pass in flight — it returns at once, because the holder's own
+    pass re-reads this charter's record anyway and the beat backstops
+    whatever it misses, while parking the caller (the node's pump fiber)
+    would stall every queued delivery for the pass's whole length. *)
 
 val pass :
   Charter_fire.env ->
@@ -153,23 +59,31 @@ val pass :
   unit
 (** [pass env ~repo_for] reconciles every installed charter, reading the
     roster fresh; a charter that fails to load is narrated and passed over,
-    never a stop. This is the boot fold: run it before serving deliveries,
-    so the records a previous life left open are settled before new ones
-    are admitted. *)
+    never a stop. The environment's stop seam is consulted before each
+    charter and before each fresh run the fold would commit: a requested
+    stop ends the pass without driving further work — provisioning and
+    spawning under a stop would spend money the requester asked not to
+    spend — and whatever it leaves is the next pass's to finish. *)
 
-val reconcile_interval_s : float
-(** The seconds between periodic passes of {!loop} — ten minutes: a
-    backstop's cadence, behind webhook deliveries and the after-reap
-    re-entry, that keeps a lost delivery, an interrupted publication, or an
-    orphaned run converging without redelivery. *)
+val pass_settle : Charter_fire.env -> unit
+(** [pass_settle env] is the settle-only half of {!pass}: every installed
+    charter's pending runs are judged and settled, and nothing else — no
+    repository connection, no network, no re-drive, no sweep. This is the
+    boot fold's synchronous step: it preserves settle-before-first-delivery
+    without gating the daemon's serve surfaces on GitHub, and the loop's
+    own immediate first {!pass} is the boot sweep. *)
 
 val loop :
   Charter_fire.env ->
   repo_for:(Charter_store.Loaded.t -> (Charter_fire.Repo.t, string) result) ->
   unit
-(** [loop env ~repo_for] runs {!pass} now, then again every
-    {!reconcile_interval_s}, until the environment's stop seam asks for a
-    stop or the fiber is cancelled — the sleep is cancellable, so teardown
-    never waits on the beat. Running the first pass immediately is
-    deliberate: the fold is idempotent, so a caller that already ran its
-    boot pass merely buys a cheap re-read. *)
+(** [loop env ~repo_for] runs {!pass} now, then again every ten minutes,
+    until the environment's stop seam asks for a stop or the fiber is
+    cancelled — the sleep is cancellable, so teardown never waits on the
+    beat. The cadence is a backstop's, behind webhook deliveries and the
+    after-reap re-entry: long enough that a beat's open-PR listings stay a
+    rounding error against API budgets, short enough that a lost delivery,
+    an interrupted publication, or an orphaned run converges well inside a
+    reviewer's patience. Running the first pass immediately is deliberate:
+    the boot sequence runs only {!pass_settle} synchronously, so this first
+    pass is the boot's one full fold — not a repeat of it. *)

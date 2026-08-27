@@ -11,22 +11,11 @@ MENTAT_GITHUB_BASE_URL is poisoned to prove neither the node's reads nor
 its publication children inherit it.
 
 The repository fixture: a base branch, a feature head, and a bare remote
-carrying refs/pull/7/head, as a local path the --charter-git-url flag
-points at.
+carrying refs/pull/7/head — laid out as <base>/acme/widgets.git, since the
+--charter-git-base flag names a host prefix and the node derives each
+charter's remote from the repository it watches.
 
-  $ git init -q work
-  $ git -C work config user.email t@test.invalid
-  $ git -C work config user.name T
-  $ printf 'hello\n' > work/lib.txt
-  $ git -C work add lib.txt
-  $ git -C work commit -qm base
-  $ git -C work branch -m main
-  $ git -C work checkout -qb feature
-  $ printf 'hello\nnew line\n' > work/lib.txt
-  $ git -C work commit -qam change
-  $ HEAD_SHA=$(git -C work rev-parse HEAD)
-  $ git clone -q --bare work origin.git
-  $ git -C origin.git update-ref refs/pull/7/head "$HEAD_SHA"
+  $ make_pr_fixture remotes/acme/widgets.git
 
 The fakes come up before the daemon: the node's children run under the
 environment the daemon captured at boot.
@@ -59,7 +48,7 @@ installed yet.
   $ trap stop_daemon EXIT
   $ export MENTAT_DAEMON_MAX_IDLE=300
   $ mentatd --ingress-port 0 --github-base-url "$GH_URL" \
-  >   --charter-git-url "$PWD/origin.git" >daemon-serve.out 2>&1 &
+  >   --charter-git-base "$PWD/remotes" >daemon-serve.out 2>&1 &
   $ MENTAT_DAEMON_PID=$!
   $ wait_for_file "$XDG_DATA_HOME/mentat/daemon/daemon.json"
   $ IPORT=$(sed -n 's/^mentatd ingress: 127\.0\.0\.1://p' daemon-serve.out)
@@ -69,26 +58,7 @@ The charter is installed while the node runs — the file is the
 registration, so the minted id resolves at the next request with no
 restart.
 
-  $ mkdir proposal
-  $ cat > proposal/charter.json <<'EOF'
-  > { "charter": 1, "name": "pr-review",
-  >   "workspace": { "repo": "acme/widgets" },
-  >   "trigger": [
-  >     { "kind": "github_webhook", "events": ["pull_request.opened"] },
-  >     { "kind": "cli" } ],
-  >   "run": { "mode": "review", "prompt": "prompt.md",
-  >            "output_schema": "findings.schema.json" },
-  >   "budget": { "per_run": { "wall_clock": "5m" } },
-  >   "publish": { "github": "review-threads" } }
-  > EOF
-  $ printf 'Review the diff for defects.\n' > proposal/prompt.md
-  $ printf '{"type":"object"}\n' > proposal/findings.schema.json
-  $ mentat charter add proposal >/dev/null
-  $ CDIR="$PWD/config/mentat/charters/pr-review"
-  $ printf 'test-read-token\n' > "$CDIR/secrets/read-token"
-  $ chmod 600 "$CDIR/secrets/read-token"
-  $ printf 'test-write-token\n' > "$CDIR/secrets/write-token"
-  $ chmod 600 "$CDIR/secrets/write-token"
+  $ install_review_charter
   $ IID=$(cat "$CDIR/ingress.id")
   $ SECRET=$(cat "$CDIR/secrets/webhook")
   $ RECEIPTS="$PWD/state/mentat/charters/pr-review/receipts.jsonl"

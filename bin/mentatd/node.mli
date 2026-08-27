@@ -46,10 +46,10 @@ val create :
   Composition.shared ->
   stop:Stop_signal.t ->
   ?github_base_url:string ->
-  ?git_url:string ->
+  ?git_base:string ->
   unit ->
   (t, string) result
-(** [create shared ~stop ?github_base_url ?git_url ()] assembles the node
+(** [create shared ~stop ?github_base_url ?git_base ()] assembles the node
     over the daemon's shared composition. [stop] is the daemon's stop flag,
     threaded onto the pipeline's stop seam: a requested stop reads as a
     stop request in a reaping fire, and the seam's force arm never fires
@@ -63,17 +63,13 @@ val create :
     environment-writable API base would redirect Bearer-token requests, so
     the variable is scrubbed from the child environment and, when a base is
     configured here, rewritten to it — reads and publication then address
-    one validated host ({!child_environment}). [git_url] overrides the
-    remote every checkout fetches from (the charter's repository on
-    github.com otherwise) — the explicit-override seam, never payload data.
-    [Error message] when no [mentat] sibling binary resolves, so a node
-    that could never spawn a run is refused at boot. *)
-
-val env : t -> name:string -> Charter_fire.env
-(** [env t ~name] is the pipeline environment for one fire of charter
-    [name]: the node's process-scoped effects, narration prefixed
-    [charter <name>: ] — one resident process speaks for many charters, so
-    the prefix is the line's provenance. *)
+    one validated host ({!child_environment}). [git_base] overrides the git
+    host prefix every checkout's remote is derived from
+    ([https://github.com] otherwise): the remote is
+    [<base>/<owner>/<repo>.git] per charter ({!checkout_url}), so one flag
+    serves charters over many repositories — the explicit-override seam,
+    never payload data. [Error message] when no [mentat] sibling binary
+    resolves, so a node that could never spawn a run is refused at boot. *)
 
 val reconcile_env : t -> Charter_fire.env
 (** [reconcile_env t] is the pipeline environment for the reconcile fold's
@@ -94,17 +90,19 @@ val repo : t -> Charter_store.Loaded.t -> (Charter_fire.Repo.t, string) result
 val ingress : t -> Mentat_server.Ingress.t
 (** [ingress t] is the webhook ingress the wire family routes through. Its
     callbacks keep the serving fiber prompt: [resolve] folds the installed
-    charters fresh per request, naming each unloadable charter in the trace
-    log — a broken charter answers to no id; [deliver] re-loads the
-    addressed charter, admits the delivery, and hands the admitted event to
-    the pump's queue, per the module's 202 contract. A delivery whose
-    [X-GitHub-Event] header names a foreign kind ([ping], say) is answered
-    [202] and noted in the trace log only — the receipt log speaks charter
-    facts, and the header, while unverified, is a verified sender's claim
-    about its own delivery ({!event_route}). A verified delivery for a
-    disabled charter is admitted — arrival is a fact — then receipted
-    skipped-disabled without reaching the queue. Deliveries rejected at the
-    wire over their signature are counted and noted in the trace log. *)
+    charters fresh per request and is side-effect minimal on that
+    unauthenticated input — a broken charter answers to no id, silently;
+    the dashboard and the reconcile beat name it — while [deliver] re-loads
+    the addressed charter, routes the verified body ({!event_route}),
+    admits the delivery, and hands the admitted event to the pump's queue,
+    per the module's 202 contract. A recognizable ping, or a foreign-kind
+    body under a foreign-kind header, is answered [202] and noted in the
+    trace log only — the receipt log speaks charter facts; a body the
+    narrow decode refuses under a pull-request-claiming or absent header is
+    refused. A verified delivery for a disabled charter is admitted —
+    arrival is a fact — then receipted skipped-disabled without reaching
+    the queue. Deliveries rejected at the wire over their signature are
+    counted and noted in the trace log. *)
 
 val pump : t -> after_reap:(Charter_store.Loaded.t -> unit) -> unit
 (** [pump t ~after_reap] consumes the queue and drives each admitted event
@@ -141,10 +139,26 @@ val resolution :
     and enabled state of the binding whose minted id is [ingress_id], or
     unknown when none matches. *)
 
-val event_route : string option -> [ `Admit | `Foreign of string ]
-(** [event_route header] routes a delivery on its [X-GitHub-Event] header:
-    [`Admit] for [pull_request] and for an absent header — the narrow
-    decode is the arbiter then — and [`Foreign kind] for any other kind. *)
+val event_route :
+  string option ->
+  body:string ->
+  [ `Admit | `Ping | `Foreign of string | `Malformed of string ]
+(** [event_route header ~body] routes a delivery on its verified body; the
+    unverified [X-GitHub-Event] header may only confirm. [`Admit] when the
+    narrow decode admits [body] as a pull-request event — whatever the
+    header claims, since the HMAC covers the body alone and a relabeled
+    signed delivery must never turn a 202 into a silent drop. When the
+    decode refuses: [`Ping] for a recognizable ping body
+    ({!Mentat_charter.Event.ping}); [`Foreign kind] when the header names a
+    non-pull-request kind the refusing body is consistent with; and
+    [`Malformed reason] — a refusal — when the header claimed
+    [pull_request] or was absent. *)
+
+val checkout_url : git_base:string option -> repo:string -> string
+(** [checkout_url ~git_base ~repo] is the remote a charter watching [repo]
+    fetches its checkout from: [<base>/<repo>.git], where the base is
+    [git_base] (a trailing ['/'] tolerated) or [https://github.com] when
+    none is configured. *)
 
 val child_environment :
   (string * string) list ->

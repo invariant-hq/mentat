@@ -7,10 +7,7 @@ open Mentat_charter
 open Mentat_web
 
 module Observed = struct
-  type run = {
-    pending : Charter_reconcile.Pending.t;
-    fence : Charter_reconcile.fence;
-  }
+  type run = { pending : Receipt.Pending.t; fence : Record.fence }
 
   type charter = {
     loaded : Charter_store.Loaded.t;
@@ -27,15 +24,6 @@ end
    receipts, one fence probe per open run — so an owner's edit is in force
    at the next request and the page can never disagree with the record. *)
 
-let probe_fence store session : Charter_reconcile.fence =
-  match
-    Mentat_store.Run_lock.holder store
-      ~session:(Mentat_session.Id.of_string session)
-  with
-  | `Free -> `Free
-  | `Held _ -> `Held
-  | `Io io -> `Io (Format.asprintf "%a" Mentat_store.Io.pp io)
-
 let observe ~dirs ~store =
   Result.map
     (List.map (fun (name, entry) ->
@@ -48,14 +36,14 @@ let observe ~dirs ~store =
                | Error _ -> []
                | Ok receipts ->
                    List.map
-                     (fun (pending : Charter_reconcile.Pending.t) ->
+                     (fun (pending : Receipt.Pending.t) ->
                        {
                          Observed.pending;
                          fence =
-                           probe_fence store
-                             pending.Charter_reconcile.Pending.session;
+                           Charter_fire.probe_fence store
+                             ~session:pending.Receipt.Pending.session;
                        })
-                     (Charter_reconcile.pending_runs receipts)
+                     (Receipt.pending_runs receipts)
              in
              Observed.Charter { Observed.loaded; receipts; runs }))
     (Charter_store.roster dirs)
@@ -82,11 +70,6 @@ let detail text =
 
 let identity_span identity =
   Html.El.span ~at:[ Html.At.class_ "identity" ] [ Html.El.txt identity ]
-
-(* Admission's own judgment: a webhook-armed charter's deliveries are
-   webhook-shaped, so its effective rate carries the in-admission default. *)
-let trigger_of charter =
-  match Charter.webhook_arm charter with Some _ -> `Webhook | None -> `Cli
 
 (* ── The attention fold ──────────────────────────────────────────────────
    Buckets fix the page's order; within one bucket the roster's order and
@@ -122,7 +105,7 @@ let session_of ~digest ~identity receipts =
         | Receipt.Kind.Disposition (Receipt.Disposition.Reaped { session; _ })
           ->
             Some session
-        | Receipt.Kind.Disposition _ | Receipt.Kind.Delivery
+        | Receipt.Kind.Disposition _ | Receipt.Kind.Delivery _
         | Receipt.Kind.Egress _ | Receipt.Kind.Alert _ ->
             acc
       else acc)
@@ -161,7 +144,7 @@ let alert_items ~name ~digest receipts =
                   item ~kind:"failed" ~name
                     (parts "settled without a publishable outcome") )
           | Receipt.Transition.Fenced -> None)
-      | Receipt.Kind.Alert _ | Receipt.Kind.Delivery
+      | Receipt.Kind.Alert _ | Receipt.Kind.Delivery _
       | Receipt.Kind.Disposition _ | Receipt.Kind.Egress _ ->
           None)
     receipts
@@ -173,9 +156,9 @@ let alert_items ~name ~digest receipts =
 let run_items ~name ~now ~budget runs =
   List.concat_map
     (fun { Observed.pending; fence } ->
-      let { Charter_reconcile.Pending.session; spawned_at; _ } = pending in
+      let { Receipt.Pending.session; spawned_at; _ } = pending in
       match
-        Charter_reconcile.run_action
+        Record.run_action
           ~fence:(fun () -> fence)
           ~overdue:(fun () ->
             now -. spawned_at > budget.Charter.Budget.wall_clock)
@@ -291,7 +274,8 @@ let attention_of ~now = function
           alert_items ~name ~digest receipts
           @ run_items ~name ~now ~budget runs
           @ fence_items ~name ~digest ~now ~budget
-              ~trigger:(trigger_of charter) receipts
+              ~trigger:(Charter.delivery_trigger charter)
+              receipts
           @ owed_items ~name ~digest receipts)
 
 let attention ~now entries =
@@ -305,25 +289,12 @@ let attention ~now entries =
 let line nodes = Html.El.li nodes
 let text_line text = line [ Html.El.txt text ]
 
-(* Labels build on the log's own wire tokens, so they can never drift from
-   the vocabulary the receipts carry. *)
-let disposition_label disposition =
-  let base = Receipt.Disposition.name disposition in
-  match disposition with
-  | Receipt.Disposition.Fenced meter ->
-      Printf.sprintf "%s:%s" base (Receipt.Meter.to_string meter)
-  | Receipt.Disposition.Reaped { exit; _ } -> Printf.sprintf "%s:%d" base exit
-  | Receipt.Disposition.Spawned _ | Receipt.Disposition.Skipped _
-  | Receipt.Disposition.Dup | Receipt.Disposition.Already_exists
-  | Receipt.Disposition.Superseded | Receipt.Disposition.Refused _ ->
-      base
-
 let last_disposition receipts =
   List.fold_left
     (fun acc (r : Receipt.t) ->
       match r.Receipt.kind with
       | Receipt.Kind.Disposition disposition -> Some (r, disposition)
-      | Receipt.Kind.Delivery | Receipt.Kind.Egress _ | Receipt.Kind.Alert _ ->
+      | Receipt.Kind.Delivery _ | Receipt.Kind.Egress _ | Receipt.Kind.Alert _ ->
           acc)
     None receipts
 
@@ -332,7 +303,7 @@ let last_egress receipts =
     (fun acc (r : Receipt.t) ->
       match r.Receipt.kind with
       | Receipt.Kind.Egress { summary; threads } -> Some (r, summary, threads)
-      | Receipt.Kind.Delivery | Receipt.Kind.Disposition _
+      | Receipt.Kind.Delivery _ | Receipt.Kind.Disposition _
       | Receipt.Kind.Alert _ ->
           acc)
     None receipts
@@ -342,19 +313,6 @@ let egress_token = function
   | `Updated -> "updated"
   | `None_needed -> "none_needed"
   | `Skipped_no_token -> "skipped_no_token"
-
-let spend_line ~digest ~now ~budget receipts =
-  let spend = Fence.spend_in_window ~digest ~now receipts in
-  match budget.Charter.Budget.usd_per_day with
-  | Some limit ->
-      text_line (Printf.sprintf "spend 24h: %.2f usd of %.2f" spend limit)
-  | None -> text_line (Printf.sprintf "spend 24h: %.2f usd (no limit)" spend)
-
-let runs_line ~digest ~now ~budget ~trigger receipts =
-  let spawns = Fence.spawns_in_window ~digest ~now receipts in
-  match Fence.effective_runs_per_hour ~budget ~trigger with
-  | Some limit -> text_line (Printf.sprintf "runs 1h: %d of %d" spawns limit)
-  | None -> text_line (Printf.sprintf "runs 1h: %d (no limit)" spawns)
 
 let last_line receipts =
   match last_disposition receipts with
@@ -373,7 +331,7 @@ let last_line receipts =
       line
         ([
            Html.El.txt
-             (Printf.sprintf "last: %s " (disposition_label disposition));
+             (Printf.sprintf "last: %s " (Receipt.Disposition.label disposition));
            stamp r.Receipt.at;
          ]
         @ session)
@@ -422,9 +380,11 @@ let record_row ~now ~ingress = function
             ]
         | Ok receipts ->
             [
-              spend_line ~digest ~now ~budget receipts;
-              runs_line ~digest ~now ~budget ~trigger:(trigger_of charter)
-                receipts;
+              text_line (Fence.spend_line ~digest ~now ~budget receipts);
+              text_line
+                (Fence.runs_line ~digest ~now ~budget
+                   ~trigger:(Charter.delivery_trigger charter)
+                   receipts);
               last_line receipts;
               egress_line receipts;
             ]

@@ -6,11 +6,23 @@
 open! Cmdliner
 
 let serve socket stop spawned web web_port ingress_port github_base_url
-    charter_git_url =
+    charter_git_base =
   if stop then Daemon.stop ()
   else
     Daemon_server.serve ~socket_override:socket ~spawned ~web ~web_port
-      ~ingress_port ~github_base_url ~charter_git_url
+      ~ingress_port ~github_base_url ~charter_git_base
+
+(* TCP ports live in 0–65535. An out-of-range value would raise only at
+   bind time — or persist a permanently failing service unit — so both
+   surfaces refuse it as a usage error at the flag. *)
+let port_conv =
+  let parse s =
+    match int_of_string_opt s with
+    | Some port when 0 <= port && port <= 65535 -> Ok port
+    | Some _ | None ->
+        Error (`Msg "PORT must be an integer between 0 and 65535")
+  in
+  Arg.conv (parse, Format.pp_print_int)
 
 let socket_opt =
   Arg.(
@@ -55,7 +67,7 @@ let web_flag =
 let web_port_opt =
   Arg.(
     value
-    & opt (some int) None
+    & opt (some port_conv) None
     & info [ "web-port" ] ~docv:"PORT"
         ~doc:
           "Bind the browser frontend to $(docv) instead of an ephemeral port. \
@@ -64,7 +76,7 @@ let web_port_opt =
 let ingress_port_opt =
   Arg.(
     value
-    & opt (some int) None
+    & opt (some port_conv) None
     & info [ "ingress-port" ] ~docv:"PORT"
         ~doc:
           "Also bind the webhook ingress on $(b,127.0.0.1:)$(docv) ($(b,0) \
@@ -91,15 +103,17 @@ let github_base_url_opt =
            variable from every child it spawns and substitutes this value \
            when given.")
 
-let charter_git_url_opt =
+let charter_git_base_opt =
   Arg.(
     value
     & opt (some string) None
-    & info [ "charter-git-url" ] ~docv:"URL"
+    & info [ "charter-git-base" ] ~docv:"BASE"
         ~doc:
-          "Override the git remote a charter run's checkout fetches from \
-           (derived from the charter's repository by default) — for GitHub \
-           Enterprise hosts and offline test fixtures. A flag for the same \
+          "Override the git host prefix charter checkouts fetch from: each \
+           charter's remote is $(docv)$(b,/<owner>/<repo>.git), derived from \
+           the repository it watches ($(b,https://github.com) by default) — \
+           for GitHub Enterprise hosts and offline test fixtures, and one \
+           flag serves charters over many repositories. A flag for the same \
            reason as $(b,--github-base-url): the node takes its remotes from \
            validated configuration, never from the environment.")
 
@@ -136,10 +150,10 @@ let man =
        restart.";
     `P
       "$(b,--ingress-port) binds the loopback listener a webhook tunnel \
-       points at; $(b,--github-base-url) and $(b,--charter-git-url) override \
-       the GitHub API base and the checkout remote. All three are flags on \
-       this daemon's own surface, deliberately never read from the \
-       environment. A daemon holding at least one enabled webhook charter \
+       points at; $(b,--github-base-url) and $(b,--charter-git-base) override \
+       the GitHub API base and the git host checkouts fetch from. All three \
+       are flags on this daemon's own surface, deliberately never read from \
+       the environment. A daemon holding at least one enabled webhook charter \
        never stops itself as idle — the charter is a standing commission, and \
        the service manager restarts failures only, so a clean idle-stop would \
        leave later deliveries bouncing.";
@@ -193,7 +207,7 @@ let print_flag =
 let install_ingress_port_opt =
   Arg.(
     value
-    & opt (some int) None
+    & opt (some port_conv) None
     & info [ "ingress-port" ] ~docv:"PORT"
         ~doc:
           "Bake $(b,--ingress-port)=$(docv) into the unit's exec line, so \
@@ -210,6 +224,38 @@ let install_github_base_url_opt =
           "Bake $(b,--github-base-url)=$(docv) into the unit's exec line — \
            the GitHub API base for the resident charter node's reads and \
            its publication children, for GitHub Enterprise hosts.")
+
+let install_charter_git_base_opt =
+  Arg.(
+    value
+    & opt (some string) None
+    & info [ "charter-git-base" ] ~docv:"BASE"
+        ~doc:
+          "Bake $(b,--charter-git-base)=$(docv) into the unit's exec line — \
+           the git host prefix charter checkouts fetch from, for GitHub \
+           Enterprise hosts whose repositories exist nowhere else.")
+
+let install_web_flag =
+  Arg.(
+    value & flag
+    & info [ "web" ]
+        ~doc:
+          "Bake $(b,--web) into the unit's exec line, so the resident \
+           daemon serves the browser frontend — and the charters dashboard \
+           at $(b,/charters) — at every start. Only one daemon claims a \
+           store, so a service-managed daemon's dashboard exists only this \
+           way. The URL to open, bootstrap token included, is recorded in \
+           $(b,daemon.json), never printed to the service log.")
+
+let install_web_port_opt =
+  Arg.(
+    value
+    & opt (some port_conv) None
+    & info [ "web-port" ] ~docv:"PORT"
+        ~doc:
+          "Bake $(b,--web-port)=$(docv) into the unit's exec line, pinning \
+           the browser frontend's loopback port across restarts. Has no \
+           effect without $(b,--web).")
 
 let install_cmd =
   let doc = "Install mentatd as this user's resident service." in
@@ -252,20 +298,28 @@ let install_cmd =
          A service manager call that fails is a loud error naming the \
          command to run manually; the written unit stays in place.";
       `P
-        "$(b,--ingress-port) and $(b,--github-base-url) are the daemon's \
-         own serve flags, baked into the unit's exec line so the resident \
-         daemon starts with them at every boot. Re-running \
-         $(b,mentatd install) with different flags replaces the unit and \
-         restarts the service on the new exec line.";
+        "$(b,--ingress-port), $(b,--github-base-url), \
+         $(b,--charter-git-base), $(b,--web), and $(b,--web-port) are the \
+         daemon's own serve flags, baked into the unit's exec line so the \
+         resident daemon starts with them at every boot — $(b,--web) is \
+         the only way a service-managed daemon serves the browser frontend \
+         and the $(b,/charters) dashboard, since only one daemon claims a \
+         store. Re-running $(b,mentatd install) with different flags \
+         replaces the unit and restarts the service on the new exec line.";
     ]
   in
   Cmd.v
     (Cmd.info "install" ~doc ~man ~exits:Exit_status.exits)
     (Exit_status.term
        Term.(
-         const (fun print ingress_port github_base_url ->
-             Service.install ~print ~ingress_port ~github_base_url)
-         $ print_flag $ install_ingress_port_opt $ install_github_base_url_opt))
+         const
+           (fun print ingress_port github_base_url charter_git_base web
+                web_port ->
+             Service.install ~print ~ingress_port ~github_base_url
+               ~charter_git_base ~web ~web_port)
+         $ print_flag $ install_ingress_port_opt $ install_github_base_url_opt
+         $ install_charter_git_base_opt $ install_web_flag
+         $ install_web_port_opt))
 
 let uninstall_cmd =
   let doc = "Remove the resident service installed by $(b,mentatd install)." in
@@ -298,7 +352,7 @@ let root =
          Term.(
            const serve $ socket_opt $ stop_flag $ spawned_flag $ web_flag
            $ web_port_opt $ ingress_port_opt $ github_base_url_opt
-           $ charter_git_url_opt))
+           $ charter_git_base_opt))
     info [ stop_cmd; install_cmd; uninstall_cmd ]
 
 let () = Entry.run ~version:Daemon.binary_version root

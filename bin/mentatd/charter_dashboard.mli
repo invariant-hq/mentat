@@ -29,9 +29,9 @@
 (** What one request observed. *)
 module Observed : sig
   type run = {
-    pending : Charter_reconcile.Pending.t;
+    pending : Mentat_charter.Receipt.Pending.t;
         (** A spawned disposition with no reaped line. *)
-    fence : Charter_reconcile.fence;
+    fence : Mentat_charter.Record.fence;
         (** The run's fence, probed at request time. *)
   }
   (** The type for open runs, paired with the liveness probe the

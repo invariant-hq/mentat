@@ -3258,8 +3258,11 @@ let ingress_group =
               in
               equal int ~msg:"a verified delivery is 202" 202 status;
               equal string ~msg:"the 202 is content-free" "" rbody;
-              equal (list string) ~msg:"the resolver saw the path token"
-                [ "charter-1" ] !resolved;
+              (* Once to gate the body read, once after it — custody
+                 verifies against the post-body resolution, so a rotation
+                 cannot race an in-flight delivery. *)
+              equal (list string) ~msg:"the resolver saw the path token twice"
+                [ "charter-1"; "charter-1" ] !resolved;
               let id, enabled, body = one_delivery ~msg:"accepted" deliveries in
               equal string ~msg:"the callback saw the path token" "charter-1"
                 id;
@@ -3558,6 +3561,57 @@ let ingress_group =
                   ingress_path "{}"
               in
               equal int ~msg:"the server still answers" 500 status));
+      test "rotation between the body read and custody revokes the old key"
+        (fun () ->
+          let fresh = "rotated to a fresh 256-bit key" in
+          let calls = ref 0 in
+          let deliveries = ref [] in
+          let rejections = ref [] in
+          let ingress =
+            {
+              Server.Ingress.resolve =
+                (fun ~ingress_id:_ ->
+                  incr calls;
+                  (* The gate resolve answers the retained secret; the
+                     rotation lands before the post-body re-resolve. *)
+                  Server.Ingress.Resolved
+                    {
+                      secret =
+                        (if !calls = 1 then ingress_secret else fresh);
+                      enabled = true;
+                    });
+              deliver =
+                (fun ~ingress_id:_ ~enabled:_ ~event:_ ~delivery_id:_ ~body ->
+                  deliveries := body :: !deliveries;
+                  `Accepted);
+              rejected =
+                Some
+                  (fun ~ingress_id -> rejections := ingress_id :: !rejections);
+            }
+          in
+          with_ingress_server ~ingress (fun ~net ~sw ~dir ->
+              let status, rbody =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers ~secret:ingress_secret "{}")
+                  ingress_path "{}"
+              in
+              equal int ~msg:"the in-flight old-key delivery is revoked" 401
+                status;
+              equal string ~msg:"the 401 is content-free" "" rbody;
+              equal int ~msg:"custody was never offered" 0
+                (List.length !deliveries);
+              equal (list string) ~msg:"the rejection observer fired"
+                [ "charter-1" ] !rejections;
+              (* A delivery signed with the rotated key verifies end to
+                 end against the fresh resolution. *)
+              let status, _ =
+                ingress_post ~net ~dir ~sw
+                  ~headers:(signed_headers ~secret:fresh "{}")
+                  ingress_path "{}"
+              in
+              equal int ~msg:"the fresh key delivers" 202 status;
+              equal int ~msg:"custody followed the fresh key" 1
+                (List.length !deliveries)));
       test "everything else under the prefix is a content-free 404" (fun () ->
           let ingress, _, deliveries =
             scripted_ingress ~secret:ingress_secret ()

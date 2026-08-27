@@ -3,101 +3,32 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(* Unit suite for [Charter_reconcile], the node's charter reconcile fold —
-   the pure decision tables and receipt folds a resident pass judges a
-   charter's durable record by, driven here over thunk probes and
-   hand-built receipts with no store, fence, or child behind them. The
-   module lives in [bin/mentatd] and is not library-linkable, so its source
-   is copied into this test executable by the [copy_files] rule in
+(* Unit suite for [Charter_reconcile], the node's charter reconcile
+   drivers — the honest settle, the owed-alert repair, the delivery
+   re-drive, and the one-pass gate — exercised over a temporary charter
+   estate with injected repository closures. The pure tables the drivers
+   interpret live in [Mentat_charter] and are tested with that library; the
+   module here lives in [bin/mentatd] and is not library-linkable, so its
+   source is copied into this test executable by the [copy_files] rule in
    [dune]. *)
 
 open Windtrap
 open Mentat_charter
 
-let run_decision =
-  Testable.make
-    ~pp:(fun ppf -> function
-      | `Settle -> Format.pp_print_string ppf "Settle"
-      | `Leave -> Format.pp_print_string ppf "Leave"
-      | `Overdue -> Format.pp_print_string ppf "Overdue"
-      | `Skip reason -> Format.fprintf ppf "Skip %S" reason)
-    ~equal:(fun (a : Charter_reconcile.run) (b : Charter_reconcile.run) ->
-      match (a, b) with
-      | `Settle, `Settle | `Leave, `Leave | `Overdue, `Overdue -> true
-      | `Skip _, `Skip _ -> true
-      | _ -> false)
+let head_sha = String.make 40 'a'
 
-let never_overdue () : bool = fail "overdue must not be read on this arm"
+let event ?(action = "opened") ?(number = 7) () =
+  {
+    Event.Pull_request.action;
+    number;
+    head_sha;
+    base_ref = "main";
+    draft = false;
+    author_association = "OWNER";
+    repo = "acme/widgets";
+  }
 
-let run_action ?(overdue = never_overdue) fence =
-  Charter_reconcile.run_action ~fence:(fun () -> fence) ~overdue
-
-(* The pending-run table, arm by arm — including which probes each arm may
-   spend: the clock is read only under a held fence. The free-fence row is
-   the one that makes the pipeline's driver cancellable at any instant: a
-   run orphaned between spawn and reap is settled by the next pass. *)
-let run_table () =
-  equal run_decision ~msg:"a free fence settles the orphaned record honestly"
-    `Settle (run_action `Free);
-  equal run_decision ~msg:"an unprobeable fence is never settled over"
-    (`Skip "") (run_action (`Io "boom"));
-  equal run_decision ~msg:"a live holder within budget is left alone" `Leave
-    (run_action ~overdue:(fun () -> false) `Held);
-  equal run_decision ~msg:"a live holder past budget is narrated, not killed"
-    `Overdue
-    (run_action ~overdue:(fun () -> true) `Held)
-
-let sweep_decision =
-  Testable.make
-    ~pp:(fun ppf -> function
-      | `Drive -> Format.pp_print_string ppf "Drive"
-      | `Republish session -> Format.fprintf ppf "Republish %s" session
-      | `Done -> Format.pp_print_string ppf "Done")
-    ~equal:(fun (a : Charter_reconcile.sweep) (b : Charter_reconcile.sweep) ->
-      match (a, b) with
-      | `Drive, `Drive | `Done, `Done -> true
-      | `Republish a, `Republish b -> String.equal a b
-      | _ -> false)
-
-let never_spawned () : bool = fail "spawned must not be read on this arm"
-let never_egress () : bool = fail "egress must not be read on this arm"
-
-let never_settled () : string option =
-  fail "settled must not be read on this arm"
-
-let sweep_action ?(spawned = never_spawned) ?(egress = never_egress)
-    ?(settled = never_settled) claimed =
-  Charter_reconcile.sweep_action ~claimed ~spawned ~egress ~settled
-
-(* The sweep table over its full domain, with probe frugality pinned: the
-   spawned line is read only under a held claim, egress only under a
-   committed spawn, and the publishable session only when no egress line
-   exists. *)
-let sweep_table () =
-  equal sweep_decision ~msg:"an unclaimed identity is driven whole" `Drive
-    (sweep_action false);
-  equal sweep_decision
-    ~msg:"a claim with no spawned line is adopted and driven" `Drive
-    (sweep_action ~spawned:(fun () -> false) true);
-  equal sweep_decision ~msg:"an egress line completes the record" `Done
-    (sweep_action ~spawned:(fun () -> true) ~egress:(fun () -> true) true);
-  equal sweep_decision
-    ~msg:"a publishable settle with no egress re-enters the publisher"
-    (`Republish "s1")
-    (sweep_action
-       ~spawned:(fun () -> true)
-       ~egress:(fun () -> false)
-       ~settled:(fun () -> Some "s1")
-       true);
-  equal sweep_decision
-    ~msg:"a committed record with nothing publishable is left alone" `Done
-    (sweep_action
-       ~spawned:(fun () -> true)
-       ~egress:(fun () -> false)
-       ~settled:(fun () -> None)
-       true)
-
-(* Receipt builders for the pending fold. *)
+(* Receipt builders. *)
 
 let receipt ?(at = 1000.) ~identity ~digest kind =
   { Receipt.at; identity; digest; kind }
@@ -106,99 +37,33 @@ let spawned ?at ~identity ~digest session =
   receipt ?at ~identity ~digest
     (Receipt.Kind.Disposition (Receipt.Disposition.Spawned { session }))
 
-let reaped ?at ~identity ~digest session =
+let reaped ?at ?(exit = 0) ?(head = Receipt.Head.Settled)
+    ?(cause = Receipt.Cause.Exited) ~identity ~digest session =
   receipt ?at ~identity ~digest
     (Receipt.Kind.Disposition
        (Receipt.Disposition.Reaped
           {
             session;
-            exit = 0;
-            head = Receipt.Head.Settled;
+            exit;
+            head;
             usage = Jsont.Json.object' [];
             usd = None;
-            cause = Receipt.Cause.Exited;
+            cause;
           }))
 
-let pending =
-  Testable.make
-    ~pp:(fun ppf (p : Charter_reconcile.Pending.t) ->
-      Format.fprintf ppf "%s@%s:%s at %g" p.Charter_reconcile.Pending.identity
-        p.Charter_reconcile.Pending.digest p.Charter_reconcile.Pending.session
-        p.Charter_reconcile.Pending.spawned_at)
-    ~equal:(fun (a : Charter_reconcile.Pending.t) b ->
-      String.equal a.Charter_reconcile.Pending.identity
-        b.Charter_reconcile.Pending.identity
-      && String.equal a.Charter_reconcile.Pending.digest
-           b.Charter_reconcile.Pending.digest
-      && String.equal a.Charter_reconcile.Pending.session
-           b.Charter_reconcile.Pending.session
-      && Float.equal a.Charter_reconcile.Pending.spawned_at
-           b.Charter_reconcile.Pending.spawned_at)
+let delivery ?at ~identity ~digest fields =
+  receipt ?at ~identity ~digest (Receipt.Kind.Delivery fields)
 
-let open_run ~identity ~digest ~session ~spawned_at =
-  { Charter_reconcile.Pending.identity; digest; session; spawned_at }
+let admitted_fields (ev : Event.Pull_request.t) =
+  Some
+    {
+      Receipt.Delivery.action = ev.Event.Pull_request.action;
+      base_ref = ev.Event.Pull_request.base_ref;
+      draft = ev.Event.Pull_request.draft;
+      author_association = ev.Event.Pull_request.author_association;
+    }
 
-let pending_fold () =
-  let runs = Testable.list pending in
-  equal runs ~msg:"an empty log holds nothing open" []
-    (Charter_reconcile.pending_runs []);
-  equal runs ~msg:"a delivery alone opens nothing" []
-    (Charter_reconcile.pending_runs
-       [ receipt ~identity:"i" ~digest:"d" Receipt.Kind.Delivery ]);
-  equal runs ~msg:"other dispositions neither open nor close" []
-    (Charter_reconcile.pending_runs
-       [
-         receipt ~identity:"i" ~digest:"d"
-           (Receipt.Kind.Disposition (Receipt.Disposition.Skipped "draft"));
-         receipt ~identity:"i" ~digest:"d"
-           (Receipt.Kind.Disposition Receipt.Disposition.Dup);
-       ]);
-  equal runs ~msg:"a spawned line with no reap is open"
-    [ open_run ~identity:"i" ~digest:"d" ~session:"s" ~spawned_at:7. ]
-    (Charter_reconcile.pending_runs
-       [ spawned ~at:7. ~identity:"i" ~digest:"d" "s" ]);
-  equal runs ~msg:"a reaped line closes its spawn" []
-    (Charter_reconcile.pending_runs
-       [
-         spawned ~identity:"i" ~digest:"d" "s";
-         reaped ~identity:"i" ~digest:"d" "s";
-       ]);
-  equal runs ~msg:"pairing is by digest and identity, never by session" []
-    (Charter_reconcile.pending_runs
-       [
-         spawned ~identity:"i" ~digest:"d" "s";
-         reaped ~identity:"i" ~digest:"d" "other";
-       ]);
-  equal runs ~msg:"a reap under another digest closes nothing"
-    [ open_run ~identity:"i" ~digest:"d1" ~session:"s" ~spawned_at:7. ]
-    (Charter_reconcile.pending_runs
-       [
-         spawned ~at:7. ~identity:"i" ~digest:"d1" "s";
-         reaped ~identity:"i" ~digest:"d2" "s";
-       ]);
-  equal runs ~msg:"a reap under another identity closes nothing"
-    [ open_run ~identity:"a" ~digest:"d" ~session:"s" ~spawned_at:7. ]
-    (Charter_reconcile.pending_runs
-       [
-         spawned ~at:7. ~identity:"a" ~digest:"d" "s";
-         reaped ~identity:"b" ~digest:"d" "s";
-       ]);
-  equal runs ~msg:"open runs keep log order"
-    [
-      open_run ~identity:"a" ~digest:"d" ~session:"s1" ~spawned_at:1.;
-      open_run ~identity:"b" ~digest:"d" ~session:"s2" ~spawned_at:2.;
-    ]
-    (Charter_reconcile.pending_runs
-       [
-         spawned ~at:1. ~identity:"a" ~digest:"d" "s1";
-         receipt ~identity:"c" ~digest:"d" Receipt.Kind.Delivery;
-         spawned ~at:2. ~identity:"b" ~digest:"d" "s2";
-       ])
-
-(* The driver, end to end over a temporary estate: a spawned receipt with no
-   reaped line, no session journal, and a free fence is the record a killed
-   resident leaves behind — one pass settles it honestly (recovered, head
-   missing, exit 255), alerts once, and a second pass finds nothing owed. *)
+(* The estate. *)
 
 let temp_dir prefix =
   let dir =
@@ -213,7 +78,16 @@ let test_charter ~name ~enabled =
     Charter.name;
     enabled;
     repo = "acme/widgets";
-    triggers = [ Charter.Trigger.Cli ];
+    triggers =
+      [
+        Charter.Trigger.Github_webhook
+          {
+            Charter.Trigger.Webhook.events = [ "pull_request.opened" ];
+            gate =
+              { Charter.Gate.base = None; drafts = false; associations = None };
+          };
+        Charter.Trigger.Cli;
+      ];
     permission_unattended = None;
     run =
       {
@@ -282,11 +156,8 @@ let loaded_of dirs ~name ~enabled =
     ingress_id = None;
   }
 
-let append_spawned dirs ~name ~identity ~session =
-  match
-    Charter_store.append_receipt dirs ~name
-      (spawned ~at:1. ~identity ~digest:"d1" session)
-  with
+let append dirs ~name receipt =
+  match Charter_store.append_receipt dirs ~name receipt with
   | Ok () -> ()
   | Error e -> failf "append: %s" (Charter_store.Error.message e)
 
@@ -295,12 +166,54 @@ let read_back dirs ~name =
   | Ok receipts -> receipts
   | Error e -> failf "read receipts: %s" (Charter_store.Error.message e)
 
+let claim dirs ~name ~digest identity =
+  match Charter_store.claim_identity dirs ~name ~digest identity with
+  | Ok `Claimed -> ()
+  | Ok `Dup -> failf "claim: already held"
+  | Error e -> failf "claim: %s" (Charter_store.Error.message e)
+
+let fake_repo ?current_head ?(open_prs = fun () -> Ok []) () =
+  let current_head =
+    match current_head with
+    | Some current_head -> current_head
+    | None -> fun ~number:_ -> fail "current_head must not be read"
+  in
+  {
+    Charter_fire.Repo.git_url = "/nonexistent/remote.git";
+    github =
+      {
+        Charter_fire.Github.current_head;
+        open_prs;
+        posted = (fun ~number:_ -> fail "posted must not be read");
+      };
+  }
+
+let count pred receipts = List.length (List.filter pred receipts)
+
+let is_alert (r : Receipt.t) =
+  match r.Receipt.kind with
+  | Receipt.Kind.Alert { window = `Identity; _ } -> true
+  | _ -> false
+
+let is_egress (r : Receipt.t) =
+  match r.Receipt.kind with Receipt.Kind.Egress _ -> true | _ -> false
+
+let is_skipped reason (r : Receipt.t) =
+  match r.Receipt.kind with
+  | Receipt.Kind.Disposition (Receipt.Disposition.Skipped carried) ->
+      String.equal carried reason
+  | _ -> false
+
+(* A spawned receipt with no reaped line, no session journal, and a free
+   fence is the record a killed resident leaves behind — one pass settles it
+   honestly (recovered, head missing, exit 255), alerts once, and a second
+   pass finds nothing owed. *)
 let orphan_settles () =
   with_estate "orphan" @@ fun ~env ~dirs ~said ->
   let name = "pr-review" in
   let identity = "github:acme/widgets#1@abc1234:opened" in
   let loaded = loaded_of dirs ~name ~enabled:false in
-  append_spawned dirs ~name ~identity ~session:"run-orphan";
+  append dirs ~name (spawned ~at:1. ~identity ~digest:"d1" "run-orphan");
   let repo_for _ = fail "a disabled charter must not build a repo" in
   Charter_reconcile.reconcile env ~repo_for loaded;
   (match read_back dirs ~name with
@@ -343,7 +256,7 @@ let sweep_failure_is_narrated () =
   let name = "pr-review" in
   let identity = "github:acme/widgets#2@def5678:opened" in
   let loaded = loaded_of dirs ~name ~enabled:true in
-  append_spawned dirs ~name ~identity ~session:"run-open";
+  append dirs ~name (spawned ~at:1. ~identity ~digest:"d1" "run-open");
   Charter_reconcile.reconcile env ~repo_for:(fun _ -> Error "no read token")
     loaded;
   equal bool
@@ -366,11 +279,148 @@ let sweep_failure_is_narrated () =
          | None -> false)
        !said)
 
-(* The one-pass gate: a pass that arrives while another is in flight waits
-   its turn. The first pass parks inside its own [repo_for] on a promise a
-   third fiber resolves; without the gate the second pass would interleave
-   between the first's enter and leave. *)
-let passes_serialize () =
+(* The crash window between a reap and its alert: a reaped disposition in
+   the failure class with no identity-scoped alert is repaired on the next
+   pass, once — the receipt-log dedup makes the repair idempotent — while
+   settled clean exits and the stop path's interrupted heads stay silent. *)
+let lost_alert_is_repaired () =
+  with_estate "repair" @@ fun ~env ~dirs ~said:_ ->
+  let name = "pr-review" in
+  let failed = "github:acme/widgets#3@abc9999:head" in
+  let stopped = "github:acme/widgets#4@abcaaaa:head" in
+  let clean = "github:acme/widgets#5@abcbbbb:head" in
+  let loaded = loaded_of dirs ~name ~enabled:false in
+  append dirs ~name
+    (reaped ~exit:255 ~head:Receipt.Head.Missing ~identity:failed ~digest:"d1"
+       "s-f");
+  append dirs ~name
+    (reaped ~exit:130 ~head:Receipt.Head.Interrupted ~identity:stopped
+       ~digest:"d1" "s-s");
+  append dirs ~name (reaped ~identity:clean ~digest:"d1" "s-c");
+  let repo_for _ = fail "a disabled charter must not build a repo" in
+  Charter_reconcile.reconcile env ~repo_for loaded;
+  let receipts = read_back dirs ~name in
+  equal int ~msg:"exactly the failed reap is repaired with an alert" 1
+    (count is_alert receipts);
+  equal bool ~msg:"the repaired alert names the failed identity" true
+    (Receipt.alerted ~digest:"d1" ~identity:failed
+       ~transition:Receipt.Transition.Failed receipts);
+  Charter_reconcile.reconcile env ~repo_for loaded;
+  equal int ~msg:"the repair is idempotent across passes" 1
+    (count is_alert (read_back dirs ~name))
+
+(* The delivery re-drive: an admitted delivery with no disposition is
+   rebuilt from its receipt and driven through the ordinary dispose — here
+   to a superseded close off the injected current-head read — while records
+   the pipeline cannot re-enter close as skipped. *)
+let open_delivery_redrives () =
+  with_estate "redrive" @@ fun ~env ~dirs ~said:_ ->
+  let name = "pr-review" in
+  let ev = event () in
+  let identity = Event.Identity.to_string (Event.Identity.of_pull_request ev) in
+  let loaded = loaded_of dirs ~name ~enabled:true in
+  append dirs ~name (delivery ~identity ~digest:"d1" (admitted_fields ev));
+  let moved_on = String.make 40 'b' in
+  let repo =
+    fake_repo ~current_head:(fun ~number:_ -> Ok moved_on) ()
+  in
+  Charter_reconcile.reconcile env ~repo_for:(fun _ -> Ok repo) loaded;
+  let receipts = read_back dirs ~name in
+  equal int ~msg:"the re-driven delivery reaches its disposition" 1
+    (count
+       (fun (r : Receipt.t) ->
+         match r.Receipt.kind with
+         | Receipt.Kind.Disposition Receipt.Disposition.Superseded -> true
+         | _ -> false)
+       receipts);
+  Charter_reconcile.reconcile env ~repo_for:(fun _ -> Ok repo) loaded;
+  equal int ~msg:"a disposed delivery is not re-driven again"
+    (List.length receipts)
+    (List.length (read_back dirs ~name))
+
+let unreconstructable_deliveries_close () =
+  with_estate "close" @@ fun ~env ~dirs ~said:_ ->
+  let name = "pr-review" in
+  let ev = event () in
+  let identity = Event.Identity.to_string (Event.Identity.of_pull_request ev) in
+  let loaded = loaded_of dirs ~name ~enabled:true in
+  (* A pre-upgrade line without the members, and a policy edit's retired
+     digest. *)
+  append dirs ~name (delivery ~identity ~digest:"d1" None);
+  append dirs ~name
+    (delivery ~identity:"github:acme/widgets#9@abc1111:head"
+       ~digest:"feedfacefeedface"
+       (admitted_fields (event ~number:9 ())));
+  Charter_reconcile.reconcile env ~repo_for:(fun _ -> Ok (fake_repo ()))
+    loaded;
+  let receipts = read_back dirs ~name in
+  equal int ~msg:"the memberless line closes as unreconstructable" 1
+    (count (is_skipped "unreconstructable delivery record") receipts);
+  equal int ~msg:"the retired digest closes as superseded by the edit" 1
+    (count (is_skipped "superseded by a policy edit") receipts);
+  Charter_reconcile.reconcile env ~repo_for:(fun _ -> Ok (fake_repo ()))
+    loaded;
+  equal int ~msg:"closed records stay closed" (List.length receipts)
+    (List.length (read_back dirs ~name))
+
+let disabled_deliveries_close () =
+  with_estate "disabled" @@ fun ~env ~dirs ~said:_ ->
+  let name = "pr-review" in
+  let ev = event () in
+  let identity = Event.Identity.to_string (Event.Identity.of_pull_request ev) in
+  let loaded = loaded_of dirs ~name ~enabled:false in
+  append dirs ~name (delivery ~identity ~digest:"d1" (admitted_fields ev));
+  Charter_reconcile.reconcile env
+    ~repo_for:(fun _ -> fail "a disabled charter must not build a repo")
+    loaded;
+  equal int ~msg:"a disabled charter's open delivery closes as skipped" 1
+    (count (is_skipped "disabled") (read_back dirs ~name))
+
+(* The settled-no-findings close: a settled run whose log carries no
+   findings document must not re-enter the publisher forever — the sweep's
+   republish row alerts (the recovered path never had) and stamps a
+   none-needed egress, and the next pass finds the record complete. *)
+let settled_without_findings_closes () =
+  with_estate "no-findings" @@ fun ~env ~dirs ~said:_ ->
+  let name = "pr-review" in
+  let ev = event () in
+  let id = Event.Identity.of_pull_request ev in
+  let identity = Event.Identity.to_string id in
+  let loaded = loaded_of dirs ~name ~enabled:true in
+  claim dirs ~name ~digest:"d1" id;
+  append dirs ~name (spawned ~identity ~digest:"d1" "run-settled");
+  append dirs ~name
+    (reaped ~cause:Receipt.Cause.Recovered ~identity ~digest:"d1"
+       "run-settled");
+  let repo =
+    fake_repo
+      ~open_prs:(fun () ->
+        Ok
+          [
+            {
+              Charter_fire.Github.number = 7;
+              head_sha;
+              base_ref = "main";
+              draft = false;
+              author_association = "OWNER";
+            };
+          ])
+      ()
+  in
+  Charter_reconcile.reconcile env ~repo_for:(fun _ -> Ok repo) loaded;
+  let receipts = read_back dirs ~name in
+  equal int ~msg:"the recovered settle's lost alert fires" 1
+    (count is_alert receipts);
+  equal int ~msg:"a none-needed egress closes the record" 1
+    (count is_egress receipts);
+  Charter_reconcile.reconcile env ~repo_for:(fun _ -> Ok repo) loaded;
+  equal int ~msg:"the closed record re-enters nothing" (List.length receipts)
+    (List.length (read_back dirs ~name))
+
+(* The one-pass gate: the after-reap re-entry tries the gate and yields to
+   a pass in flight instead of parking its caller; a freed gate admits the
+   next re-entry. *)
+let reentry_yields_to_a_pass () =
   with_estate "gate" @@ fun ~env ~dirs ~said:_ ->
   let loaded = loaded_of dirs ~name:"pr-review" ~enabled:true in
   let order = ref [] in
@@ -391,22 +441,35 @@ let passes_serialize () =
           ~repo_for:(fun _ ->
             note "second enters";
             Error "no read token")
-          loaded);
+          loaded;
+        note "second returned");
       (fun () -> Eio.Promise.resolve resolve ());
     ];
   equal
     (Testable.list Testable.string)
-    ~msg:"a pass in flight is never interleaved; the next waits its turn"
-    [ "first enters"; "first leaves"; "second enters" ]
-    (List.rev !order)
+    ~msg:"a held gate is yielded to, never waited on"
+    [ "first enters"; "second returned"; "first leaves" ]
+    (List.rev !order);
+  Charter_reconcile.reconcile env
+    ~repo_for:(fun _ ->
+      note "third enters";
+      Error "no read token")
+    loaded;
+  equal bool ~msg:"a freed gate admits the next re-entry" true
+    (List.mem "third enters" !order)
 
 let () =
   run "mentat.charter_reconcile"
     [
-      test "the pending-run table" run_table;
-      test "the sweep table" sweep_table;
-      test "the pending fold" pending_fold;
       test "an orphaned run settles honestly" orphan_settles;
       test "a repo failure narrates and never raises" sweep_failure_is_narrated;
-      test "passes serialize under the one-pass gate" passes_serialize;
+      test "a lost failure alert is repaired once" lost_alert_is_repaired;
+      test "an open delivery re-drives through dispose" open_delivery_redrives;
+      test "unreconstructable deliveries close as skipped"
+        unreconstructable_deliveries_close;
+      test "a disabled charter closes its open deliveries"
+        disabled_deliveries_close;
+      test "a settled run without findings closes"
+        settled_without_findings_closes;
+      test "the re-entry yields to a pass in flight" reentry_yields_to_a_pass;
     ]

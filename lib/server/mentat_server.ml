@@ -712,15 +712,21 @@ let read_ingress_body body =
   | exception Eio.Buf_read.Buffer_limit_exceeded -> Error `Too_large
 
 (* One delivery, per the .mli's response contract: resolve the path id (unknown
-   ⇒ 404), read the capped raw body (over ⇒ 413), verify the HMAC-SHA256 over
-   those exact bytes against the retained secret (absent, malformed, or
+   ⇒ 404 — and an unknown id never buys a body read), read the capped raw body
+   (over ⇒ 413), verify the HMAC-SHA256 over those exact bytes against the
+   secret as re-resolved {e after} the body arrived (absent, malformed, or
    mismatched ⇒ one 401, the rejection observer told — a disabled
    configuration still verifies, so an unverified sender cannot observe even
    the disablement), and only then hand custody to the callback: [`Accepted] ⇒
-   202, [`Refused] ⇒ 500 with the reason logged, never sent. Refusals are
-   answered, never raised, and never per-event news. The callbacks are foreign
-   code, so each runs under a guard: a raise (cancellation excepted) is
-   logged, never allowed to tear the connection down responseless. *)
+   202, [`Refused] ⇒ 500 with the reason logged, never sent. Verifying first
+   against the gate resolution and then against the fresh one keeps rotation
+   fail-closed without spending a second resolve on unauthenticated input: a
+   sender pacing an old-key delivery across a rotation passes the stale check
+   and lands on the fresh secret's 401, while a sender with no valid key
+   never triggers the re-read. Refusals are answered, never raised, and never
+   per-event news. The callbacks are foreign code, so each runs under a
+   guard: a raise (cancellation excepted) is logged, never allowed to tear
+   the connection down responseless. *)
 let handle_ingress ~(ingress : Ingress.t) meth path request body =
   let guarded ~what f =
     match f () with
@@ -731,6 +737,15 @@ let handle_ingress ~(ingress : Ingress.t) meth path request body =
           (Printexc.to_string exn);
         Error ()
   in
+  let refuse_unverified ~ingress_id =
+    (* The observer is bookkeeping; the sender-visible refusal stays the
+       401 whatever the observer does. *)
+    (match ingress.Ingress.rejected with
+    | None -> ()
+    | Some rejected ->
+        ignore (guarded ~what:"rejected" (fun () -> rejected ~ingress_id)));
+    content_free `Unauthorized
+  in
   match (meth, ingress_route path) with
   | `POST, Some ingress_id -> (
       match
@@ -738,13 +753,13 @@ let handle_ingress ~(ingress : Ingress.t) meth path request body =
       with
       | Error () -> content_free `Internal_server_error
       | Ok Ingress.Unknown -> content_free `Not_found
-      | Ok (Ingress.Resolved { secret; enabled }) -> (
+      | Ok (Ingress.Resolved { secret; enabled = _ }) -> (
           let headers = Cohttp.Request.headers request in
           let presented = ingress_presented_mac headers in
           match read_ingress_body body with
           | Error `Too_large -> content_free (`Code 413)
-          | Ok raw ->
-              let verified =
+          | Ok raw -> (
+              let verifies ~secret =
                 match presented with
                 | None -> false
                 | Some presented ->
@@ -752,32 +767,36 @@ let handle_ingress ~(ingress : Ingress.t) meth path request body =
                       (Digestif.SHA256.to_raw_string
                          (Digestif.SHA256.hmac_string ~key:secret raw))
               in
-              if not verified then (
-                (* The observer is bookkeeping; the sender-visible refusal
-                   stays the 401 whatever the observer does. *)
-                (match ingress.Ingress.rejected with
-                | None -> ()
-                | Some rejected ->
-                    ignore
-                      (guarded ~what:"rejected" (fun () ->
-                           rejected ~ingress_id)));
-                content_free `Unauthorized)
+              if not (verifies ~secret) then refuse_unverified ~ingress_id
               else
-                let event = Cohttp.Header.get headers "x-github-event" in
-                let delivery_id =
-                  Cohttp.Header.get headers "x-github-delivery"
-                in
                 match
-                  guarded ~what:"deliver" (fun () ->
-                      ingress.Ingress.deliver ~ingress_id ~enabled ~event
-                        ~delivery_id ~body:raw)
+                  guarded ~what:"resolve" (fun () ->
+                      ingress.Ingress.resolve ~ingress_id)
                 with
                 | Error () -> content_free `Internal_server_error
-                | Ok `Accepted -> content_free `Accepted
-                | Ok (`Refused reason) ->
-                    Eio.traceln "mentat_server: ingress delivery refused: %s"
-                      reason;
-                    content_free `Internal_server_error))
+                | Ok Ingress.Unknown -> content_free `Not_found
+                | Ok (Ingress.Resolved { secret; enabled }) -> (
+                    if not (verifies ~secret) then
+                      refuse_unverified ~ingress_id
+                    else
+                      let event =
+                        Cohttp.Header.get headers "x-github-event"
+                      in
+                      let delivery_id =
+                        Cohttp.Header.get headers "x-github-delivery"
+                      in
+                      match
+                        guarded ~what:"deliver" (fun () ->
+                            ingress.Ingress.deliver ~ingress_id ~enabled
+                              ~event ~delivery_id ~body:raw)
+                      with
+                      | Error () -> content_free `Internal_server_error
+                      | Ok `Accepted -> content_free `Accepted
+                      | Ok (`Refused reason) ->
+                          Eio.traceln
+                            "mentat_server: ingress delivery refused: %s"
+                            reason;
+                          content_free `Internal_server_error))))
   | _, _ -> content_free `Not_found
 
 let handle ~clock ~heartbeat ~driver_for ~bindings ~bind ~ledger ~ingress conn

@@ -32,6 +32,27 @@ val ensure_daemon_dir : User_dirs.t -> unit
 (** [ensure_daemon_dir dirs] creates the per-user daemon home ([0700]) if it
     does not exist; an existing one is left untouched. *)
 
+val stdout_is_daemon_log : User_dirs.t -> bool
+(** [stdout_is_daemon_log dirs] is whether this process's standard output
+    {e is} the daemon log file — inode identity with [daemon.log], the
+    shape of a [--spawned] start and of a service-manager start alike. A
+    foreground daemon on a terminal, and any process whose output was
+    redirected elsewhere, answers [false]. What lands on standard output
+    persists in the log for the life of the data home and may ride a bug
+    report, so anything credential-bearing consults this before
+    printing. *)
+
+val rotate_owned_log : User_dirs.t -> unit
+(** [rotate_owned_log dirs] rotates [daemon.log] when this process's own
+    standard output {e is} that file — the [--spawned] path and a
+    service-manager start both open it over fds 1 and 2, and the daemon's
+    boot is the one point every such writer passes, so the cap holds for a
+    manager-kept daemon too. Rotation renames an over-cap log aside,
+    retains a bounded set of predecessors, and lays a fresh append-only
+    open over standard output and error; a foreground daemon on a terminal
+    matches nothing and is untouched. Failures are swallowed: rotation is
+    hygiene, never worth refusing a boot over. *)
+
 val resolve_sibling :
   env:string -> name:string -> beside:string -> (string, string) result
 (** [resolve_sibling ~env ~name ~beside] is the sibling-binary policy shared

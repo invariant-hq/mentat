@@ -35,10 +35,10 @@ let ensure_daemon_dir dirs =
 
 (* [daemon.log] captures the daemon's whole standard output and error, not just
    its diagnostics records, so nothing inside the logging system bounds it. Left
-   alone it grows for the life of the data home. Spawn is the moment to rotate:
-   the successor is about to start writing, and daemons are spawned per need and
-   idle out, so restarts are frequent enough for this to bound growth in
-   practice. A single daemon living for weeks still grows between spawns. *)
+   alone it grows for the life of the data home. The daemon's own boot is the
+   moment to rotate — the one point every writer passes, a service manager's
+   restart included; a spawn-site rotation would never run for a
+   manager-started daemon, whose spawner is the manager itself. *)
 let daemon_log_cap = 8 * 1024 * 1024
 let daemon_logs_kept = 5
 
@@ -56,6 +56,29 @@ let rotate_daemon_log dirs log =
         ~dir:(User_dirs.daemon_dir dirs)
         ~current:log
   | _ | (exception Unix.Unix_error _) -> ()
+
+let stdout_is_daemon_log dirs =
+  match (Unix.fstat Unix.stdout, Unix.stat (daemon_log_path dirs)) with
+  | out, file ->
+      out.Unix.st_dev = file.Unix.st_dev && out.Unix.st_ino = file.Unix.st_ino
+  | exception Unix.Unix_error _ -> false
+
+let rotate_owned_log dirs =
+  if stdout_is_daemon_log dirs then (
+    let log = daemon_log_path dirs in
+    rotate_daemon_log dirs log;
+    (* After a rename the inherited fds still point at the rotated file,
+       so the path is reopened append-only and laid over stdout and
+       stderr either way. *)
+    match
+      Unix.openfile log [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_APPEND ] 0o600
+    with
+    | fd ->
+        Unix.dup2 fd Unix.stdout;
+        Unix.dup2 fd Unix.stderr;
+        if fd <> Unix.stdout && fd <> Unix.stderr then (
+          try Unix.close fd with Unix.Unix_error _ -> ())
+    | exception Unix.Unix_error _ -> ())
 
 (* [mentat] and [mentatd] ship beside each other in every release artifact —
    so each spawns the other by resolving the sibling of the running
@@ -102,7 +125,6 @@ let resolve_mentatd () =
 let spawn dirs ~bin =
   ensure_daemon_dir dirs;
   let log = daemon_log_path dirs in
-  rotate_daemon_log dirs log;
   let fd =
     Unix.openfile log [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_APPEND ] 0o600
   in

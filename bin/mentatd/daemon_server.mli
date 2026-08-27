@@ -19,10 +19,10 @@ val serve :
   web_port:int option ->
   ingress_port:int option ->
   github_base_url:string option ->
-  charter_git_url:string option ->
+  charter_git_base:string option ->
   Exit_status.t
 (** [serve ~socket_override ~spawned ~web ~web_port ~ingress_port
-    ~github_base_url ~charter_git_url] runs the foreground daemon
+    ~github_base_url ~charter_git_base] runs the foreground daemon
     and blocks until a signal stops it. It stages the shared per-user state,
     takes the [daemon.lock] claim (returning a {!Exit_status.Runtime_error}
     "already running" when it is held — the serialisation that collapses racing
@@ -41,15 +41,18 @@ val serve :
     boot — charters register by file, so one installed while the daemon runs is
     in force at its next event — with its ingress mounted on the wire listener,
     its pump and the reconcile beat ({!Charter_reconcile.loop}) racing beside
-    the serve loop, and a boot reconcile pass run before the first delivery is
-    admitted, beside the child broker's rediscovery. A daemon that cannot
-    resolve its [mentat] sibling serves without the node, narrating that
-    charters will not run — unless [ingress_port] was given, which it could
-    never honor: a loud refusal to start. [github_base_url] and
-    [charter_git_url] are the node's validated configuration seams (the
-    [--github-base-url] and [--charter-git-url] flags), threaded to
-    {!Node.create}; the ambient [MENTAT_GITHUB_BASE_URL] is deliberately never
-    read.
+    the serve loop, and the settle-only boot pass
+    ({!Charter_reconcile.pass_settle}) run before the first delivery is
+    admitted, beside the child broker's rediscovery — settle-only, so a busy
+    first boot never leaves the bound sockets unanswered behind GitHub
+    listings; the beat's immediate first pass is the boot's one full fold. A
+    daemon that cannot resolve its [mentat] sibling serves without the node,
+    narrating that charters will not run — unless [ingress_port] was given,
+    which it could never honor: a loud refusal to start. [github_base_url]
+    and [charter_git_base] are the node's validated configuration seams (the
+    [--github-base-url] and [--charter-git-base] flags), threaded to
+    {!Node.create}; the ambient [MENTAT_GITHUB_BASE_URL] is deliberately
+    never read.
 
     [ingress_port] additionally binds a loopback listener carrying only the
     pre-auth webhook ingress family ([0] takes an ephemeral port; the bound

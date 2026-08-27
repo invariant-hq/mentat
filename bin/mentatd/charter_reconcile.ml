@@ -5,95 +5,23 @@
 
 open Mentat_charter
 
-type fence = [ `Free | `Held | `Io of string ]
-type run = [ `Settle | `Leave | `Overdue | `Skip of string ]
-
-let run_action ~fence ~overdue =
-  match fence () with
-  | `Io message -> `Skip message
-  | `Held -> if overdue () then `Overdue else `Leave
-  | `Free -> `Settle
-
-type sweep = [ `Drive | `Republish of string | `Done ]
-
-let sweep_action ~claimed ~spawned ~egress ~settled =
-  if not claimed || not (spawned ()) then `Drive
-  else if egress () then `Done
-  else
-    match settled () with
-    | Some session -> `Republish session
-    | None -> `Done
-
-module Pending = struct
-  type t = {
-    identity : string;
-    digest : string;
-    session : string;
-    spawned_at : float;
-  }
-end
-
-let pending_runs receipts =
-  let reaped = Hashtbl.create 8 in
-  List.iter
-    (fun (r : Receipt.t) ->
-      match r.Receipt.kind with
-      | Receipt.Kind.Disposition (Receipt.Disposition.Reaped _) ->
-          Hashtbl.replace reaped (r.Receipt.digest, r.Receipt.identity) ()
-      | _ -> ())
-    receipts;
-  List.filter_map
-    (fun (r : Receipt.t) ->
-      match r.Receipt.kind with
-      | Receipt.Kind.Disposition (Receipt.Disposition.Spawned { session })
-        when not (Hashtbl.mem reaped (r.Receipt.digest, r.Receipt.identity)) ->
-          Some
-            {
-              Pending.identity = r.Receipt.identity;
-              digest = r.Receipt.digest;
-              session;
-              spawned_at = r.Receipt.at;
-            }
-      | _ -> None)
-    receipts
-
-(* Drivers. Probes and interpretation live here; every refusal and failure
+(* Drivers over the pure tables ([Mentat_charter.Record], the receipt
+   folds). Probes and interpretation live here; every refusal and failure
    is narrated through the environment's line sink and none is raised — a
    broken charter or an unreachable remote must not stop the node, and the
    next beat retries for free. *)
 
 let say env fmt = Printf.ksprintf env.Charter_fire.say fmt
 
-(* One charter's pass narrates under the charter's name — the fold's own
-   refusals and every line the fire pipeline speaks through the same
-   environment — exactly as the node's delivery path prefixes: one resident
-   process speaks for many charters, so the prefix is the line's
-   provenance. *)
-let charter_env env name =
-  {
-    env with
-    Charter_fire.say =
-      (fun line ->
-        env.Charter_fire.say (Printf.sprintf "charter %s: %s" name line));
-  }
-
-let probe_fence env session : fence =
-  match
-    Mentat_store.Run_lock.holder env.Charter_fire.store
-      ~session:(Mentat_session.Id.of_string session)
-  with
-  | `Free -> `Free
-  | `Held _ -> `Held
-  | `Io io -> `Io (Format.asprintf "%a" Mentat_store.Io.pp io)
-
-let settle env (loaded : Charter_store.Loaded.t) (pending : Pending.t) =
-  let { Pending.identity; digest; session; spawned_at } = pending in
-  let fence () = probe_fence env session in
+let settle env (loaded : Charter_store.Loaded.t) (pending : Receipt.Pending.t)
+    =
+  let { Receipt.Pending.identity; digest; session; spawned_at } = pending in
+  let fence () = Charter_fire.probe_fence env.Charter_fire.store ~session in
   let overdue () =
     let budget = loaded.Charter_store.Loaded.charter.Charter.budget in
     Unix.gettimeofday () -. spawned_at > budget.Charter.Budget.wall_clock
   in
-  match run_action ~fence ~overdue with
+  match Record.run_action ~fence ~overdue with
   | `Leave -> ()
   | `Overdue ->
       say env
@@ -107,13 +35,137 @@ let settle env (loaded : Charter_store.Loaded.t) (pending : Pending.t) =
       | Ok () -> ()
       | Error e -> say env "recover %s: %s" session e)
 
+(* The owed-alert re-derivation. A reap and its alert are two appends with
+   an external hook between them, so no transaction can make them one; a
+   crash in the window leaves a failed run the owner never hears about.
+   This fold re-derives the alert each reaped disposition owes — the same
+   judgment the reaping paths apply inline: a settled clean exit owes none
+   (a settled run's close belongs to the sweep's publisher row), a forced
+   stop alerts nothing (the stop is the owner's own act), and the normal
+   stop path's interrupted head alerts nothing either — and re-fires it
+   through the idempotent alert, whose receipt-log dedup makes every
+   repeated derivation a no-op. *)
+let owed_alert (r : Receipt.t) =
+  match r.Receipt.kind with
+  | Receipt.Kind.Disposition
+      (Receipt.Disposition.Reaped { session; exit; head; cause; _ }) ->
+      if
+        (exit = 0 && Receipt.Head.equal head Receipt.Head.Settled)
+        || Receipt.Cause.equal cause Receipt.Cause.Interrupted
+        || Receipt.Head.equal head Receipt.Head.Interrupted
+           && not (Receipt.Cause.equal cause Receipt.Cause.Recovered)
+      then None
+      else
+        Some
+          ( session,
+            if exit = 3 || Receipt.Head.equal head Receipt.Head.Parked then
+              Receipt.Transition.Parked
+            else Receipt.Transition.Failed )
+  | Receipt.Kind.Disposition _ | Receipt.Kind.Delivery _ | Receipt.Kind.Egress _
+  | Receipt.Kind.Alert _ ->
+      None
+
+let repair_alerts env (loaded : Charter_store.Loaded.t) receipts =
+  List.iter
+    (fun (r : Receipt.t) ->
+      match owed_alert r with
+      | None -> ()
+      | Some (session, transition) ->
+          if
+            not
+              (Receipt.alerted ~digest:r.Receipt.digest
+                 ~identity:r.Receipt.identity ~transition receipts)
+          then (
+            match
+              Charter_fire.alert_identity env loaded ~digest:r.Receipt.digest
+                ~identity:r.Receipt.identity ~transition
+                ~session:(Some session)
+            with
+            | Ok () -> ()
+            | Error e -> say env "alert %s: %s" r.Receipt.identity e))
+    receipts
+
+(* The delivery re-drive. A 202 promises the sender its event is owned, and
+   the sender never redelivers — so a delivery receipt with no disposition
+   is a promise a dead process left unkept, and this row keeps it: the
+   event is rebuilt from the receipt's own members and driven through the
+   ordinary dispose, whose claim and dup machinery make a re-drive
+   idempotent. A record the pipeline cannot re-enter — a pre-upgrade line
+   without the members, a corrupt rebuild, a policy edit that retired the
+   delivery's digest — is closed with a skipped line instead: an
+   un-closeable record would narrate forever, and the head, if still open,
+   re-enters through the sweep under the policy in force. *)
+let close_delivery env ~name (r : Receipt.t) reason =
+  let receipt =
+    {
+      Receipt.at = Unix.gettimeofday ();
+      identity = r.Receipt.identity;
+      digest = r.Receipt.digest;
+      kind = Receipt.Kind.Disposition (Receipt.Disposition.Skipped reason);
+    }
+  in
+  match Charter_store.append_receipt env.Charter_fire.dirs ~name receipt with
+  | Ok () -> say env "skipped %s: %s" r.Receipt.identity reason
+  | Error e -> say env "%s" (Charter_store.Error.message e)
+
+let unreconstructable = "unreconstructable delivery record"
+
+let redrive_deliveries env ~repo (loaded : Charter_store.Loaded.t) receipts =
+  let name = loaded.Charter_store.Loaded.name in
+  let digest = loaded.Charter_store.Loaded.digest in
+  List.fold_left
+    (fun acc (r : Receipt.t) ->
+      match acc with
+      | Charter_fire.Interrupted -> acc
+      | Charter_fire.Disposed -> (
+          match r.Receipt.kind with
+          | Receipt.Kind.Delivery None ->
+              close_delivery env ~name r unreconstructable;
+              acc
+          | Receipt.Kind.Delivery (Some d) ->
+              if not (String.equal r.Receipt.digest digest) then (
+                close_delivery env ~name r "superseded by a policy edit";
+                acc)
+              else (
+                match
+                  Event.Pull_request.of_delivery ~identity:r.Receipt.identity
+                    ~action:d.Receipt.Delivery.action
+                    ~base_ref:d.Receipt.Delivery.base_ref
+                    ~draft:d.Receipt.Delivery.draft
+                    ~author_association:d.Receipt.Delivery.author_association
+                with
+                | None ->
+                    close_delivery env ~name r unreconstructable;
+                    acc
+                | Some event -> (
+                    match env.Charter_fire.stop () with
+                    | `Stop | `Force -> Charter_fire.Interrupted
+                    | `None -> (
+                        say env "re-driving %s: admitted, never decided"
+                          r.Receipt.identity;
+                        match
+                          Charter_fire.dispose env ~repo loaded ~event
+                            ~check_head:true
+                        with
+                        | Ok outcome -> outcome
+                        | Error e ->
+                            say env "%s" e;
+                            acc)))
+          | Receipt.Kind.Disposition _ | Receipt.Kind.Egress _
+          | Receipt.Kind.Alert _ ->
+              acc))
+    Charter_fire.Disposed
+    (Receipt.open_deliveries receipts)
+
 (* The one-pass gate. Passes must not run concurrently: the honest settle
    is serialized under the charter's fire lock, but two interleaved sweeps
    would double every GitHub listing and race the publisher re-entry into
    its upsert. One node runs per process, so the gate is module state — the
-   periodic beat and the after-reap re-entry queue here instead of
-   overlapping. Held across effects, never poisoned: the drivers never
-   raise, and a cancellation mid-pass releases it on the way out. *)
+   boot settle and the periodic beat queue here, while the after-reap
+   re-entry tries the gate and yields to a pass in flight rather than
+   parking the pump behind it. Held across effects, never poisoned: the
+   drivers never raise, and a cancellation mid-pass releases it on the way
+   out. *)
 let gate = Eio.Mutex.create ()
 
 let with_gate f =
@@ -122,22 +174,75 @@ let with_gate f =
 
 let reconcile_charter env ~repo_for (loaded : Charter_store.Loaded.t) =
   let name = loaded.Charter_store.Loaded.name in
-  let env = charter_env env name in
-  (match Charter_store.read_receipts env.Charter_fire.dirs ~name with
-  | Error e -> say env "%s" (Charter_store.Error.message e)
-  | Ok receipts -> List.iter (settle env loaded) (pending_runs receipts));
-  if loaded.Charter_store.Loaded.charter.Charter.enabled then
-    match repo_for loaded with
-    | Error e -> say env "%s" e
-    | Ok repo -> (
-        match Charter_fire.fire_sweep env ~repo loaded with
-        | Ok _ -> ()
-        | Error e -> say env "sweep: %s" e)
+  let env = Charter_fire.named_env env ~name in
+  match Charter_store.read_receipts env.Charter_fire.dirs ~name with
+  | Error e ->
+      say env "%s" (Charter_store.Error.message e);
+      `Continue
+  | Ok receipts -> (
+      List.iter (settle env loaded) (Receipt.pending_runs receipts);
+      repair_alerts env loaded receipts;
+      if loaded.Charter_store.Loaded.charter.Charter.enabled then (
+        match repo_for loaded with
+        | Error e ->
+            say env "%s" e;
+            `Continue
+        | Ok repo -> (
+            match redrive_deliveries env ~repo loaded receipts with
+            | Charter_fire.Interrupted -> `Interrupted
+            | Charter_fire.Disposed -> (
+                match Charter_fire.fire_sweep env ~repo loaded with
+                | Ok Charter_fire.Interrupted -> `Interrupted
+                | Ok Charter_fire.Disposed -> `Continue
+                | Error e ->
+                    say env "sweep: %s" e;
+                    `Continue)))
+      else (
+        (* A disabled charter sweeps nothing and publishes nothing, but its
+           record is still owed: each open delivery gets the same skipped
+           line intake writes when a disabled charter's event arrives. *)
+        List.iter
+          (fun (r : Receipt.t) ->
+            match r.Receipt.kind with
+            | Receipt.Kind.Delivery _ -> close_delivery env ~name r "disabled"
+            | Receipt.Kind.Disposition _ | Receipt.Kind.Egress _
+            | Receipt.Kind.Alert _ ->
+                ())
+          (Receipt.open_deliveries receipts);
+        `Continue))
 
 let reconcile env ~repo_for loaded =
-  with_gate (fun () -> reconcile_charter env ~repo_for loaded)
+  if Eio.Mutex.try_lock gate then
+    Fun.protect
+      ~finally:(fun () -> Eio.Mutex.unlock gate)
+      (fun () ->
+        match reconcile_charter env ~repo_for loaded with
+        | `Continue | `Interrupted -> ())
 
 let pass env ~repo_for =
+  with_gate @@ fun () ->
+  match Charter_store.roster env.Charter_fire.dirs with
+  | Error e -> say env "charters: %s" (Charter_store.Error.message e)
+  | Ok entries ->
+      let rec drive = function
+        | [] -> ()
+        | (name, entry) :: rest -> (
+            match env.Charter_fire.stop () with
+            | `Stop | `Force -> ()
+            | `None -> (
+                match entry with
+                | Error e ->
+                    say env "charter %s: %s" name
+                      (Charter_store.Error.message e);
+                    drive rest
+                | Ok loaded -> (
+                    match reconcile_charter env ~repo_for loaded with
+                    | `Interrupted -> ()
+                    | `Continue -> drive rest)))
+      in
+      drive entries
+
+let pass_settle env =
   with_gate @@ fun () ->
   match Charter_store.roster env.Charter_fire.dirs with
   | Error e -> say env "charters: %s" (Charter_store.Error.message e)
@@ -147,7 +252,14 @@ let pass env ~repo_for =
           match entry with
           | Error e ->
               say env "charter %s: %s" name (Charter_store.Error.message e)
-          | Ok loaded -> reconcile_charter env ~repo_for loaded)
+          | Ok loaded -> (
+              let env = Charter_fire.named_env env ~name in
+              match
+                Charter_store.read_receipts env.Charter_fire.dirs ~name
+              with
+              | Error e -> say env "%s" (Charter_store.Error.message e)
+              | Ok receipts ->
+                  List.iter (settle env loaded) (Receipt.pending_runs receipts)))
         entries
 
 (* The reconcile beat. Ten minutes: long enough that a beat's open-PR

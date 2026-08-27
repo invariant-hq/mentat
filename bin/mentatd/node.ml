@@ -19,7 +19,7 @@ type t = {
   env : Charter_fire.env;
   stop : Stop_signal.t;
   github_base_url : string option;
-  git_url : string option;
+  git_base : string option;
   queue : (Charter_store.Loaded.t * Event.Pull_request.t) Eio.Stream.t;
   rejected : int ref;
 }
@@ -52,7 +52,22 @@ let child_environment base ~github_base_url =
   | None -> base
   | Some url -> base @ [ ("MENTAT_GITHUB_BASE_URL", url) ]
 
-let create (shared : Composition.shared) ~stop ?github_base_url ?git_url () =
+(* The checkout remote, derived per charter: the base names the git host
+   prefix, the watched repository names the path — one flag serves a node
+   holding charters over many repositories, and an Enterprise base carries
+   its checkouts along with its API reads. *)
+let checkout_url ~git_base ~repo =
+  let base =
+    match git_base with
+    | Some base ->
+        if String.ends_with ~suffix:"/" base then
+          String.sub base 0 (String.length base - 1)
+        else base
+    | None -> "https://github.com"
+  in
+  Printf.sprintf "%s/%s.git" base repo
+
+let create (shared : Composition.shared) ~stop ?github_base_url ?git_base () =
   match
     Daemon.resolve_sibling ~env:"MENTAT_BIN" ~name:"mentat" ~beside:"mentatd"
   with
@@ -77,18 +92,12 @@ let create (shared : Composition.shared) ~stop ?github_base_url ?git_url () =
           env;
           stop;
           github_base_url;
-          git_url;
+          git_base;
           queue = Eio.Stream.create max_int;
           rejected = ref 0;
         }
 
-let env t ~name =
-  {
-    t.env with
-    Charter_fire.say =
-      (fun line -> say t (Printf.sprintf "charter %s: %s" name line));
-  }
-
+let env t ~name = Charter_fire.named_env t.env ~name
 let reconcile_env t = t.env
 
 let repo t (loaded : Charter_store.Loaded.t) =
@@ -135,11 +144,7 @@ let repo t (loaded : Charter_store.Loaded.t) =
                 (fun ~number -> Github_reads.posted api ~repo:watched ~number);
             }
           in
-          let git_url =
-            match t.git_url with
-            | Some url -> url
-            | None -> Printf.sprintf "https://github.com/%s.git" watched
-          in
+          let git_url = checkout_url ~git_base:t.git_base ~repo:watched in
           Ok { Charter_fire.Repo.git_url; github })
 
 (* Ingress. *)
@@ -159,10 +164,25 @@ let resolution bindings ~ingress_id =
         }
   | None -> Mentat_server.Ingress.Unknown
 
-let event_route = function
-  | None -> `Admit
-  | Some kind ->
-      if String.equal kind "pull_request" then `Admit else `Foreign kind
+(* The delivery route. The HMAC authenticates the body alone — the
+   [X-GitHub-Event] header rides through unverified — so the body is the
+   arbiter of what a delivery is: a payload the narrow decode admits is a
+   pull-request event whatever its header claims (an intermediary
+   relabeling a signed delivery must never turn a 202'd review into a
+   silent drop), and the header may only confirm what the body already
+   refused — a recognizable ping, or a foreign kind the body's shape agrees
+   it is. A body the decode refuses under a pull-request-claiming (or
+   absent) header is refused outright. *)
+let event_route event ~body =
+  match Event.Pull_request.decode body with
+  | Ok _ -> `Admit
+  | Error e -> (
+      if Event.ping body then `Ping
+      else
+        match event with
+        | Some kind when not (String.equal kind "pull_request") ->
+            `Foreign kind
+        | Some _ | None -> `Malformed (Event.Pull_request.Error.message e))
 
 (* The custody-side fold: the resolver answered on its own snapshot, and
    custody re-reads — the file is the registration, so the name is looked up
@@ -205,13 +225,20 @@ let deliver t ~ingress_id ~enabled ~event ~delivery_id ~body =
       match Charter_store.load (dirs t) ~name with
       | Error e -> `Refused (Charter_store.Error.message e)
       | Ok loaded -> (
-          match event_route event with
+          match event_route event ~body with
+          | `Ping ->
+              say t
+                (Printf.sprintf "charter %s: ignoring ping delivery%s" name
+                   (delivery_suffix delivery_id));
+              `Accepted
           | `Foreign kind ->
               say t
                 (Printf.sprintf "charter %s: ignoring %s delivery%s" name
                    (clean kind)
                    (delivery_suffix delivery_id));
               `Accepted
+          | `Malformed reason ->
+              `Refused (Printf.sprintf "charter %s: event: %s" name reason)
           | `Admit ->
               if enabled && Eio.Stream.length t.queue >= queue_cap then
                 `Refused
@@ -241,6 +268,13 @@ let deliver t ~ingress_id ~enabled ~event ~delivery_id ~body =
 
 let ingress t =
   {
+    (* The resolver runs on unauthenticated input, so it is side-effect
+       minimal: a broken charter is not narrated here — one line per broken
+       charter per request would let any sender with the URL spend log
+       I/O — but on the cookie-gated dashboard and the reconcile beat,
+       which read the same roster. The one narrated failure is the roster
+       itself being unreadable, a host fault no request rate amplifies
+       beyond the log's own line. *)
     Mentat_server.Ingress.resolve =
       (fun ~ingress_id ->
         match Charter_store.ingress_index (dirs t) with
@@ -248,15 +282,7 @@ let ingress t =
             say t
               (Printf.sprintf "ingress: %s" (Charter_store.Error.message e));
             Mentat_server.Ingress.Unknown
-        | Ok (bindings, failures) ->
-            List.iter
-              (fun (name, e) ->
-                say t
-                  (Printf.sprintf "ingress: charter %s answers to no id: %s"
-                     name
-                     (Charter_store.Error.message e)))
-              failures;
-            resolution bindings ~ingress_id);
+        | Ok (bindings, _failures) -> resolution bindings ~ingress_id);
     deliver =
       (fun ~ingress_id ~enabled ~event ~delivery_id ~body ->
         deliver t ~ingress_id ~enabled ~event ~delivery_id ~body);

@@ -667,7 +667,13 @@ let max_idle_seconds environment =
    backstop. *)
 let charter_resident dirs () =
   match Charter_store.ingress_index dirs with
-  | Error _ -> false
+  | Error e ->
+      (* An unreadable roster must fail safe for a stop decision: stopping
+         a daemon that may hold an enabled webhook charter bounces every
+         later delivery, and the manager never restarts a clean exit. *)
+      Eio.traceln "mentatd: idle stop deferred, the roster is unreadable: %s"
+        (Charter_store.Error.message e);
+      true
   | Ok (bindings, _failures) ->
       List.exists
         (fun (b : Charter_store.Binding.t) -> b.Charter_store.Binding.enabled)
@@ -685,8 +691,120 @@ let idle_watchdog clock ~max_idle ~resident registry stop =
   in
   loop ()
 
+(* The charter node is always assembled — charters register by file, so one
+   installed while the daemon runs is in force at its next delivery without
+   a restart, and an empty roster costs nothing (the resolver and the
+   reconcile passes re-read it per event). A daemon that cannot resolve its
+   [mentat] sibling serves without the node — loudly, since installed
+   charters will not run — unless the webhook ingress was explicitly
+   requested, which it could never honor. *)
+let stage_node shared ~stop ~github_base_url ~charter_git_base ~ingress_port =
+  match
+    Node.create shared ~stop ?github_base_url ?git_base:charter_git_base ()
+  with
+  | Ok node -> Ok (Some node)
+  | Error message when Option.is_some ingress_port ->
+      Error (Printf.sprintf "cannot serve the webhook ingress: %s" message)
+  | Error message ->
+      Eio.traceln "mentatd: charters will not run: %s" message;
+      Ok None
+
+(* The tunnel-facing ingress bind: loopback only — the owner points whatever
+   tunnel they already trust at it, and every delivery is authenticated
+   end-to-end by its body HMAC, so the tunnel is untrusted transport by
+   construction. The listener carries the pre-auth ingress family and
+   nothing else: its bearer token is generated and never disclosed, and its
+   handshake refuses every workspace, so a whole-port tunnel exposes
+   delivery custody, never the wire. The bound port is printed for the
+   owner (and the test harness) — an ingress URL's capability is its path
+   id, never the port. *)
+let stage_ingress_listener ~sw ~net ~ingress ~ingress_port =
+  match (ingress, ingress_port) with
+  | Some _, Some port ->
+      let token = Server.Token.generate () in
+      let bind =
+        Server.Bind.loopback ~port:(if port = 0 then None else Some port) ~token
+      in
+      let ingress_listener = Server.listen ~sw ~net bind in
+      let bound = Option.value (Server.port ingress_listener) ~default:port in
+      let address = Printf.sprintf "127.0.0.1:%d" bound in
+      Printf.printf "mentatd ingress: %s\n%!" address;
+      Some (ingress_listener, address)
+  | _ -> None
+
+(* The racing fibers, assembled in one list (start order): the configured
+   web branch and test-only idle watchdog, the ingress listener's own
+   pre-auth serve loop, the node's pump and reconcile beat, then the wire
+   serve loop and the stop wait, which always run. *)
+let serve_branches ~sw ~clock ~registry ~stop ~dirs ~environment ~listener
+    ~node ~ingress ~ingress_listener ~web_branch ~republish_web_url =
+  List.concat
+    [
+      (match web_branch with
+      | Some branch -> [ (fun () -> branch ~on_url:republish_web_url ()) ]
+      | None -> []);
+      (match max_idle_seconds environment with
+      | Some max_idle ->
+          [
+            (fun () ->
+              idle_watchdog clock ~max_idle ~resident:(charter_resident dirs)
+                registry stop);
+          ]
+      | None -> []);
+      (match (ingress, ingress_listener) with
+      | Some ingress, Some (ingress_listener, _) ->
+          [
+            (fun () ->
+              Server.serve ~sw ~clock ~ingress
+                ~driver_for:(fun ~workspace:_ ~environment:_ ->
+                  Error
+                    (Mentat_protocol.Error.unavailable
+                       "this listener serves the webhook ingress only"))
+                ingress_listener);
+          ]
+      | _ -> []);
+      (* The node's two fibers: the pump drives admitted deliveries to
+         their dispositions — re-entering the reaped charter's reconcile
+         over a fresh load of the charter by name, so a disable or edit
+         during the run governs the new work the re-entry can commit,
+         while the admitted event itself ran under its admission-time
+         closure — and the reconcile beat keeps every charter's record
+         converging. The re-entry yields to a pass holding the fold's
+         one-pass gate rather than parking the pump behind it. Both fibers
+         are cancellable at any instant — anything caught between receipt
+         and disposition is the next boot pass's to finish. *)
+      (match node with
+      | Some node ->
+          [
+            (fun () ->
+              Node.pump node
+                ~after_reap:(fun loaded ->
+                  let name = loaded.Charter_store.Loaded.name in
+                  match Charter_store.load dirs ~name with
+                  | Ok fresh ->
+                      Charter_reconcile.reconcile (Node.reconcile_env node)
+                        ~repo_for:(Node.repo node) fresh
+                  | Error e ->
+                      Eio.traceln
+                        "mentatd: charter %s: skipping the after-reap \
+                         re-entry: %s"
+                        name
+                        (Charter_store.Error.message e)));
+            (fun () ->
+              Charter_reconcile.loop (Node.reconcile_env node)
+                ~repo_for:(Node.repo node));
+          ]
+      | None -> []);
+      [
+        (fun () ->
+          Server.serve ~sw ~clock ?ingress ~driver_for:(driver_for registry)
+            listener);
+        (fun () -> Stop_signal.wait ~clock stop);
+      ];
+    ]
+
 let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
-    ~github_base_url ~charter_git_url =
+    ~github_base_url ~charter_git_base =
   Eio_main.run @@ fun stdenv ->
   Eio.Switch.run @@ fun sw ->
   match Composition.stage_shared ~stdenv ~sw () with
@@ -706,6 +824,11 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
             ~finally:(fun () -> Discovery.Claim.release claim)
             (fun () ->
               if spawned then ignore (Unix.setsid ());
+              (* Standard output may BE daemon.log — a [--spawned] start, a
+                 service manager's unit — and the daemon's boot is the one
+                 point every such writer passes: rotate now that the claim
+                 says this process is the daemon. *)
+              Daemon.rotate_owned_log dirs;
               let socket_dir = resolve_socket_dir ~socket_override dirs in
               let socket_dir_abs = Lpath.Abs.of_string_exn socket_dir in
               let net = Eio.Stdenv.net stdenv in
@@ -720,59 +843,15 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                  handlers are installed further down, around the serve
                  races. *)
               let stop = Stop_signal.create () in
-              (* The charter node is always assembled — charters register by
-                 file, so one installed while the daemon runs is in force at
-                 its next delivery without a restart, and an empty roster
-                 costs nothing (the resolver and the reconcile passes re-read
-                 it per event). A daemon that cannot resolve its [mentat]
-                 sibling serves without the node — loudly, since installed
-                 charters will not run — unless the webhook ingress was
-                 explicitly requested, which it could never honor. *)
-              let node =
-                match
-                  Node.create shared ~stop ?github_base_url
-                    ?git_url:charter_git_url ()
-                with
-                | Ok node -> Ok (Some node)
-                | Error message when Option.is_some ingress_port ->
-                    Error
-                      (Printf.sprintf
-                         "cannot serve the webhook ingress: %s" message)
-                | Error message ->
-                    Eio.traceln "mentatd: charters will not run: %s" message;
-                    Ok None
-              in
-              match node with
+              match
+                stage_node shared ~stop ~github_base_url ~charter_git_base
+                  ~ingress_port
+              with
               | Error message -> Exit_status.runtime message
               | Ok node ->
                 let ingress = Option.map Node.ingress node in
-                (* The tunnel-facing ingress bind: loopback only — the owner
-                   points whatever tunnel they already trust at it, and every
-                   delivery is authenticated end-to-end by its body HMAC, so
-                   the tunnel is untrusted transport by construction. The
-                   listener carries the pre-auth ingress family and nothing
-                   else: its bearer token is generated and never disclosed, and
-                   its handshake refuses every workspace, so a whole-port
-                   tunnel exposes delivery custody, never the wire. The bound
-                   port is printed for the owner (and the test harness) — an
-                   ingress URL's capability is its path id, never the port. *)
                 let ingress_listener =
-                  match (ingress, ingress_port) with
-                  | Some _, Some port ->
-                      let token = Server.Token.generate () in
-                      let bind =
-                        Server.Bind.loopback
-                          ~port:(if port = 0 then None else Some port)
-                          ~token
-                      in
-                      let ingress_listener = Server.listen ~sw ~net bind in
-                      let bound =
-                        Option.value (Server.port ingress_listener) ~default:port
-                      in
-                      let address = Printf.sprintf "127.0.0.1:%d" bound in
-                      Printf.printf "mentatd ingress: %s\n%!" address;
-                      Some (ingress_listener, address)
-                  | _ -> None
+                  stage_ingress_listener ~sw ~net ~ingress ~ingress_port
                 in
                 (* The per-daemon bootstrap token: the wire has none for a unix bind
                    (filesystem auth), but the browser edge needs one, regenerated on
@@ -796,13 +875,18 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                         ~charters:charters_page
                     with
                     | Ok (branch, url) ->
-                        (* Only a foreground daemon has a reader. A spawned one's
-                           stdout is daemon.log, which is never rotated and which a
-                           user may hand over with a bug report — so printing a URL
-                           carrying a live token there would persist a credential
-                           for no one's benefit. *)
-                        if not spawned then
-                          Printf.printf "mentat web: open %s\n%!" url;
+                        (* Only a foreground daemon has a reader. A spawned
+                           daemon's stdout is daemon.log — and so is a
+                           service-managed one's, which never passes
+                           [--spawned] — a file a user may hand over with a
+                           bug report, so printing a URL carrying a live
+                           token there would persist a credential for no
+                           one's benefit. Re-entry is daemon.json (the 0600
+                           trust root), which records the URL either way. *)
+                        if
+                          (not spawned)
+                          && not (Daemon.stdout_is_daemon_log dirs)
+                        then Printf.printf "mentat web: open %s\n%!" url;
                         (Some branch, Some url)
                     | Error message ->
                         Printf.eprintf "mentat web: could not start: %s\n%!"
@@ -867,78 +951,23 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                             | Some entry -> entry.lease <- entry.lease - 1
                             | None -> ());
                         sweep registry);
-                    (* The boot reconcile: settle whatever record a previous
-                       life left open, before the first delivery is admitted.
-                       The periodic loop's own first pass re-reads the settled
-                       record for free (the fold is idempotent), and the two
-                       run in sequence, never concurrently. *)
+                    (* The boot reconcile, settle-only: whatever record a
+                       previous life left open is settled before the first
+                       delivery is admitted — locally, with no network — so
+                       the already-bound, already-advertised sockets answer
+                       promptly on a busy first boot. The reconcile loop's
+                       immediate first pass is the boot's one full fold:
+                       re-drives, sweep, and GitHub listings belong to that
+                       fiber, behind the serve races. *)
                     (match node with
                     | Some node ->
-                        Charter_reconcile.pass (Node.reconcile_env node)
-                          ~repo_for:(Node.repo node)
+                        Charter_reconcile.pass_settle (Node.reconcile_env node)
                     | None -> ());
-                    let branches =
-                      [
-                        (fun () ->
-                          Server.serve ~sw ~clock ?ingress
-                            ~driver_for:(driver_for registry) listener);
-                        (fun () -> Stop_signal.wait ~clock stop);
-                      ]
-                    in
-                    (* The node's two fibers: the pump drives admitted
-                       deliveries to their dispositions — re-entering the
-                       reaped charter's reconcile so a failed publication or
-                       a queue-refused head converges now, not on the beat —
-                       and the reconcile beat keeps every charter's record
-                       converging; the two serialize under the fold's own
-                       one-pass gate. Both are cancellable at any instant —
-                       anything caught between receipt and disposition is
-                       the next boot pass's to finish. *)
-                    let branches =
-                      match node with
-                      | Some node ->
-                          (fun () ->
-                            Node.pump node
-                              ~after_reap:
-                                (Charter_reconcile.reconcile
-                                   (Node.reconcile_env node)
-                                   ~repo_for:(Node.repo node)))
-                          :: (fun () ->
-                               Charter_reconcile.loop (Node.reconcile_env node)
-                                 ~repo_for:(Node.repo node))
-                          :: branches
-                      | None -> branches
-                    in
-                    let branches =
-                      match (ingress, ingress_listener) with
-                      | Some ingress, Some (ingress_listener, _) ->
-                          (fun () ->
-                            Server.serve ~sw ~clock ~ingress
-                              ~driver_for:(fun ~workspace:_ ~environment:_ ->
-                                Error
-                                  (Mentat_protocol.Error.unavailable
-                                     "this listener serves the webhook ingress \
-                                      only"))
-                              ingress_listener)
-                          :: branches
-                      | _ -> branches
-                    in
-                    let branches =
-                      match max_idle_seconds shared.Composition.environment with
-                      | Some max_idle ->
-                          (fun () ->
-                            idle_watchdog clock ~max_idle
-                              ~resident:(charter_resident dirs) registry stop)
-                          :: branches
-                      | None -> branches
-                    in
-                    let branches =
-                      match web_branch with
-                      | Some branch ->
-                          branch ~on_url:republish_web_url :: branches
-                      | None -> branches
-                    in
-                    Eio.Fiber.any branches;
+                    Eio.Fiber.any
+                      (serve_branches ~sw ~clock ~registry ~stop ~dirs
+                         ~environment:shared.Composition.environment ~listener
+                         ~node ~ingress ~ingress_listener ~web_branch
+                         ~republish_web_url);
                     (* D7: stop accepting, clear discovery, settle every instance
                        durable-first before the claim releases. Shutdown has one
                        implementation — the boot fiber's, behind [release] (the

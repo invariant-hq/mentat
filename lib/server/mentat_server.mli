@@ -169,14 +169,18 @@ module Ingress : sig
     | Unknown
         (** Nothing answers to the id (never minted, or removed): a
             content-free [404]. *)
-  (** The type for the resolver's answer: one consistent snapshot — secret and
-      enabled state read together — that both the verification and the
-      delivery of a single request use. *)
+  (** The type for the resolver's answer: one consistent snapshot — secret
+      and enabled state read together. *)
 
   type t = {
     resolve : ingress_id:string -> resolution;
-        (** Resolve an ingress id to its snapshot. Called once per
-            syntactically well-formed request, before the body is read. *)
+        (** Resolve an ingress id to its snapshot. Called before the body
+            is read — an unknown id ([404]) never buys a read — and, for a
+            delivery that verifies against that first snapshot, once more
+            after the body has arrived: the re-resolved secret is the one
+            custody is verified under, so rotating a secret revokes an
+            in-flight old-key delivery instead of racing it. Keep it prompt
+            and side-effect minimal: it runs on unauthenticated input. *)
     deliver :
       ingress_id:string ->
       enabled:bool ->
@@ -185,9 +189,9 @@ module Ingress : sig
       body:string ->
       [ `Accepted | `Refused of string ];
         (** Take custody of one {b verified} delivery: [body] is the exact raw
-            bytes the signature was checked over, [enabled] the snapshot
-            {!resolve} answered (so the decision is made on the state the
-            signature was verified under, without a second resolve). [event]
+            bytes the signature was checked over, [enabled] the state of
+            the post-body resolution the signature was verified under.
+            [event]
             and [delivery_id] are the [X-GitHub-Event] and [X-GitHub-Delivery]
             header values as received, [None] when absent; {b headers are not
             covered by the body HMAC}, so both ride through unverified —

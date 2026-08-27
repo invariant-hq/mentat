@@ -38,16 +38,31 @@ daemon, which adopts them at its next boot.
   </dict>
   </plist>
 
-The daemon's serve flags bake into the exec line: --ingress-port and
---github-base-url render as further ProgramArguments entries, so the
-resident daemon starts with them at every boot.
+The daemon's serve flags bake into the exec line: --ingress-port,
+--github-base-url, --charter-git-base, --web, and --web-port render as
+further ProgramArguments entries, so the resident daemon starts with them
+at every boot — --web is the only way a service-managed daemon serves the
+charters dashboard, since only one daemon claims a store.
 
-  $ mentatd install --print --ingress-port 8080 --github-base-url https://ghe.example.test/api/v3 | sed -n '/<array>/,/<\/array>/p' | sed -E 's#<string>/[^<]*mentatd</string>#<string>MENTATD</string>#'
+  $ mentatd install --print --ingress-port 8080 --github-base-url https://ghe.example.test/api/v3 --charter-git-base https://ghe.example.test --web --web-port 8081 | sed -n '/<array>/,/<\/array>/p' | sed -E 's#<string>/[^<]*mentatd</string>#<string>MENTATD</string>#'
     <array>
       <string>MENTATD</string>
       <string>--ingress-port=8080</string>
       <string>--github-base-url=https://ghe.example.test/api/v3</string>
+      <string>--charter-git-base=https://ghe.example.test</string>
+      <string>--web</string>
+      <string>--web-port=8081</string>
     </array>
+
+A port outside 0-65535 is a usage error at the flag, on both surfaces —
+never a listen-time raise, never a permanently failing unit.
+
+  $ mentatd install --print --ingress-port=65536 2>&1 | grep -c 'between 0 and 65535'
+  1
+  [124]
+  $ mentatd --ingress-port=-1 2>&1 | grep -c 'between 0 and 65535'
+  1
+  [124]
 
 --print touched nothing: no LaunchAgents directory, no daemon directory.
 
