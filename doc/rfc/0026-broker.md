@@ -472,7 +472,11 @@ and orphaned look identical" — are structurally impossible: every
   widened from the engine to every interface). *Prevents:* registries,
   and every race a registry brings.
 - **L-B2 — Whoever holds a session's fence *to drive it* serves its
-  socket.** Serving holds carry the serving label; brief custodial
+  socket.** Serving holds carry a serving label — of which there are
+  two, split by preemptability: the child server's label, the one
+  holder the escalation ladder may signal, and the serve-mount label
+  a live interactive host wears, dialable but never signalled (a
+  broker must never ladder the owner's terminal). Brief custodial
   holds (a send append, a store removal) carry a custodial label and
   are bounded; the probe decides by label, never by bare heldness.
   The law binds fully once the eviction rung lands; until then,
@@ -606,9 +610,11 @@ intensity bound.
    the delegation unit tests' migration onto it.
 3. The append's exact store seam (the lifecycle twins' pattern vs a
    narrower entry point) — mechanical, decided at contact.
-4. The per-(target, origin) cap's number (today's per-edge default is
-   8, `run.subagent_max_exchanges` — but that was a lifetime bound; a
-   backlog bound may want a different number).
+4. RESOLVED at R-mail (2026-08-28): the cap is 8 unconsumed entries
+   per (target, origin) — a backlog bound, one named constant; the
+   owner is never counted (the rate law aims at agents, and capping
+   the human would regress their own queue); enforced in every
+   delivery arm through the one admission judgment.
 5. The handle grammar for granted contacts (`contact:<name>`?).
 6. The custodial label's interaction with rediscovery's residue
    sweep — a `send`-labeled fence must read as transient there too.
@@ -676,10 +682,14 @@ this RFC implies nothing about priority or scheduling.
   with R5. Holds: parent transcripts. Changes, named: the wire corpus
   extends for `Queue_next`'s optional origin member; child journals
   gain the origin member; messaging crams lose the fallback arms.
-- **R-mail — the mandate ships.** The `send` tool verb with
-  parent/child handles, `mentat session send`, and the serve-mount
-  bridge: the interactive host serves its session's socket while
-  driving, so a live TUI parent is dialable. Delivers child-to-parent
+- **R-mail — the mandate ships. LANDED 2026-08-28.** The `send` tool
+  verb with parent/child handles (replacing `send_message`; the
+  retired spelling decoded forever), `mentat session send`, the
+  backlog cap and sender framing this rung owned, and the serve-mount
+  bridge: every in-process driver host — the TUI, headless runs, and
+  the daemon — serves each driven session's socket under the
+  never-preemptable mount label while driving, so a live parent is
+  dialable. Delivers child-to-parent
   replies and human-to-session mail — the messaging mandate's core
   (sibling mail needs granted contacts and arrives with R5) — the
   messaging mandate — before any process-model risk is taken. The
