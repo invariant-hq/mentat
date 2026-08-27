@@ -5569,8 +5569,10 @@ let workspace_dune_followed t =
 
 let workspace_section t =
   Pane_sections.section ~label:"workspace"
-    (Workspace_glance.worktree ~palette:t.palette
-       ~worktree:(workspace_worktree t)
+    (Workspace_glance.trust ~palette:t.palette
+       ~trusted:(Snapshot.trusted t.current_snapshot)
+    @ Workspace_glance.worktree ~palette:t.palette
+        ~worktree:(workspace_worktree t)
     @ Workspace_glance.changed ~palette:t.palette ~changed:(workspace_changed t)
     @ Workspace_glance.tooling ~palette:t.palette ~tooling:(workspace_tooling t)
     )

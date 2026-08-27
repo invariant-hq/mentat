@@ -536,7 +536,8 @@ let snapshot ~version t model =
            ~sandbox:
              (Some
                 (Mentat_config.Mode.to_string
-                   (Composition.configured_sandbox_mode t))))
+                   (Composition.configured_sandbox_mode t)))
+           ~trusted:(Composition.trusted t))
 
 let use_color () =
   match Sys.getenv_opt "NO_COLOR" with

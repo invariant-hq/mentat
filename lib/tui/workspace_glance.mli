@@ -13,6 +13,12 @@
     deletions, a failing build, and a failed background process carry the only
     colour. It never reads the filesystem or invents a value. *)
 
+val trust : palette:Theme.Palette.t -> trusted:bool -> 'msg Mosaic.t list
+(** [trust ~palette ~trusted] is one warned [untrusted] row when the launch
+    workspace was untrusted, else nothing. Untrusted degrades the whole
+    session — project config unread, project tooling off — and its other
+    traces are absences, so the section states the cause once. *)
+
 val worktree :
   palette:Theme.Palette.t ->
   worktree:Textdiff.stats option ->

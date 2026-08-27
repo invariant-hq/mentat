@@ -289,7 +289,8 @@ val run :
     (Mentat_config.Resolved.View.t, Mentat_protocol.Error.t) result list ->
   ?hold_settings_queries:bool ->
   ?hold_decision_resolution:bool ->
-  ?snapshot:(Project.t -> Mentat_tui.Snapshot.t) ->
+  ?snapshot:(Project.t -> trusted:bool -> Mentat_tui.Snapshot.t) ->
+  ?trusted:bool ->
   ?home:(Project.t -> Lpath.Abs.t option) ->
   name:string ->
   (t -> unit) ->

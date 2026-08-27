@@ -17,10 +17,19 @@ module Discovery = Server.Discovery
    itself enforces the version. *)
 let protocol_version = 1
 
+(* A release carries its version; a dev build does not, and "dev" == "dev"
+   would attach a fresh client to any stale daemon from an older build —
+   whose wire may have moved — leaving surfaces silently empty. The
+   executable's own identity (device, inode, mtime, size — a rebuild mints
+   a fresh inode) makes the gate mean what it says for dev builds too. *)
 let binary_version =
   match Build_info.V1.version () with
   | Some v -> Build_info.V1.Version.to_string v
-  | None -> "dev"
+  | None -> (
+      match Unix.stat Sys.executable_name with
+      | { Unix.st_dev; st_ino; st_mtime; st_size; _ } ->
+          Printf.sprintf "dev-%d:%d:%.0f:%d" st_dev st_ino st_mtime st_size
+      | exception Unix.Unix_error _ -> "dev")
 
 (* Render a boot/staging failure as a message for the wire. *)
 let exit_message = function

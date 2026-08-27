@@ -41,15 +41,24 @@ let home ~palette (snapshot : Snapshot.t) ~rows =
     box ~flex_direction:Flex_direction.Row ~justify_content:Justify.Center
       ~overflow:hidden_overflow ~flex_shrink:1. ~min_size:zero_size
       ~size:{ width = pct 100; height = px 1 }
-      [
-        inline
-          ~style:(Theme.Palette.muted_style palette)
-          (Snapshot.version snapshot);
-        text
-          ~style:(Theme.Palette.muted_style palette)
-          ~wrap:`None ~flex_shrink:0. Theme.separator;
-        inline ~style:Ansi.Style.default (Snapshot.model_line snapshot);
-      ]
+      ([
+         inline
+           ~style:(Theme.Palette.muted_style palette)
+           (Snapshot.version snapshot);
+         text
+           ~style:(Theme.Palette.muted_style palette)
+           ~wrap:`None ~flex_shrink:0. Theme.separator;
+         inline ~style:Ansi.Style.default (Snapshot.model_line snapshot);
+       ]
+      @
+      if Snapshot.trusted snapshot then []
+      else
+        [
+          text
+            ~style:(Theme.Palette.muted_style palette)
+            ~wrap:`None ~flex_shrink:0. Theme.separator;
+          inline ~style:(Theme.Palette.warning_style palette) "untrusted";
+        ])
   in
   box ~flex_direction:Flex_direction.Column ~align_items:Align.Center
     ~overflow:hidden_overflow ~flex_shrink:1. ~min_size:zero_size
@@ -73,16 +82,20 @@ let facts_basis = { width = px 20; height = auto }
 let record_facts ~palette (snapshot : Snapshot.t) =
   box ~flex_direction:Flex_direction.Column ~flex_grow:1. ~flex_shrink:1.
     ~min_size:zero_size ~size:facts_basis
-    [
-      inline
-        ~style:(Theme.Palette.muted_style palette)
-        (Snapshot.version snapshot ^ Theme.separator
-        ^ Snapshot.model_line snapshot);
-      inline
-        ~style:(Theme.Palette.muted_style palette)
-        (Path_display.home_relative ~home:(Snapshot.home snapshot)
-           (Snapshot.cwd snapshot));
-    ]
+    ([
+       inline
+         ~style:(Theme.Palette.muted_style palette)
+         (Snapshot.version snapshot ^ Theme.separator
+         ^ Snapshot.model_line snapshot);
+       inline
+         ~style:(Theme.Palette.muted_style palette)
+         (Path_display.home_relative ~home:(Snapshot.home snapshot)
+            (Snapshot.cwd snapshot));
+     ]
+    @
+    if Snapshot.trusted snapshot then []
+    else
+      [ inline ~style:(Theme.Palette.warning_style palette) "untrusted" ])
 
 let record ~palette (snapshot : Snapshot.t) =
   (* One flex line while the row affords lockup + the facts basis; narrower

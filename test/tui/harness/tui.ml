@@ -3256,7 +3256,7 @@ let run ?(size = (80, 24)) ?(env = []) ?(reduced_motion = true)
     ?(hold_queue_edit_results = false) ?session_view_results
     ?(hold_session_view_results = false) ?configuration_results
     ?(hold_settings_queries = false) ?(hold_decision_resolution = false)
-    ?snapshot
+    ?snapshot ?(trusted = true)
     ?(home =
       fun project ->
         Some (Lpath.Abs.of_string_exn (Filename.dirname (Project.root project))))
@@ -3265,13 +3265,13 @@ let run ?(size = (80, 24)) ?(env = []) ?(reduced_motion = true)
   let home = home project in
   let snapshot =
     match snapshot with
-    | Some snapshot -> snapshot project
+    | Some snapshot -> snapshot project ~trusted
     | None ->
         Snapshot.make ~version:"dev" ~model:"openai/gpt-5.5"
           ~effort:(Some "medium")
           ~cwd:(Lpath.Abs.of_string_exn (Project.root project))
           ~home ~context_window:(Some 128_000)
-          ~sandbox:(Some "danger-full-access")
+          ~sandbox:(Some "danger-full-access") ~trusted
   in
   let sessions = sessions project in
   let child_runtime = Child_runtime.create (child_sessions project) in
