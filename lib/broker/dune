@@ -1,0 +1,18 @@
+(library
+ (name mentat_broker)
+ (instrumentation
+  (backend ppx_windtrap.coverage))
+ (instrumentation
+  (backend ppx_windtrap.mutate))
+ (private_modules spawn)
+ (libraries
+  eio
+  eio.unix
+  unix
+  lpath
+  mentat_client
+  mentat_digest
+  mentat_protocol
+  mentat_server
+  mentat_session
+  mentat_store))

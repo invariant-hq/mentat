@@ -64,7 +64,7 @@ type registry = {
   parent_sw : Eio.Switch.t;
   (* Every daemon-hosted instance delegates through the node's one child
      broker; the ops close over the instance at boot. *)
-  broker : Child_broker.t;
+  broker : Mentat_broker.t;
   mutex : Eio.Mutex.t;
   entries : (string, entry) Hashtbl.t;
   (* Live bound connections across all instances — the idle watchdog's zero
@@ -84,6 +84,29 @@ let make_registry ~shared ~parent_sw ~broker =
     active = Atomic.make 0;
   }
 
+(* The broker's engine-reach seam for one instance: the workspace identity a
+   child is spawned and dialed under, and the engine wrappers every
+   observation reports through. *)
+let broker_instance instance =
+  {
+    Mentat_broker.Instance.root = Composition.root instance;
+    environment = Composition.environment instance;
+    adopt_session = Composition.adopt_session instance;
+    integrate_child =
+      (fun ~child -> Composition.integrate_child instance ~child);
+    fail_child =
+      (fun ~child ~message -> Composition.fail_child instance ~child ~message);
+  }
+
+let broker_ops broker instance =
+  let seam = broker_instance instance in
+  {
+    Mentat_agent.Ports.materialize =
+      (fun ~child -> Mentat_broker.materialize broker seam ~child);
+    deliver = (fun ~command -> Mentat_broker.deliver broker ~command);
+    cancel = (fun ~child -> Mentat_broker.cancel broker ~child);
+  }
+
 (* Boot one instance under a fiber that holds the instance switch open until the
    returned [release] runs — the detached scope eviction closes. Runs the
    staging and driver assembly synchronously and reports the ready entry (or the
@@ -99,8 +122,7 @@ let boot registry ~root ~environment =
         Composition.instance registry.shared ~sw:instance_sw ~cwd:(Some root)
           ~overrides:[] ?environment
           ~child_backend:(fun instance ->
-            Mentat_agent.Ports.Brokered
-              (Child_broker.ops registry.broker instance))
+            Mentat_agent.Ports.Brokered (broker_ops registry.broker instance))
           ()
       with
       | Error status -> Eio.Promise.resolve set_ready (Error status)
@@ -836,7 +858,20 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
               let listener =
                 Server.listen ~sw ~net (Server.Bind.unix ~dir:socket_dir_abs)
               in
-              let broker = Child_broker.create ~sw shared in
+              (* [mentat] lives beside [mentatd] in every release artifact;
+                 the shared sibling policy — including the loud refusal of a
+                 path that would only fail inside the forked child — lives
+                 with [Daemon.resolve_sibling], consulted at each spawn. *)
+              let broker =
+                Mentat_broker.create ~sw ~stdenv
+                  ~store:shared.Composition.store
+                  ~resolve_bin:(fun () ->
+                    Daemon.resolve_sibling ~env:"MENTAT_BIN" ~name:"mentat"
+                      ~beside:"mentatd")
+                  ~socket_base:(User_dirs.daemon_socket_dir dirs)
+                  ~log_dir:(User_dirs.daemon_dir dirs)
+                  ~serve_owner_label:Composition.child_server_owner_label
+              in
               let registry = make_registry ~shared ~parent_sw:sw ~broker in
               (* The stop seam is created before the branches so the resident
                  charter node can thread it into its pipeline; the signal
@@ -937,14 +972,15 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                        broker enumerates orphaned children and adopts their
                        parents through the ordinary get-or-boot, whose recovery
                        re-drives each edge into the broker's own materialize. *)
-                    Child_broker.rediscover broker
+                    Mentat_broker.rediscover broker
                       ~instance_for:(fun ~root ->
                         match get_or_boot registry ~root () with
                         | Error status -> Error (exit_message status)
-                        | Ok entry -> Ok entry.instance)
+                        | Ok entry -> Ok (broker_instance entry.instance))
                       ~release:(fun instance ->
                         let root =
-                          Lpath.Abs.to_string (Composition.root instance)
+                          Lpath.Abs.to_string
+                            instance.Mentat_broker.Instance.root
                         in
                         Eio.Mutex.use_rw ~protect:true registry.mutex (fun () ->
                             match Hashtbl.find_opt registry.entries root with
@@ -980,7 +1016,7 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                     (* Stop the broker's fibers before the instances settle: the
                        children themselves keep running detached, and a
                        successor's rediscovery re-adopts them. *)
-                    Child_broker.stop broker;
+                    Mentat_broker.stop broker;
                     let settling =
                       Eio.Mutex.use_rw ~protect:true registry.mutex (fun () ->
                           Hashtbl.fold

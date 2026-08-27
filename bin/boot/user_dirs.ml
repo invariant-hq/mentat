@@ -94,24 +94,7 @@ let daemon_socket_dir t =
   in
   Printf.sprintf "/tmp/mentat-%d-%s" (Unix.getuid ()) key
 
-(* A session id is admitted verbatim as the path leaf only when it is short and
-   filename-plain; anything else is keyed. Both forms are pure functions of the
-   id, and both keep the socket path inside the [sun_path] budget. *)
+(* The layout beneath the socket base — the [s/] tree and its per-session
+   leaves — is the broker's vocabulary; this binds it to the per-user base. *)
 let child_socket_dir t ~session =
-  let plain c =
-    (c >= 'a' && c <= 'z')
-    || (c >= 'A' && c <= 'Z')
-    || (c >= '0' && c <= '9')
-    || Char.equal c '-' || Char.equal c '_' || Char.equal c '.'
-  in
-  let leaf =
-    if
-      String.length session > 0
-      && String.length session <= 40
-      && String.for_all plain session
-      && not (Char.equal session.[0] '.')
-    then session
-    else
-      Mentat_digest.key ~length:16 ~domain:"mentat.child-socket.v1" [ session ]
-  in
-  Filename.concat (Filename.concat (daemon_socket_dir t) "s") leaf
+  Mentat_broker.socket_dir ~base:(daemon_socket_dir t) ~session

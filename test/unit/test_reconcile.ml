@@ -3,13 +3,13 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(* Unit suite for [Reconcile], the child broker's pure reconciliation tables —
-   every process-level decision the daemon's broker makes, driven here over
-   thunk probes with no process, socket, or store behind them. The module
-   lives in [bin/mentatd] and is not library-linkable, so its source is
-   copied into this test executable by the [copy_files] rule in [dune]. *)
+(* Unit suite for [Mentat_broker.Reconcile], the child broker's pure
+   reconciliation tables — every process-level decision the broker makes,
+   driven here over thunk probes with no process, socket, or store behind
+   them. *)
 
 open Windtrap
+open Mentat_broker
 
 let action =
   Testable.make

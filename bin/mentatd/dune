@@ -7,12 +7,9 @@
   charter_cli
   charter_dashboard
   charter_reconcile
-  child_broker
-  child_spawn
   daemon_server
   main
   node
-  reconcile
   service)
  (libraries
   cmdliner
@@ -22,6 +19,7 @@
   lpath
   mentat_agent
   mentat_boot
+  mentat_broker
   mentat_charter
   mentat_client
   mentat_github

@@ -3,26 +3,23 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(* [mentat] lives beside [mentatd] in every release artifact; the shared
-   sibling policy — including the loud refusal of a path that would only fail
-   inside the forked child — lives with [Daemon.resolve_sibling]. *)
-let resolve_mentat () =
-  Daemon.resolve_sibling ~env:"MENTAT_BIN" ~name:"mentat" ~beside:"mentatd"
+(* The child's stdio log, one per session under the configured log directory,
+   named by the same path-safe leaf its socket directory uses. Unrotated: a
+   child is spawned per delegation and appends only its own boot and crash
+   lines, so the file is bounded by re-spawn frequency, not by the spawning
+   process's lifetime. *)
+let log_path ~log_dir ~leaf =
+  Filename.concat log_dir (Printf.sprintf "child-%s.log" leaf)
 
-(* The child's stdio log, one per session under the daemon home, named by the
-   same path-safe leaf its socket directory uses. Unrotated: a child is spawned
-   per delegation and appends only its own boot and crash lines, so the file is
-   bounded by re-spawn frequency, not by daemon lifetime. *)
-let log_path dirs ~session =
-  Filename.concat (User_dirs.daemon_dir dirs)
-    (Printf.sprintf "child-%s.log"
-       (Filename.basename (User_dirs.child_socket_dir dirs ~session)))
+let ensure_log_dir log_dir =
+  try Unix.mkdir log_dir 0o700
+  with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
 
-let spawn dirs ~environment ~session ~interrupted ~cwd =
-  match resolve_mentat () with
+let spawn ~resolve_bin ~log_dir ~leaf ~environment ~session ~interrupted ~cwd =
+  match resolve_bin () with
   | Error _ as e -> e
   | Ok bin ->
-      Daemon.ensure_daemon_dir dirs;
+      ensure_log_dir log_dir;
       let session = Mentat_session.Id.to_string session in
       let argv =
         [
@@ -55,7 +52,7 @@ let spawn dirs ~environment ~session ~interrupted ~cwd =
         ~finally:(fun () -> close devnull)
         (fun () ->
           let log =
-            Unix.openfile (log_path dirs ~session)
+            Unix.openfile (log_path ~log_dir ~leaf)
               [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_APPEND ]
               0o600
           in

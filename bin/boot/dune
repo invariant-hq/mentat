@@ -26,6 +26,7 @@
   mentat_context
   mentat_prompts
   mentat_agent
+  mentat_broker
   mentat_charter
   mentat_client
   mentat_connector

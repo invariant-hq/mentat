@@ -3,11 +3,47 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
+module Reconcile = Reconcile
 module Server = Mentat_server
 module Client = Mentat_client
 module Store = Mentat_store
 module Session = Mentat_session
 module Command = Mentat_protocol.Command
+
+(* The socket layout beneath the configured base is this library's own
+   vocabulary: the [s/] tree, and one leaf per session. A session id is
+   admitted verbatim as the leaf only when it is short and filename-plain;
+   anything else is keyed. Both forms are pure functions of the id, and both
+   keep the socket path inside the [sun_path] budget. *)
+let socket_leaf ~session =
+  let plain c =
+    (c >= 'a' && c <= 'z')
+    || (c >= 'A' && c <= 'Z')
+    || (c >= '0' && c <= '9')
+    || Char.equal c '-' || Char.equal c '_' || Char.equal c '.'
+  in
+  if
+    String.length session > 0
+    && String.length session <= 40
+    && String.for_all plain session
+    && not (Char.equal session.[0] '.')
+  then session
+  else Mentat_digest.key ~length:16 ~domain:"mentat.child-socket.v1" [ session ]
+
+let socket_dir ~base ~session =
+  Filename.concat (Filename.concat base "s") (socket_leaf ~session)
+
+module Instance = struct
+  type t = {
+    root : Lpath.Abs.t;
+    environment : (string * string) list;
+    adopt_session :
+      Mentat_session.Id.t -> (unit, Mentat_protocol.Error.t) result;
+    integrate_child :
+      child:Mentat_session.Id.t -> [ `Integrated | `Not_settled | `Unbound ];
+    fail_child : child:Mentat_session.Id.t -> message:string -> unit;
+  }
+end
 
 (* Every timing constant in one place. The boot wait bounds only how long a
    spawned child may take to bind its endpoint before the ladder treats it as
@@ -33,7 +69,7 @@ let reap_interval_s = 0.05
    stamp, so the polls that watch a parked child decode only on change. *)
 type entry = {
   child : Session.Id.t;
-  instance : Composition.t;
+  instance : Instance.t;
   socket_dir : string;
   mutable pid : int option;
   respawns : int;
@@ -44,7 +80,12 @@ type entry = {
 
 type t = {
   sw : Eio.Switch.t;
-  shared : Composition.shared;
+  stdenv : Eio_unix.Stdenv.base;
+  store : Store.t;
+  resolve_bin : unit -> (string, string) result;
+  socket_base : string;
+  log_dir : string;
+  serve_owner_label : string;
   entries : (string, entry) Hashtbl.t;
   stop_signal : unit Eio.Promise.t;
   stop_resolver : unit Eio.Promise.u;
@@ -52,8 +93,8 @@ type t = {
 }
 
 let key child = Session.Id.to_string child
-let clock t = Eio.Stdenv.clock t.shared.Composition.stdenv
-let net t = Eio.Stdenv.net t.shared.Composition.stdenv
+let clock t = Eio.Stdenv.clock t.stdenv
+let net t = Eio.Stdenv.net t.stdenv
 let sleep t seconds = Eio.Time.sleep (clock t) seconds
 
 (* An entry is current while it is the table's binding for its child. A
@@ -75,9 +116,7 @@ let send_signal pid signal =
    resumed the child, an unreadable owner line, a foreign host — is
    [`Held None], which the table refuses to preempt. *)
 let probe_fence t entry () : Reconcile.fence =
-  match
-    Store.Run_lock.holder t.shared.Composition.store ~session:entry.child
-  with
+  match Store.Run_lock.holder t.store ~session:entry.child with
   | `Free -> `Free
   | `Io io -> `Io (Format.asprintf "%a" Store.Io.pp io)
   | `Held None -> `Held None
@@ -88,11 +127,11 @@ let probe_fence t entry () : Reconcile.fence =
         String.equal (Store.Run_lock.Owner.host owner) (Unix.gethostname ())
         && Option.equal String.equal
              (Store.Run_lock.Owner.label owner)
-             (Some Composition.child_server_owner_label)
+             (Some t.serve_owner_label)
       then `Held (Some pid)
       else `Held None
 
-let root_string entry = Lpath.Abs.to_string (Composition.root entry.instance)
+let root_string entry = Lpath.Abs.to_string entry.instance.Instance.root
 
 let head_of session : Reconcile.head =
   match Session.State.settled_head (Session.state session) with
@@ -104,7 +143,7 @@ let head_of session : Reconcile.head =
    unreadable journal presumes outstanding work, so the caller keeps watching
    rather than abandoning a child it cannot judge. *)
 let child_head t entry : Reconcile.head =
-  let store = t.shared.Composition.store in
+  let store = t.store in
   let read () : Reconcile.head =
     match Store.Session.load store entry.child with
     | Error _ -> `Unfinished
@@ -220,7 +259,7 @@ let give_up t entry message =
         remove_endpoint entry);
     Eio.traceln "mentatd: delegation to %s abandoned: %s" (key entry.child)
       message;
-    Composition.fail_child entry.instance ~child:entry.child ~message
+    entry.instance.Instance.fail_child ~child:entry.child ~message
   end
 
 (* The escalation ladder for a child this broker spawned. Each signal is sent
@@ -314,7 +353,7 @@ let follow_feed t entry =
        after the settlement was already delivered would resume past it and
        tail a feed that will never speak again — pinning the lingering child
        alive on a connection nothing closes. *)
-    match Composition.integrate_child entry.instance ~child:entry.child with
+    match entry.instance.Instance.integrate_child ~child:entry.child with
     | `Integrated | `Unbound -> ()
     | `Not_settled -> (
         Eio.Switch.run @@ fun sw ->
@@ -345,7 +384,7 @@ let follow_feed t entry =
                       match fact with
                       | Mentat_protocol.Fact.Turn_settled _ -> (
                           match
-                            Composition.integrate_child entry.instance
+                            entry.instance.Instance.integrate_child
                               ~child:entry.child
                           with
                           | `Integrated | `Unbound -> ()
@@ -396,7 +435,7 @@ let fork_entry t entry work =
 let rec settle_exit t entry =
   if current t entry then begin
     Hashtbl.remove t.entries (key entry.child);
-    match Composition.integrate_child entry.instance ~child:entry.child with
+    match entry.instance.Instance.integrate_child ~child:entry.child with
     | `Integrated | `Unbound -> remove_endpoint entry
     | `Not_settled ->
         if entry.respawns >= max_respawns then begin
@@ -408,7 +447,7 @@ let rec settle_exit t entry =
           in
           Eio.traceln "mentatd: delegation to %s abandoned: %s"
             (key entry.child) message;
-          Composition.fail_child entry.instance ~child:entry.child ~message
+          entry.instance.Instance.fail_child ~child:entry.child ~message
         end
         else begin
           (* A fresh record, honoring [current]'s discipline: the
@@ -430,10 +469,10 @@ let rec settle_exit t entry =
 
 and spawn_child t entry =
   match
-    Child_spawn.spawn t.shared.Composition.dirs
-      ~environment:(Composition.environment entry.instance)
-      ~session:entry.child ~interrupted:entry.cancelled
-      ~cwd:(Composition.root entry.instance)
+    Spawn.spawn ~resolve_bin:t.resolve_bin ~log_dir:t.log_dir
+      ~leaf:(socket_leaf ~session:(key entry.child))
+      ~environment:entry.instance.Instance.environment ~session:entry.child
+      ~interrupted:entry.cancelled ~cwd:entry.instance.Instance.root
   with
   | Error message -> give_up t entry message
   | Ok pid ->
@@ -542,9 +581,7 @@ let register t instance ~child work =
           {
             child;
             instance;
-            socket_dir =
-              User_dirs.child_socket_dir t.shared.Composition.dirs
-                ~session:(key child);
+            socket_dir = socket_dir ~base:t.socket_base ~session:(key child);
             pid = None;
             respawns = 0;
             cancelled = false;
@@ -615,13 +652,6 @@ let deliver t ~command =
   in
   attempt 0.
 
-let ops t instance =
-  {
-    Mentat_agent.Ports.materialize = (fun ~child -> materialize t instance ~child);
-    deliver = (fun ~command -> deliver t ~command);
-    cancel = (fun ~child -> cancel t ~child);
-  }
-
 (* The reaper: one fiber per broker sweeping the spawned-pid set with
    [WNOHANG] on a short cadence. The reaper never suspends: the sweep clears
    each [pid] in the same step that observes its exit, and every exit's
@@ -665,12 +695,18 @@ let run_reaper t =
   in
   loop ()
 
-let create ~sw shared =
+let create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir
+    ~serve_owner_label =
   let stop_signal, stop_resolver = Eio.Promise.create () in
   let t =
     {
       sw;
-      shared;
+      stdenv;
+      store;
+      resolve_bin;
+      socket_base;
+      log_dir;
+      serve_owner_label;
       entries = Hashtbl.create 8;
       stop_signal;
       stop_resolver;
@@ -690,9 +726,8 @@ let stop t =
    one spawn path, probed once. *)
 
 let rediscover t ~instance_for ~release =
-  let dirs = t.shared.Composition.dirs in
-  let store = t.shared.Composition.store in
-  let leaf_root = Filename.concat (User_dirs.daemon_socket_dir dirs) "s" in
+  let store = t.store in
+  let leaf_root = Filename.concat t.socket_base "s" in
   let leaves =
     match Sys.readdir leaf_root with
     | entries -> Array.to_list entries
@@ -723,9 +758,7 @@ let rediscover t ~instance_for ~release =
             | Some lineage -> (id, session, lineage) :: acc)
           sessions []
       in
-      let leaf_of id =
-        Filename.basename (User_dirs.child_socket_dir dirs ~session:id)
-      in
+      let leaf_of id = socket_leaf ~session:id in
       let remove_leaf leaf =
         Server.Bind.remove_endpoint
           ~dir:(Lpath.Abs.of_string_exn (Filename.concat leaf_root leaf))
@@ -792,7 +825,7 @@ let rediscover t ~instance_for ~release =
                   root message
             | Ok instance ->
                 (if adopt then
-                   match Composition.adopt_session instance parent_id with
+                   match instance.Instance.adopt_session parent_id with
                    | Ok () -> ()
                    | Error error ->
                        Eio.traceln "mentatd: orphan %s: adopting its parent: %a"
