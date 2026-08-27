@@ -29,9 +29,10 @@ val make :
   home:Lpath.Abs.t option ->
   context_window:int option ->
   sandbox:string option ->
+  trusted:bool ->
   t
-(** [make ~version ~model ~effort ~cwd ~home ~context_window ~sandbox]
-    constructs the launch snapshot.
+(** [make ~version ~model ~effort ~cwd ~home ~context_window ~sandbox
+     ~trusted] constructs the launch snapshot.
 
     External string labels are normalized as described for {!t}. A visibly blank
     [version] becomes ["[version unavailable]"], and a visibly blank [model]
@@ -63,6 +64,13 @@ val context_window : t -> int option
 val sandbox : t -> string option
 (** [sandbox t] is the normalized presentation label for the launch sandbox,
     when available. It carries no sandbox capability or posture. *)
+
+val trusted : t -> bool
+(** [trusted t] is whether the launch workspace was trusted. Launch-fixed:
+    a trust decision recorded elsewhere takes effect at the next session.
+    An untrusted workspace degrades the whole session — project config
+    unread, project tooling off — so the surfaces render the state rather
+    than letting its absences speak one row at a time. *)
 
 val with_model :
   model:string -> effort:string option -> ?context_window:int -> t -> t

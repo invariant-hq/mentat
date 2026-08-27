@@ -288,6 +288,7 @@ let run ?run_local_shell ?(drive = fun _ -> ())
   let snapshot =
     Mentat_tui.Snapshot.make ~version:"test" ~model:"openai/gpt-5.5"
       ~effort:None ~cwd ~home:(Some cwd) ~context_window:None ~sandbox:None
+      ~trusted:true
   in
   let startup =
     Mentat_tui.Startup.make ~snapshot ~mode:Session.Contract.Mode.Build

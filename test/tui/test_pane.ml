@@ -909,6 +909,35 @@ let%expect_test "dune row renders warnings with lint, and a building watch" =
 (* The supervisor's off reasons name themselves muted: no dune on the command
    PATH, and a give-up after successive spawned watches died before coming
    up. A disabled lane and plain absence still render no row at all. *)
+let%expect_test "an untrusted workspace is stated, not implied by absences" =
+  (* Untrusted gates the dune lane off, and Off Disabled is the one no-row
+     state — so before this row, the only pane trace of untrusted was an
+     empty workspace section. The state is now said in the section, the
+     banner facts, and the footer. *)
+  let prompt = "untrusted hello" in
+  let turn = Tui.Turn_script.complete ~prompt "Done." in
+  Tui.run ~name:"pane-untrusted" ~size:(120, 12) ~trusted:false
+    ~turns:[ turn ]
+  @@ fun t ->
+  submit t prompt;
+  Tui.finish_turn t;
+  Tui.settle t;
+  Tui.print t;
+  [%expect {|
+    01 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium                     │ workspace
+    02 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-pane-u16c809e5                     │   untrusted
+    03 |                                 untrusted                                       │
+    04 |                                                                                 │
+    05 | ❯ untrusted hello                                                               │
+    06 |                                                                                 │
+    07 | ⏺ Done.                                                                         │
+    08 |
+    09 | ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    10 | ❯ message mentat
+    11 | ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    12 |   ! not logged in · /login · ~/mentat-tui-pane-u16c809… · openai/gpt-5.5 · ! full access · ! untrusted ? for shortcuts
+    |}]
+
 let%expect_test "dune row names the supervisor's off reasons" =
   let prompt = "watch off" in
   let turn = Tui.Turn_script.complete ~prompt "Done." in

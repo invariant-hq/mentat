@@ -11,6 +11,7 @@ type t = {
   home : Lpath.Abs.t option;
   context_window : int option;
   sandbox : string option;
+  trusted : bool;
 }
 
 let is_white_space uchar =
@@ -44,7 +45,8 @@ let optional_label = function
 
 let positive = function Some value when value > 0 -> Some value | _ -> None
 
-let make ~version ~model ~effort ~cwd ~home ~context_window ~sandbox =
+let make ~version ~model ~effort ~cwd ~home ~context_window ~sandbox
+    ~trusted =
   {
     version = label ~fallback:"[version unavailable]" version;
     model = label ~fallback:"[model unavailable]" model;
@@ -53,6 +55,7 @@ let make ~version ~model ~effort ~cwd ~home ~context_window ~sandbox =
     home;
     context_window = positive context_window;
     sandbox = optional_label sandbox;
+    trusted;
   }
 
 let version t = t.version
@@ -62,6 +65,7 @@ let cwd t = t.cwd
 let home t = t.home
 let context_window t = t.context_window
 let sandbox t = t.sandbox
+let trusted t = t.trusted
 
 let with_model ~model ~effort ?context_window t =
   let model = label ~fallback:"[model unavailable]" model in
@@ -82,3 +86,4 @@ let equal a b =
   && Option.equal Lpath.Abs.equal a.home b.home
   && Option.equal Int.equal a.context_window b.context_window
   && Option.equal String.equal a.sandbox b.sandbox
+  && Bool.equal a.trusted b.trusted

@@ -311,4 +311,7 @@ let wait_for_file path =
         Unix.sleepf 0.05;
         loop (remaining - 1))
   in
-  loop 200
+  (* 30 s: first spawns on a busy host — fresh-inode syspolicyd scans, a
+     live watch rebuilding beside the suite — can exceed the old 10 s
+     bound; only failing tests pay the longer wait. *)
+  loop 600

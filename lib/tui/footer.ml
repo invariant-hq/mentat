@@ -109,6 +109,17 @@ let sandbox_fact ~palette snapshot =
                (Theme.Palette.error_style palette)
                "!" " full access"))
 
+(* Untrusted is the loud kind of quiet: it degrades the whole session —
+   project config unread, project tooling off — and its only other traces
+   are absences (no dune row, fewer tools). One warned fact names it. *)
+let trust_fact ~palette snapshot =
+  if Snapshot.trusted snapshot then None
+  else
+    Some
+      (marked ~prefix:Theme.separator ~priority:2.
+         (Theme.Palette.warning_style palette)
+         "!" " untrusted")
+
 let normalized_model snapshot = Snapshot.model_line snapshot
 
 let home_path ~palette ~prefix relative =
@@ -176,10 +187,12 @@ let plain_row ~palette ~prefix ~account_absent ~home_badge ~context snapshot =
       (normalized_model snapshot)
   in
   let sandbox = Option.to_list (sandbox_fact ~palette snapshot) in
+  let trust = Option.to_list (trust_fact ~palette snapshot) in
   let context = Option.to_list context in
   box ~flex_direction:Flex_direction.Row ~overflow:hidden_overflow ~flex_grow:1.
     ~flex_shrink:1. ~min_size:zero_size
-    (account @ [ cwd; model ] @ sandbox @ context @ [ spacer; home_content ])
+    (account @ [ cwd; model ] @ sandbox @ trust @ context
+    @ [ spacer; home_content ])
 
 let view ~palette ~permission_review ~input_mode ~account_absent ?home_badge
     ?context (snapshot : Snapshot.t) =

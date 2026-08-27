@@ -157,6 +157,13 @@ let tooling ~palette ~tooling =
 let muted_row ~palette value =
   row [ Prims.seg (Theme.Palette.muted_style palette) value ]
 
+(* Untrusted degrades the whole session — project config unread, project
+   tooling off — and its other traces are absences (no dune row among
+   them). The section states it instead of letting each absence speak. *)
+let trust ~palette ~trusted =
+  if trusted then []
+  else [ row [ Prims.seg (Theme.Palette.warning_style palette) "untrusted" ] ]
+
 (* Dollars to cents, always two places: an existing rate can spell a real but
    sub-cent spend as "$0.00", which is honest — the row is omitted only when the
    catalog carries no rate at all (see {!context}'s [spent = None]). *)

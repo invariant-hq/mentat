@@ -20,14 +20,14 @@ let contract =
 let time seconds =
   seconds |> Int64.of_int |> Int64.mul 1_000L |> Session.Time.of_unix_ms
 
-let adversarial_snapshot project =
+let adversarial_snapshot project ~trusted =
   let cwd = Lpath.Abs.of_string_exn (Project.root project) in
   let home =
     Lpath.Abs.of_string_exn (Filename.dirname (Project.root project))
   in
   Mentat_tui.Snapshot.make ~version:"v\255\027\n2" ~model:" \t\n"
     ~effort:(Some "\r ") ~cwd ~home:(Some home) ~context_window:(Some 0)
-    ~sandbox:(Some "\027danger\nfull")
+    ~sandbox:(Some "\027danger\nfull") ~trusted
 
 let session ?title ?forked_from ?delegated_from ~id ?prompt ~updated_at project
     =
