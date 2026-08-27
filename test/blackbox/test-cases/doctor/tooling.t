@@ -33,7 +33,7 @@ commands resolve a different dune than the override.)
   [PASS] parity: commands resolve the same dune ($TESTCASE_ROOT/stub-bin/dune)
   [PASS] project: dune project
   [PASS] dune: auto — spawns and supervises `dune build --watch @check`
-  [PASS] lint: litany check — resolves via PATH
+  [PASS] lint: litany check --no-build --trust-build — resolves via PATH
   [PASS] diagnostics: $TESTCASE_ROOT/state/mentat (0 log(s), 0 crash report(s))
   $ MENTAT_MODEL=openai/gpt-5.6-sol mentat doctor >/dev/null 2>&1; echo $?
   0
@@ -48,15 +48,26 @@ found" (it never falls through to PATH), so the found path is exactly the overri
 
 The dune row mirrors every rung of the lane's gate, not only the knob:
 workspace.tooling=off switches the lane off whatever the marker says, and a
-read-only sandbox demotes auto to observe. With the linter gone from the
-PATH but dune present, the lint row names the dune exec reach whose first
-run answers availability.
+read-only sandbox demotes auto to observe.
 
   $ MENTAT_WORKSPACE_TOOLING=off MENTAT_MODEL=openai/gpt-5.6-sol mentat doctor | censor | grep -E 'dune:|lint:'
   [WARN] dune: lane off: workspace.tooling = off
   [WARN] lint: lint rides the dune lane: lane off: workspace.tooling = off
   $ MENTAT_SANDBOX_MODE=read-only MENTAT_MODEL=openai/gpt-5.6-sol mentat doctor | censor | grep -E 'dune:'
   [PASS] dune: observe — auto demoted by sandbox.mode = read-only
+
+The lint row walks the resolver's own rungs. A command reachable nowhere is
+a skipped-settles warning, never a lane death; the same command becomes the
+lock universe's built binary the moment the package store holds it. The
+probe name is unique to this fixture so no ambient linter can answer for
+it.
+
   $ rm stub-bin/litany
+  $ mentat config set dune.lint_command '["lintcheck2", "run"]' >/dev/null
   $ MENTAT_MODEL=openai/gpt-5.6-sol mentat doctor | censor | grep -E 'lint:'
-  [PASS] lint: litany check — resolves via PATH
+  [WARN] lint: lintcheck2 is not reachable on PATH or in the lock universe; green settles are skipped until it appears
+  $ mkdir -p _build/_private/default/.pkg/lintcheck2.1.0/target/bin
+  $ printf '#!/bin/sh\ntrue\n' > _build/_private/default/.pkg/lintcheck2.1.0/target/bin/lintcheck2
+  $ chmod +x _build/_private/default/.pkg/lintcheck2.1.0/target/bin/lintcheck2
+  $ MENTAT_MODEL=openai/gpt-5.6-sol mentat doctor | censor | grep -E 'lint:'
+  [PASS] lint: lintcheck2 run — runs the lock universe's built binary

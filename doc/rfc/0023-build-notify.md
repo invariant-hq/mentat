@@ -399,9 +399,10 @@ the same request that carries the shell result.
 
 ## 5. Lint
 
-The runner executes `dune.lint_command` — `["litany"; "check"]` by
-default; a default, not a coupling — from the workspace root, as a bounded
-confined one-shot, **when the build lane settles Clean and the observer's
+The runner executes `dune.lint_command` — `["litany"; "check";
+"--no-build"; "--trust-build"]` by default: the flags fit the trigger (the
+settle already built), and a default, not a coupling — from the workspace
+root, as a bounded confined one-shot, **when the build lane settles Clean and the observer's
 stream has moved — diagnostic or progress — past the last run's mark**
 (`Instance.activity` is the generation; the diagnostic stream alone cannot
 witness a clean-to-clean rebuild, which is the lane's most common case).
@@ -414,22 +415,24 @@ entirely. Lint-after-green also self-debounces: one run per green settle,
 however many saves produced it, one runner in flight, a settle mid-run
 re-arming it.
 
-**The gate** mirrors the watch's ladder, in both worlds a project keeps
-its linter in: the dune lane must be live at all (the trigger is the
-observer's readings — a foreign watch's green settle is as good as our
-own), the command non-empty (`[]` disables), and the command reachable —
-directly when its program resolves on the sealed child PATH (the opam
-world; no dune in the lint path), through a `dune exec` prefix otherwise
-(the dune-pkg world: a dev-dependency's binary lives in the lock universe,
-not on any PATH, and may need building — which `dune exec` also answers).
-Either way resolution goes through the project's own environment, so the
-linter found is version-matched to the compiler that wrote the artifacts
-it reads. Whether the reached command exists is the first run's answer,
-never a parse of anything: a structurally absent direct program, or dune's
-own `Program 'name' not found` answer, takes the lane off for the session
-— off is lint-absent, never lint-clean, and never a fossil of the last
-word. A missing linter is a normal state (`mentat doctor` owns the
-reason); one installed mid-session takes effect next session.
+**The gate** is the watch's ladder (the trigger is the observer's
+readings — a foreign watch's green settle is as good as our own) plus a
+non-empty command (`[]` disables); reachability is the resolver's,
+consulted at {e every} due settle: the sealed child PATH first (the opam
+world), else the built binary in the project's lock universe
+(`_build/_private/<ctx>/.pkg/<name>.<version>/target/bin/<name>` — the
+dune-pkg world). No dune anywhere in the lint path — a `dune exec` reach
+was shipped first and died on contact with the product's own normal
+state: the run fires exactly while the supervised watch holds dune's
+lock, and a secondary dune resolves executables from PATH only ("not the
+main instance"), so the reach answered `Program not found` for every
+lock-universe linter in every watched session (§12). Either rung resolves
+through the project's own environment, so the linter found is
+version-matched to the compiler that wrote the artifacts it reads. A
+settle the resolver cannot answer is skipped — lint-absent, never
+lint-clean, never a fossil — and the lane has no death: a lock universe
+built mid-session starts answering at its next settle. A missing linter
+is a normal state (`mentat doctor` owns the reachability story).
 
 **Parsing.** The run's output is parsed with `ocamlc-loc` — the library
 dune itself parses compiler output with, already in the lock as dune-rpc's
@@ -559,7 +562,7 @@ palette entry, `/dune`, taking `restart` or `stop` as its argument.
 | `notices.dune_build` | **deleted** — declared, never read (`mentat_config.ml:819,885`) | — |
 | `dune.watch` | **added**: `auto` probe-attach-or-spawn; `observe` attach only, never spawn; `off`. Env `MENTAT_DUNE_WATCH`; a read-only sandbox posture demotes `auto` to `observe` | `auto` |
 | `dune.targets` | **added**: the watch's own targets, validated as targets — a leading dash is refused at decode; an empty list is dune's `@default` | `["@check"]` |
-| `dune.lint_command` | **added**: the linter argv the runner executes after each green settle; `[]` disables; a program that does not resolve on the sealed PATH leaves the lane off | `["litany", "check"]` |
+| `dune.lint_command` | **added**: the linter argv the runner executes after each green settle; `[]` disables; a program reachable on neither the sealed PATH nor the lock universe skips settles until it appears | `["litany", "check", "--no-build", "--trust-build"]` |
 | `notices.dune_diagnostics` | survives: build-lane notices (the row still shows) | `true` |
 | `notices.fswatch`, `notices.cr_comments` | untouched | `true` |
 
@@ -627,9 +630,9 @@ findings — the lanes cannot cross by construction. The runner's trigger
 rides the same sampled stream as recovery: a sub-sample clean-to-clean
 rebuild folds no event, so that settle can go unlinted — and a fixed lint
 finding outlive its fix — until the next observed build; a reconnect's
-sync events buy one redundant, idempotent run; and in the dune-exec world
-a run's own forwarded no-op build can advance the stream and buy an echo
-run, bounded by the poll and the run's own duration. The recovery fallback leaves a residual: dune samples build
+sync events buy one redundant, idempotent run. (No echo run exists: with
+no dune in the lint path, a run cannot advance the build witness it
+triggers on.) The recovery fallback leaves a residual: dune samples build
 state every 0.2 s, so a failing rebuild whose events are delayed beyond the
 2 s quiet window can state a recovery the next settle retracts — inherent to
 the sampled stream, uncloseable from a client. The socket and lock live in
@@ -671,6 +674,16 @@ flush on tool-timeout evidence) would mint the state it announces.
   agent never ran; and in a dune-package project a fresh dir has no
   `_private/default/.pkg`, so even describe would first build every
   dependency. Its one beneficiary is deleted anyway.
+- **A `dune exec` reach for the lock-universe linter** — shipped first,
+  killed by live QA: the run fires exactly while the supervised watch
+  holds dune's lock, and a secondary dune instance resolves executables
+  from PATH only ("As this is not the main instance of Dune it is unable
+  to locate the executable"), so `dune exec -- litany` answered
+  `Program 'litany' not found!` in every watched session and the lane's
+  then-fatal not-found arc killed it ~4 s after spawn. Replaced by the
+  direct lock-store binary probe, which also deleted the not-found string
+  match and the echo run (no dune in the loop, nothing advances the
+  witness).
 - **Other litany lanes** — the default lane spawns `dune describe` (lock);
   `--units` needs a roster captured with the server stopped; `--cmt-root` is
   a second freshness engine racing the watch, project rules withheld; a
@@ -717,7 +730,7 @@ cram against `fswatch.t`'s 30 lines/scenario), not hoped.
 | A · attach + settle + law + status | persistent connection, two long-polls, store fold, overtake/quiet rules (`rpc.ml` +300); `Finding`/`Reading`/`Change` with `.mli`s (+250); producer render in `bin/` (`workspace_notices.*` rewritten in place); `Health` reshape + `workspace.dune` query + row + tick (+250); concurrent fake with scripted timeline (+250); cram + unit + goldens (+390) | ≈ +1,560 / −250 | **no spawn**: runs against any registered watch — the maintainer's own `dune build -w` — and already retires the 15 s guess, the head-string law, and the per-drain probe. Deleted outright: `Instance.build_health`, `Instance.Health`, the diagnostic store surface, and the glance's producer+mapping; `bin/workspace_notices.*` is rewritten to the drain producer alone. |
 | B · own it | `bin/dune_watch.{ml,mli}` supervisor (~650 with docs), lazy spawn via `start_session`, probe-before-spawn, private `XDG_RUNTIME_DIR` + host mirror, stop-before-release; describe deleted (−1,780 incl. suite and ripple); docs/eval refusals (+80); skill/prompt text; `dune.watch`/`dune.targets` | ≈ +900 / −1,800 | first deliverable is the confinement spike: FSEvents under seatbelt (statically, no `mach-lookup` for `com.apple.FSEvents` is allowed — the allowance line, profile-wide per §11, is the deliverable), registry write under the private dir, socket from a confined child; the §3 self-test backs it at runtime |
 | C · hang | dune-command tool timeout → stall report → one verification flush → restart; first-flush confinement self-test; `dune.watch` notice; `MENTAT_DUNE_WATCH_FLUSH_S`; fake `hang`/`slow`/`hang-flush` mode directives | ≈ +230 | after B; insurance (the hang was old-dune); no periodic probe — the evidence path pays only on evidence |
-| D · lint | the green-settle runner (bounded confined one-shot, no dune in the loop), `ocamlc-loc` parse into the lint lane, `dune.lint_command` knob with the watch-shaped availability gate; classifier and marker convention deleted; no litany change; the dogfood dev dep landed with the maintainer's relock (litany is a with-test dependency of this repository) | ≈ +300 / −150 | after B (rides the instance); no upstream work |
+| D · lint | the green-settle runner (bounded confined one-shot, no dune in the loop), `ocamlc-loc` parse into the lint lane, `dune.lint_command` knob with the per-settle two-rung resolver (sealed PATH, else the lock-store binary); classifier, marker convention, and the fatal not-found arc deleted; the dogfood dev dep landed with the maintainer's relock (litany is a with-test dependency of this repository); one litany change owed by the trigger's economics, landed in litany itself: the roster read from the build tree instead of `dune describe`, so a check runs in seconds beside the very watch that triggers it | ≈ +300 / −150 | after B (rides the instance) |
 | E · commands + lease | `/dune restart|stop` (one `workspace.dune_control` endpoint, the row refreshed from the verb's answer), doctor's `dune` and `lint` rows (posture, reachability, and the off reasons), the watch lease (pause/park/resume on the supervisor, `Leased/Held/Free` at the tools' lock moment) | ≈ +350 | after B; the Leased bracket's release is pinned by tool expects on both run outcomes; the pause/park/respawn machine rides the QA script — a hermetic lease cram needs a real one-shot beside a fake watch and is deliberately unpinned |
 
 **Sequencing.** A ships alone and is useful alone, with no sandbox question
@@ -741,8 +754,9 @@ findings on green, own lane, build lane clean; one run per green settle
 (the argv count across red-green cycles); a crashed run keeps the stated
 findings and never states `Lint clean`; a completed clean run earns it; a
 foreign watch's green settle triggers the runner with no spawn of ours;
-the dune-exec reach with the lock-universe bin; the not-found answer
-taking the lane off after exactly one run. Deliberately unpinned (known,
+the lock-store binary reach (no dune argv anywhere); a resolver that
+answers nowhere skipping its settle, then running once when the binary
+appears mid-session. Deliberately unpinned (known,
 not owed yet): the activity-cleared verification, the `No_server` verdict,
 the dropped-report paths (observe, foreign, between lives), the
 `Restarting Hung`/`Off Blocked` row renders — the TUI story below owes the

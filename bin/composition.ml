@@ -224,6 +224,39 @@ let mentat_dirs_of dirs =
 
 let product_default_mode = Cfg.Mode.Workspace_write
 
+(* The built binary of a lock-universe program: the dune-pkg store
+   materializes each locked package under
+   [_build/_private/<context>/.pkg/<pkg>.<version>/target], so a
+   dev-dependency's executable lives at [target/bin/<name>] once anything
+   has built it. The probe is a stat, sorted-first across versions for
+   determinism, re-run per settle by the resolver — an unbuilt store
+   simply answers [None] until a build materializes it. *)
+let lock_universe_binary ~root program =
+  let store =
+    Filename.concat root
+      (Filename.concat "_build" (Filename.concat "_private" "default"))
+  in
+  let pkg_store = Filename.concat store ".pkg" in
+  match Sys.readdir pkg_store with
+  | exception Sys_error _ -> None
+  | entries ->
+      Array.sort String.compare entries;
+      Array.find_map
+        (fun entry ->
+          if String.starts_with ~prefix:(program ^ ".") entry then
+            let candidate =
+              Filename.concat pkg_store
+                (Filename.concat entry
+                   (Filename.concat "target"
+                      (Filename.concat "bin" program)))
+            in
+            match Unix.access candidate [ Unix.X_OK ] with
+            | () -> Some candidate
+            | exception Unix.Unix_error _ -> None
+          else None)
+        entries
+
+
 (* The project-tooling rung of the dune-lane ladder: trust first — an
    untrusted project's config never speaks — then the [workspace.tooling]
    knob, whose [auto] asks the project marker. The marker is a thunk so a
@@ -967,9 +1000,10 @@ let probe ~stdenv ~sw ~cwd : Probe.t =
       (* The lint command's reachability, answered on the ambient toolchain
          ladder — doctor is a local diagnostic, and the sealed child PATH
          the gate itself resolves on can differ (the parity row exists for
-         exactly that divergence, for dune). The fallback order matches the
-         gate's: directly, else through dune exec — whose first run, not
-         this probe, answers whether the lock provides it. *)
+         exactly that divergence, for dune). The rungs match the runner's
+         resolver: directly, else the built binary in the project's lock
+         universe. Unreachable is a skipped-settles warning, never a lane
+         death — the runner re-resolves at every settle. *)
       let lint =
         match (config_resolved, dune_lane) with
         | Error message, _ -> Error message
@@ -997,16 +1031,23 @@ let probe ~stdenv ~sw ~cwd : Probe.t =
                       (Printf.sprintf "%s — resolves via %s" rendered
                          (Mentat_ocaml_toolchain.Source.to_string source))
                 | None -> (
-                    match Mentat_ocaml_toolchain.find tc "dune" with
+                    match
+                      Option.bind (Result.to_option root_result) (fun root ->
+                          lock_universe_binary
+                            ~root:(Lpath.Abs.to_string root)
+                            program)
+                    with
                     | Some _ ->
                         Ok
                           (Printf.sprintf
-                             "%s — via dune exec; its first run answers \
-                              whether the project provides it"
+                             "%s — runs the lock universe's built binary"
                              rendered)
                     | None ->
                         Error
-                          (Printf.sprintf "%s not found (lint lane off)"
+                          (Printf.sprintf
+                             "%s is not reachable on PATH or in the lock \
+                              universe; green settles are skipped until it \
+                              appears"
                              program))))
       in
       let runtime = stage_runtime ~stdenv ~dirs in
@@ -1496,53 +1537,46 @@ let dune_watch_supervisor t capability ~mode ~instance =
       t.dune_watch <- Some supervisor;
       supervisor
 
-(* The lint runner, one per instance beside the supervisor. Its gate
-   mirrors the watch's ladder: the dune lane must be live at all (the
-   trigger is the observer's readings — auto or observe alike, since a
-   foreign watch's green settle is as good as our own), the
-   [dune.lint_command] knob non-empty, and the command reachable — in
-   either of the two worlds a project keeps its linter in. A program that
-   resolves on the sealed child PATH runs directly (the opam world; no
-   dune in the lint path). One that does not is reached through
-   [dune exec] (the dune-pkg world: a dev-dependency's binary lives in the
-   lock universe, not on the PATH — and may not be built yet, which
-   [dune exec] also answers by building it). Either way the resolution
-   goes through the project's own environment, so the linter found is
-   version-matched to the compiler that wrote the artifacts it reads. With
-   neither the program nor dune reachable there is no runner at all;
-   whether the reached command actually exists is the first run's answer
-   ({!Dune_lint}), never a parse of anything. A missing linter is a normal
-   state: the lane stays silently lint-absent, and doctor is where the
-   reason lives. Creation is pure; {!Dune_lint.engage} is the caller's, at
-   the first drain. *)
+(* The lint runner, one per instance beside the supervisor. Its gate is
+   the watch's ladder (the trigger is the observer's readings — auto or
+   observe alike, since a foreign watch's green settle is as good as our
+   own) plus a non-empty [dune.lint_command]; reachability is the
+   resolver's, consulted at every due settle ({!Dune_lint}): the sealed
+   child PATH first (the opam world), else the built binary in the
+   project's lock universe (the dune-pkg world) — no dune anywhere in the
+   lint path, so a run neither needs dune's lock nor advances the build
+   witness it triggers on. Either rung resolves through the project's own
+   environment, so the linter found is version-matched to the compiler
+   that wrote the artifacts it reads. An unreachable settle is skipped,
+   never a lane death: a lock universe built mid-session starts answering
+   at its next settle, and doctor is where the reachability story lives.
+   Creation is pure; {!Dune_lint.engage} is the caller's, at the first
+   drain. *)
 let dune_lint_runner t capability ~instance =
   match t.dune_lint with
   | Some runner -> Some runner
   | None -> (
       match Cfg.Resolved.get Cfg.Field.dune_lint_command t.config with
       | [] -> None
-      | program :: _ as command -> (
-          let command =
+      | program :: arguments ->
+          let resolve () =
             match Mentat_workspace_io.child_program capability program with
-            | Some _ -> Some command
-            | None -> (
-                match
-                  Mentat_workspace_io.child_program capability "dune"
-                with
-                | Some _ -> Some ([ "dune"; "exec"; "--" ] @ command)
-                | None -> None)
+            | Some _ -> Some (program :: arguments)
+            | None ->
+                Option.map
+                  (fun binary -> binary :: arguments)
+                  (lock_universe_binary
+                     ~root:(Lpath.Abs.to_string t.root)
+                     program)
           in
-          match command with
-          | None -> None
-          | Some command ->
-              let runner =
-                Dune_lint.make ~rpc:instance ~capability
-                  ~mono:(Eio.Stdenv.mono_clock t.shared.stdenv)
-                  ~sw:t.switch
-                  ~workspace:(dune_workspace t) ~command
-              in
-              t.dune_lint <- Some runner;
-              Some runner))
+          let runner =
+            Dune_lint.make ~rpc:instance ~capability
+              ~mono:(Eio.Stdenv.mono_clock t.shared.stdenv)
+              ~sw:t.switch
+              ~workspace:(dune_workspace t) ~resolve
+          in
+          t.dune_lint <- Some runner;
+          Some runner)
 
 (* Construct-and-engage, shared by the drain's first force and the user's
    [/dune] verbs: the lane's gate decides whether there is a supervisor to

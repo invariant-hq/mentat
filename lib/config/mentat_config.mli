@@ -544,10 +544,11 @@ module Field : sig
   (** [dune_lint_command] is the [dune.lint_command] field: the linter's
       argv prefix, run from the workspace root after each green build settle
       — the moment the build artifacts it reads are fresh. [[]] disables the
-      runner; a command whose program does not resolve on the sealed command
-      PATH leaves the lint lane off for the session. Defaults to
-      [["litany"; "check"]] — a default, not a coupling: any linter printing
-      compiler-shaped diagnostics fits. *)
+      runner; a command whose program resolves on neither the sealed command
+      PATH nor the project's lock universe skips settles until it appears.
+      Defaults to [["litany"; "check"; "--no-build"; "--trust-build"]] — the
+      flags fit the trigger (the settle already built), and a default, not a
+      coupling: any linter printing compiler-shaped diagnostics fits. *)
 
   val workspace_tooling : (string, defaulted) t
   (** [workspace_tooling] is the [workspace.tooling] field: [auto], [on], or
