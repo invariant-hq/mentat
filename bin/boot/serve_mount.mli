@@ -40,11 +40,11 @@ end
 val confined :
   store:Mentat_store.t ->
   cache:Heads.t ->
-  child:Mentat_session.Id.t ->
+  served:Mentat_session.Id.t ->
   Mentat_client.Driver.t ->
   Mentat_client.Driver.t
-(** [confined ~store ~cache ~child driver] is [driver] with the one-session
-    confinement applied: the session cone answers only for [child] and its
+(** [confined ~store ~cache ~served driver] is [driver] with the one-session
+    confinement applied: the session cone answers only for [served] and its
     own delegation subtree — membership decided by journal truth through
     [cache] — and a foreign session id is refused, never resolved against the
     shared store. Every other cone — accounts, settings, lifecycle, review,

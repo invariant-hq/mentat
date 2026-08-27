@@ -73,16 +73,16 @@ let member ~store cache ~root target =
    accounts, settings, lifecycle, review, workspace — is refused whole: a
    per-session endpoint exists to drive one session, not to reach the user's
    accounts, configuration, or session index. *)
-let confined ~store ~cache ~child (driver : Driver.t) : Driver.t =
+let confined ~store ~cache ~served (driver : Driver.t) : Driver.t =
   let foreign session =
     Mentat_protocol.Error.unavailable
       (Printf.sprintf
          "this server serves session %s and its delegation subtree, not %s"
-         (Session.Id.to_string child)
+         (Session.Id.to_string served)
          (Session.Id.to_string session))
   in
   let admit session k =
-    if member ~store cache ~root:child session then k ()
+    if member ~store cache ~root:served session then k ()
     else Error (foreign session)
   in
   let cone_refused () =
@@ -107,11 +107,11 @@ let confined ~store ~cache ~child (driver : Driver.t) : Driver.t =
               s.Driver.Session.answer_unattended ~session ~decision));
       possibly_mutating =
         (fun ~session ->
-          member ~store cache ~root:child session
+          member ~store cache ~root:served session
           && s.Driver.Session.possibly_mutating ~session);
       faulted =
         (fun ~session ->
-          if member ~store cache ~root:child session then
+          if member ~store cache ~root:served session then
             s.Driver.Session.faulted ~session
           else None);
       fork =
@@ -257,7 +257,7 @@ let mount ~sw ~stdenv ~store ~dirs ~driver ~root ~session =
   | listener ->
       let stop, resolve_stop = Eio.Promise.create () in
       let cache = Heads.create () in
-      let confined = confined ~store ~cache ~child:session driver in
+      let confined = confined ~store ~cache ~served:session driver in
       let active = Atomic.make 0 in
       Eio.Fiber.fork ~sw (fun () ->
           Eio.Fiber.first

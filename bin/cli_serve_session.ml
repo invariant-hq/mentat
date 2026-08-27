@@ -10,8 +10,8 @@ module Session = Mentat_session
 module Command = Mentat_protocol.Command
 module Driver = Mentat_client.Driver
 
-(* How long a settled child lingers before its clean exit, so a follow-up
-   delivery landing just after settlement still finds a live server.
+(* How long a settled session lingers before its server's clean exit, so a
+   follow-up delivery landing just after settlement still finds a live server.
    MENTAT_CHILD_LINGER (test-only, seconds) shortens it so a blackbox stage is
    not paced by the default. *)
 let default_linger_s = 3.0
@@ -25,24 +25,32 @@ let linger_seconds environment =
   | Some s when s >= 0. -> s
   | Some _ | None -> default_linger_s
 
-(* Resolve the durable delegation edge behind [child]: the child document's
-   lineage backlink names the parent journal and edge id, and the edge itself is
-   re-read from the parent — so only identity ever reaches this process's argv,
-   and the task, description, and role stay authoritative in the store. *)
-let resolve_edge store ~root child =
+(* The boot's shape, derived from the session document — no mode flags. *)
+type shape =
+  | Delegated of Session.Delegation.t
+      (* A delegated child: the immutable edge that created it, re-read from
+         the parent journal. *)
+  | Root  (* A session with no lineage, served plainly. *)
+
+(* Derive the shape this boot serves from the session document. The [--cwd]
+   assertion holds for every shape: the session's recorded cwd must equal the
+   resolved workspace root, so a stale or wrong [--cwd] refuses rather than
+   serving against an arbitrary directory. A delegation backlink names the
+   parent journal and edge id, and the edge itself is re-read from the parent
+   — so only identity ever reaches this process's argv, and the task,
+   description, and role stay authoritative in the store. A document with no
+   lineage is a root session. *)
+let resolve_shape store ~root served =
   let ( let* ) = Result.bind in
-  let id = Session.Id.to_string child in
+  let id = Session.Id.to_string served in
   let* doc =
     Result.map_error
       (fun e ->
         Printf.sprintf "session %s: %s" id (Store.Session.Error.message e))
-      (Store.Session.load store child)
+      (Store.Session.load store served)
   in
   let metadata = Session.metadata (Store.Session.Document.session doc) in
   let* () =
-    (* [--cwd] is an assertion — the session's recorded cwd must equal the
-       resolved workspace root, so a stale or wrong [--cwd] refuses rather than
-       serving against an arbitrary directory. *)
     let recorded = Session.Metadata.cwd metadata in
     if Lpath.Abs.equal recorded root then Ok ()
     else
@@ -53,41 +61,37 @@ let resolve_edge store ~root child =
            (Lpath.Abs.to_string recorded)
            (Lpath.Abs.to_string root))
   in
-  let* lineage =
-    Option.to_result
-      ~none:
-        (Printf.sprintf
-           "session %s is not a delegated child (no delegation lineage)" id)
-      (Session.Metadata.delegated_from metadata)
-  in
-  let parent = Session.Metadata.Delegated_from.parent lineage in
-  let delegation = Session.Metadata.Delegated_from.delegation lineage in
-  let* parent_doc =
-    Result.map_error
-      (fun e ->
-        Printf.sprintf "parent session %s: %s"
-          (Session.Id.to_string parent)
-          (Store.Session.Error.message e))
-      (Store.Session.load store parent)
-  in
-  let edges =
-    Session.State.delegations
-      (Session.state (Store.Session.Document.session parent_doc))
-  in
-  match
-    List.find_opt
-      (fun edge ->
-        Session.Delegation.Id.equal (Session.Delegation.id edge) delegation)
-      edges
-  with
-  | Some edge -> Ok edge
-  | None ->
-      Error
-        (Printf.sprintf "parent session %s records no delegation %s"
-           (Session.Id.to_string parent)
-           (Session.Delegation.Id.to_string delegation))
+  match Session.Metadata.delegated_from metadata with
+  | None -> Ok Root
+  | Some lineage -> (
+      let parent = Session.Metadata.Delegated_from.parent lineage in
+      let delegation = Session.Metadata.Delegated_from.delegation lineage in
+      let* parent_doc =
+        Result.map_error
+          (fun e ->
+            Printf.sprintf "parent session %s: %s"
+              (Session.Id.to_string parent)
+              (Store.Session.Error.message e))
+          (Store.Session.load store parent)
+      in
+      let edges =
+        Session.State.delegations
+          (Session.state (Store.Session.Document.session parent_doc))
+      in
+      match
+        List.find_opt
+          (fun edge ->
+            Session.Delegation.Id.equal (Session.Delegation.id edge) delegation)
+          edges
+      with
+      | Some edge -> Ok (Delegated edge)
+      | None ->
+          Error
+            (Printf.sprintf "parent session %s records no delegation %s"
+               (Session.Id.to_string parent)
+               (Session.Delegation.Id.to_string delegation)))
 
-(* The child idle predicate over durable heads, read fence-free so observation
+(* The idle predicate over durable heads, read fence-free so observation
    never contends with this process's own driver. It builds on the shared
    finished judgment ({!Mentat_session.State.finished}) and is deliberately
    stronger: every delegation edge the session recorded must also name a
@@ -95,28 +99,29 @@ let resolve_edge store ~root child =
    [seen] set bounds the walk: ids are parent-minted, so an uncorrupted tree
    is finite, and a corrupt journal naming an ancestor edge must not recurse
    forever. *)
-let idle store cache child =
-  let rec go seen child =
-    let id = Session.Id.to_string child in
+let idle store cache served =
+  let rec go seen session =
+    let id = Session.Id.to_string session in
     if Hashtbl.mem seen id then true
     else begin
       Hashtbl.replace seen id ();
-      match Serve_mount.Heads.summary ~store cache child with
+      match Serve_mount.Heads.summary ~store cache session with
       | None -> false
       | Some (settled, children) -> settled && List.for_all (go seen) children
     end
   in
-  go (Hashtbl.create 8) child
+  go (Hashtbl.create 8) served
 
-(* Stop once the child has been continuously idle — and every connection closed
-   — for the linger window. A fresh boot on an unstarted child is never idle
-   (no turn yet), so the watchdog cannot fire before the first-turn submit
-   lands. *)
-let idle_watchdog clock ~linger store cache child active stop =
+(* Stop once the session has been continuously idle — and every connection
+   closed — for the linger window. A session that has never run a turn is
+   never idle (no settled head yet): a delegated boot cannot exit before its
+   first-turn submit lands, and a root session with no work keeps serving
+   until mail or a connection drives it. *)
+let idle_watchdog clock ~linger store cache served active stop =
   let idle_since = ref None in
   let rec loop () =
     Eio.Time.sleep clock 0.25;
-    (if Atomic.get active > 0 || not (idle store cache child) then
+    (if Atomic.get active > 0 || not (idle store cache served) then
        idle_since := None
      else
        match !idle_since with
@@ -145,10 +150,21 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
       | Error status -> status
       | Ok instance -> (
           let store = shared.Composition.store in
-          let child = Session.Id.of_string session in
-          match resolve_edge store ~root:(Composition.root instance) child with
+          let served = Session.Id.of_string session in
+          match
+            resolve_shape store ~root:(Composition.root instance) served
+          with
           | Error message -> Exit_status.runtime message
-          | Ok edge -> (
+          | Ok Root when interrupted ->
+              (* The interrupt carry belongs to the delegated shape: it is
+                 the broker's re-materialization of a cancelled child, and a
+                 root session has no parent whose interrupt it could carry. *)
+              Exit_status.runtime
+                (Printf.sprintf
+                   "session %s has no delegation lineage; --interrupted \
+                    applies only to a delegated child"
+                   session)
+          | Ok shape -> (
               match Composition.driver instance with
               | Error status -> status
               | Ok driver ->
@@ -157,7 +173,7 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
                      membership — so each journal decodes once per stamp. *)
                   let heads = Serve_mount.Heads.create () in
                   let driver =
-                    Serve_mount.confined ~store ~cache:heads ~child driver
+                    Serve_mount.confined ~store ~cache:heads ~served driver
                   in
                   let socket_dir =
                     match socket_dir_override with
@@ -183,28 +199,44 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
                       session
                       (Server.Bind.socket_path
                          ~dir:(Lpath.Abs.of_string_exn socket_dir));
-                  (* The first-turn submit, relocated from the runtime's
-                     in-process materialization: the deterministic turn id is
-                     derived from the durable edge and the task submitted
-                     byte-identically, and the fence is taken lazily inside
-                     this submit's attach — never pre-acquired at boot. The
-                     driver's own prompt admission is the started guard: a
+                  (* Every shape attaches its driver at boot, and the fence
+                     is taken lazily inside that attach — never pre-acquired.
+                     A delegated child attaches through its deterministic
+                     first-turn submit, relocated from the runtime's
+                     in-process materialization: the turn id is derived from
+                     the durable edge and the task submitted byte-identically.
+                     The driver's own prompt admission is the started guard: a
                      prompt whose turn already exists with equal input settles
                      [Ok] without a new fact, so a re-spawn of a running or
                      settled child re-attaches (running its recovery) and
-                     mints nothing. *)
-                  let turn =
-                    Mentat_agent.child_first_turn (Session.Delegation.id edge)
-                  in
+                     mints nothing. A root session attaches with no
+                     accompanying command — fence, load, recovery to
+                     quiescence — and the attach's own queue admission
+                     consumes mail already durable in the journal as the
+                     first turn; nothing is minted for it here. *)
                   let cone = driver.Driver.session in
-                  let submit () =
-                    match
-                      Command.prompt ~session:child ~turn
-                        ~input:(Session.Delegation.task edge) ()
-                    with
-                    | Error invalid -> Error (Command.Invalid.message invalid)
-                    | Ok command -> (
-                        match cone.Driver.Session.submit command with
+                  let attach () =
+                    match shape with
+                    | Delegated edge -> (
+                        let turn =
+                          Mentat_agent.child_first_turn
+                            (Session.Delegation.id edge)
+                        in
+                        match
+                          Command.prompt ~session:served ~turn
+                            ~input:(Session.Delegation.task edge) ()
+                        with
+                        | Error invalid ->
+                            Error (Command.Invalid.message invalid)
+                        | Ok command -> (
+                            match cone.Driver.Session.submit command with
+                            | Ok () -> Ok ()
+                            | Error e ->
+                                Error
+                                  (Format.asprintf "%a" Mentat_protocol.Error.pp
+                                     e)))
+                    | Root -> (
+                        match Composition.adopt_session instance served with
                         | Ok () -> Ok ()
                         | Error e ->
                             Error
@@ -216,27 +248,30 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
                      releases on its own, never a foreign driver, so the
                      boot retries briefly instead of refusing the session. *)
                   let custodial_hold () =
-                    match Store.Run_lock.holder store ~session:child with
+                    match Store.Run_lock.holder store ~session:served with
                     | `Held (Some owner) -> (
                         match Store.Run_lock.Owner.label owner with
                         | Some label -> Mentat_broker.custodial_label label
                         | None -> false)
                     | `Free | `Held None | `Io _ -> false
                   in
-                  let rec submit_with_patience elapsed =
-                    match submit () with
+                  let rec attach_with_patience elapsed =
+                    match attach () with
                     | Ok () -> Ok ()
                     | Error _ as error ->
                         if elapsed >= 5.0 || not (custodial_hold ()) then error
                         else begin
                           Eio.Time.sleep clock 0.1;
-                          submit_with_patience (elapsed +. 0.1)
+                          attach_with_patience (elapsed +. 0.1)
                         end
                   in
-                  (match submit_with_patience 0. with
+                  (match attach_with_patience 0. with
                   | Error message ->
                       Exit_status.runtime
-                        (Printf.sprintf "session %s: first turn: %s" session
+                        (Printf.sprintf "session %s: %s: %s" session
+                           (match shape with
+                           | Delegated _ -> "first turn"
+                           | Root -> "attach")
                            message)
                   | Ok () ->
                       (* A carried interrupt intent (a cancelled child killed
@@ -250,7 +285,7 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
                          exactly the no-op it should be. *)
                       (if interrupted then
                          match
-                           Command.interrupt ~session:child
+                           Command.interrupt ~session:served
                              ~reason:"parent interrupted" ()
                          with
                          | Error _ -> ()
@@ -271,10 +306,10 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
                               (fun () ->
                                 (* A short keep-alive: an idle stream notices
                                    its peer's disconnect only at the next
-                                   heartbeat write, and a settled child may
+                                   heartbeat write, and a settled session may
                                    not exit until its last observer's
                                    connection is seen closed — the default
-                                   15s pace would hold an idle child open
+                                   15s pace would hold an idle server open
                                    that long past the broker's close. *)
                                 Server.serve ~sw ~clock ~heartbeat_s:1.0
                                   ~driver_for:
@@ -286,7 +321,7 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
                                   listener);
                               (fun () -> Stop_signal.wait ~clock stop);
                               (fun () ->
-                                idle_watchdog clock ~linger store heads child
+                                idle_watchdog clock ~linger store heads served
                                   active stop);
                             ];
                           (* Durable-first close; the endpoint itself is
@@ -305,7 +340,8 @@ let serve ~session ~socket_dir_override ~spawned ~interrupted ~cwd =
       serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
         ~bound_socket_dir
     in
-    (* A gone socket directory is the visible sign of a cleanly exited child. *)
+    (* A gone socket directory is the visible sign of a cleanly exited
+       server. *)
     Option.iter Serve_mount.remove_socket !bound_socket_dir;
     status)
 
@@ -314,7 +350,7 @@ let session_opt =
     required
     & opt (some string) None
     & info [ "session" ] ~docv:"SESSION"
-        ~doc:"The delegated child session this process serves — its own.")
+        ~doc:"The session this process serves — its own.")
 
 let socket_dir_opt =
   Arg.(
@@ -351,16 +387,22 @@ let man =
     `S "DESCRIPTION";
     `P
       "Internal: launched by the broker; not for direct use. $(b,mentat \
-       serve-session) serves exactly one delegated session — its own — over \
-       the same wire the daemon speaks, on a per-session unix socket derived \
-       from the session id.";
+       serve-session) serves exactly one session — its own — over the same \
+       wire the daemon speaks, on a per-session unix socket derived from the \
+       session id. It takes no mode flags: the boot reads the durable \
+       session document and derives its shape from the recorded lineage.";
     `P
-      "The child session document and its delegation edge must already be \
-       durable: the boot re-reads the task and role from the edge, submits \
-       the child's deterministic first turn (idempotently — a re-spawn of a \
-       running or settled child mints nothing), serves feed and commands \
-       while the work runs, and exits cleanly once the session has settled \
-       idle with an empty queue, after a short linger for follow-up \
+      "A delegated child (its document records a delegation backlink) is \
+       served from its durable edge: the boot re-reads the task and role \
+       from the edge and submits the child's deterministic first turn \
+       (idempotently — a re-spawn of a running or settled child mints \
+       nothing). A session with no lineage is a root, served plainly: \
+       nothing is minted for it — the boot attaches its driver, and mail \
+       already durable in the journal starts the first turn.";
+    `P
+      "Every shape serves feed and commands while the work runs and exits \
+       cleanly once the session has settled idle with an empty queue and \
+       every connection closed, after a short linger for follow-up \
        deliveries.";
     `P
       "The endpoint is confined to its one purpose: the session cone answers \
@@ -370,9 +412,7 @@ let man =
   ]
 
 let cmd =
-  let doc =
-    "Serve one delegated session over its per-session socket (internal)."
-  in
+  let doc = "Serve one session over its per-session socket (internal)." in
   Cmd.v
     (Cmd.info "serve-session" ~doc ~man ~exits:Cli_common.exits)
     (Exit_status.term
