@@ -138,9 +138,6 @@ type t = {
          only in the number of simultaneously open claims. *)
   pending_decision : Session.Decision.Requested.t option;
   board : Session.Task.Board.t option;
-  notices : Mentat_workspace.Notice.t list;
-      (* Arrival order. A later pulse with the same owner key replaces in place.
-      *)
   workspace : workspace option;
   interrupting : bool;
   committed_output : int;
@@ -168,7 +165,6 @@ let idle =
     tools = [];
     pending_decision = None;
     board = None;
-    notices = [];
     workspace = None;
     interrupting = false;
     committed_output = 0;
@@ -1056,17 +1052,6 @@ let assistant_delta text t =
             compacting = false;
           }
 
-let replace_notice notice notices =
-  let key = Mentat_workspace.Notice.key notice in
-  let rec loop acc = function
-    | [] -> List.rev (notice :: acc)
-    | current :: rest
-      when String.equal (Mentat_workspace.Notice.key current) key ->
-        List.rev_append acc (notice :: rest)
-    | current :: rest -> loop (current :: acc) rest
-  in
-  loop [] notices
-
 let progress ~now pulse t =
   validate_now "progress" now;
   let applies turn =
@@ -1131,8 +1116,9 @@ let progress ~now pulse t =
       | Progress.Compaction.Started _ | Progress.Compaction.Summarizing ->
           { t with compacting = true }
       | Progress.Compaction.Failed _ -> { t with compacting = false })
-  | Progress.Notice { turn; notice } when applies turn ->
-      { t with notices = replace_notice notice t.notices }
+  (* A notice pulse renders nothing here: the durable transcript block
+     appears in place the moment the fact lands, and a second live-tail
+     glance of the same observation only reads as duplication. *)
   | Progress.Model _ | Progress.Model_download _ | Progress.Compaction _
   | Progress.Notice _ ->
       t
@@ -1227,28 +1213,6 @@ let running_block ~now = function
    multi-line body is now the durable {!Fact.Workspace_notice} transcript entry
    ({!workspace_notice_block}), so the footer never repeats the file list or
    diagnostic dump — it shows the title and defers the record to the transcript. *)
-let ambient_notice notice =
-  let source = Mentat_workspace.Notice.source notice in
-  let source = if has_visible_text source then source else "workspace" in
-  let title = Mentat_workspace.Notice.title notice in
-  let source =
-    match Mentat_workspace.Notice.severity notice with
-    | Mentat_workspace.Notice.Severity.Error -> "error · " ^ source
-    | Mentat_workspace.Notice.Severity.Warning -> "warning · " ^ source
-    | Mentat_workspace.Notice.Severity.Info -> source
-  in
-  Notice.Data
-    {
-      source;
-      facts = (if has_visible_text title then [ Notice.Fact title ] else []);
-      atom = None;
-    }
-
-let ambient_view ~palette notice =
-  Transcript.empty |> fun document ->
-  Transcript.append document (Transcript.notice (ambient_notice notice))
-  |> Transcript.view ~palette
-
 let assistant_text t =
   ( String.concat "" (List.rev t.assistant_stable_rev),
     String.concat "" (List.rev t.assistant_open_rev) )
@@ -1285,8 +1249,7 @@ let tail ~palette ~now ~show_reasoning ~expanded t =
     List.rev t.tools
     |> List.map (fun tool -> Tool_block.view ~palette (running_block ~now tool))
   in
-  let notices = List.map (ambient_view ~palette) t.notices in
-  let parts = pending @ reasoning @ assistant @ tools @ notices in
+  let parts = pending @ reasoning @ assistant @ tools in
   match parts with
   | [] -> None
   | _ :: _ ->
