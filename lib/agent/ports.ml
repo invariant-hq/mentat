@@ -112,8 +112,6 @@ end
 
 type child_ops = {
   materialize : child:Mentat_session.Id.t -> unit;
-  deliver :
-    command:Mentat_protocol.Command.t -> [ `Delivered | `Refused | `Gone ];
   cancel : child:Mentat_session.Id.t -> unit;
 }
 

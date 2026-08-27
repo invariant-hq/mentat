@@ -1366,7 +1366,11 @@ let make_engine ~sw ~store ~script =
     (select, fun () -> [])
   in
   Agent.create ~sw ~store:(store_of store) ~provider:script
-    ~config:engine_config ~now ~execution_for_mode ~delegated_execution ()
+    ~config:engine_config ~now
+    ~broker:
+      (Mentat_broker.for_tests
+         ~send:(fun ~origin:_ ~target:_ ~id:_ ~input:_ -> `Delivered))
+    ~execution_for_mode ~delegated_execution ()
 
 let live_driver engine : Driver.t =
   {

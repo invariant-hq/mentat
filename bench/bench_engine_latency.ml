@@ -327,6 +327,9 @@ let mk_engine ~sw ~store ~provider =
       fun () -> [] )
   in
   Agent.create ~sw ~store:(store_of store) ~provider ~config ~now
+    ~broker:
+      (Mentat_broker.for_tests
+         ~send:(fun ~origin:_ ~target:_ ~id:_ ~input:_ -> `Delivered))
     ~execution_for_mode ~delegated_execution ()
 
 let prompt ~session ~turn text =

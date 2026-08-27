@@ -1161,7 +1161,7 @@ and handle_command t command ~mid_effect ~ack =
       (* Mid-effect interrupts are consumed by [supervise]; this is the
          parked path. *)
       parked_interrupt t ~reason ~ack
-  | Mentat_protocol.Command.Queue_next { id; input; _ } -> (
+  | Mentat_protocol.Command.Queue_next { id; origin; input; _ } -> (
       match externalize_content t input with
       | Error e -> ack (Error e)
       | Ok input -> (
@@ -1181,7 +1181,7 @@ and handle_command t command ~mid_effect ~ack =
                 [
                   Mentat_session.Event.queue_updated
                     (Mentat_session.Queue.Update.enqueued
-                       (Mentat_session.Queue.Entry.make ~id ~input));
+                       (Mentat_session.Queue.Entry.make ?origin ~id ~input ()));
                 ]))
   | Mentat_protocol.Command.Replace_queued { inputs; _ } -> (
       let rec externalize_all acc = function
@@ -1199,7 +1199,7 @@ and handle_command t command ~mid_effect ~ack =
               (fun ordinal input ->
                 Mentat_session.Queue.Entry.make
                   ~id:(mint_replacement_queue_id t ordinal)
-                  ~input)
+                  ~input ())
               inputs
           in
           journal_commit t ~ack

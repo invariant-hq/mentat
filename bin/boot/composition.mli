@@ -104,6 +104,7 @@ val instance :
   ?review_base:string ->
   ?owner_label:string ->
   ?child_backend:(t -> Mentat_agent.Ports.child_backend) ->
+  ?broker:Mentat_broker.t ->
   unit ->
   (t, Exit_status.t) result
 (** [instance shared ~sw ~cwd ~overrides ?environment ?review_base ()] stages
@@ -128,8 +129,11 @@ val instance :
     ({!Mentat_agent.Ports.child_backend}); it is applied to the instance at
     engine assembly, so a brokered backend's ops can close over the very
     instance being staged. Absent, children run in-process — every
-    single-runtime path. A staging failure (an unresolvable root, malformed
-    config) is an {!Exit_status.Runtime_error}. *)
+    single-runtime path. [broker] is the process broker the instance's engine
+    sends recorded child messages through; a daemon passes its one node
+    broker, and an instance without one gets its own at engine assembly —
+    able to send, refusing to spawn. A staging failure (an unresolvable root,
+    malformed config) is an {!Exit_status.Runtime_error}. *)
 
 val shutdown : t -> unit
 (** [shutdown t] shuts down [t]'s engine drivers when the client was built,

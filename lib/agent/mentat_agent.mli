@@ -86,6 +86,7 @@ val create :
   now:(unit -> Mentat_session.Time.t) ->
   ?max_children:int ->
   ?child_backend:Ports.child_backend ->
+  broker:Mentat_broker.t ->
   execution_for_mode:Execution.factory ->
   delegated_execution:Execution.delegated_factory ->
   unit ->
@@ -134,7 +135,13 @@ val create :
     back through {{!section-brokered}the observation seam}. A child this
     runtime already drives in-process is never handed to the broker: its own
     driver and fence are the materialization, and a second process racing that
-    fence could only lose. *)
+    fence could only lose. [broker] is the process's one
+    {!Mentat_broker.t}, through which every recorded parent-to-child message
+    for a child this runtime does not itself drive is sent
+    ({!Mentat_broker.send}) — durable in the child's journal or loudly
+    undelivered, re-driven from the durable receipt at the next attach or the
+    observed child exit; sending never wakes the child, a follow-up's wake is
+    the separate materialization act. *)
 
 val child_first_turn :
   Mentat_session.Delegation.Id.t -> Mentat_session.Turn.Id.t
@@ -178,10 +185,12 @@ val integrate_brokered_child :
     parent's recorded messages for this child that were never delivered — the
     sweep a child's exit makes deliverable, deduplicated by the derived message
     ids so repetition is harmless. [`Integrated] on success. [`Not_settled]
-    when the child journal holds no settled head — an unstarted child, an
-    active turn, or an unreadable journal — which after a child process exit
-    means the child died mid-work: re-materialization, not integration, is the
-    caller's next move. [`Unbound] when this runtime holds no parent binding
+    when the child journal holds unfinished work — an unstarted child, an
+    active turn, an unreadable journal, or a settled head with unconsumed
+    queued mail (the mail buys the child another turn, so the delegation must
+    not settle against the pre-mail result) — which after a child process
+    exit means re-materialization, not integration, is the caller's next
+    move. [`Unbound] when this runtime holds no parent binding
     for [child] (it never delegated through this engine, or has shut down);
     the journals still hold the truth and the parent's next attach integrates
     without the broker. *)

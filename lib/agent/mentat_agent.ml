@@ -21,6 +21,7 @@ type t = {
   execution_for_mode : Execution.factory;
   delegated_execution : Execution.delegated_factory;
   child_backend : Ports.child_backend;
+  broker : Mentat_broker.t;
   scheduler : Scheduler.t;
   drivers : (string, Driver.t) Hashtbl.t;
   hubs : (string, Feed.Hub.t) Hashtbl.t;
@@ -44,8 +45,8 @@ let child_first_turn delegation =
        [ Mentat_session.Delegation.Id.to_string delegation ])
 
 let create ~sw ~store ~provider ~config ~now ?(max_children = 4)
-    ?(child_backend = Ports.In_process) ~execution_for_mode ~delegated_execution
-    () =
+    ?(child_backend = Ports.In_process) ~broker ~execution_for_mode
+    ~delegated_execution () =
   {
     sw;
     store;
@@ -55,6 +56,7 @@ let create ~sw ~store ~provider ~config ~now ?(max_children = 4)
     execution_for_mode;
     delegated_execution;
     child_backend;
+    broker;
     scheduler = Scheduler.create ~capacity:max_children;
     drivers = Hashtbl.create 8;
     hubs = Hashtbl.create 8;
@@ -131,12 +133,15 @@ let child_result session turn outcome =
 (* The one settled-child judgment: the journal's settled head projected into
    the parent's result. Recovery's rebuild and the broker's integration both
    consume it, so "what did the child conclude" has a single home; [None]
-   means work is (or must be presumed) outstanding. *)
+   means work is (or must be presumed) outstanding. Unfinished work is head
+   OR queue: a settled head with unconsumed mail is not finished — the mail
+   buys the child another turn, so the delegation must not settle against
+   the pre-mail result. *)
 let settled_result child_session =
-  match
-    Mentat_session.State.settled_head (Mentat_session.state child_session)
-  with
+  let state = Mentat_session.state child_session in
+  match Mentat_session.State.settled_head state with
   | None -> None
+  | Some _ when Mentat_session.State.pending_queue state <> [] -> None
   | Some (last, outcome) ->
       let turn = Mentat_session.Turn.id last in
       let outcome =
@@ -473,7 +478,7 @@ and hooks t ~id =
               Mentat_session.State.delegations
                 (Mentat_session.state (Feed.Hub.head (Driver.hub driver)))
             in
-            deliver_child_message t ~edges message);
+            deliver_child_message t ~parent:id ~edges message);
     settled_children =
       (fun children -> Scheduler.settled_for t.scheduler children);
     cancel_children = (fun children -> cancel_children t ~parent:id children);
@@ -575,26 +580,19 @@ and rebuild_children t ~parent session =
           | Some result -> Scheduler.note_settled t.scheduler delegation result))
     (Mentat_session.State.delegations (Mentat_session.state session))
 
-(* Delivery of a recorded parent-to-child message. The idempotency id
-   derives from the recording (turn, call): a [`Follow_up] prompts the child
-   with a turn of that id — the byte-identical resubmission is [Ok] and a busy
-   child falls back to the queue entry — and a [`Context] enqueues a queue
-   entry of that id, deduplicated against the child journal's [Enqueued] facts
-   (a consumed entry's fact persists; the session's own [Queue.Duplicate]
-   rejection covers only the still-pending window). A delivery this leg drops
-   is re-driven by the next attach's recovery scan.
-
-   Under [Brokered], a child this runtime does not drive is the broker's
-   first: while it holds the child — a live process, or one still booting —
-   the message crosses the wire and lands in the running driver, kinds and
-   fallbacks exactly as in-process ([`Follow_up] prompts, a refusal parks the
-   derived-id queue entry). Only [`Gone] — the broker holds no
-   materialization, so the child settled and exited or never crossed the seam
-   — falls back to attaching here: the fence is free, and this is the same
-   in-process delivery the exit-time and attach-time re-drives perform. An
-   attach against a fence some other process holds stays a silent drop, as
-   ever covered by the durable receipt. *)
-and deliver_child_message t ~edges
+(* Delivery of a recorded parent-to-child message — one story for every
+   backend. The idempotency id derives from the recording (turn, call), so an
+   at-least-once re-drive lands the same queue entry once; both kinds are
+   mail. A child this runtime drives takes the local arm: the entry crosses
+   its driver's enqueue op, deduplicated against the journal's [Enqueued]
+   facts (a consumed entry's fact persists). This arm is transitional — it
+   exists while in-process drivers exist. Everything else is the broker's
+   send: durable in the child's journal, or a loud undelivered answer the
+   durable receipt re-drives at the parent's next attach or the observed
+   child exit. Sending never wakes: a [`Follow_up] additionally wakes the
+   child — send then wake, two acts — while a [`Context] entry waits for
+   whatever next runs the child. *)
+and deliver_child_message t ~parent ~edges
     (message : Mentat_agent_step.Step.Child_message.t) =
   let { Mentat_agent_step.Step.Child_message.kind; child; message = text; _ } =
     message
@@ -608,90 +606,55 @@ and deliver_child_message t ~edges
       edges
   with
   | None -> ()
-  | Some edge -> (
+  | Some edge ->
       let child_session = Mentat_session.Delegation.child edge in
-      let derived = derived_message_id message in
+      let id = Mentat_session.Queue.Id.of_string (derived_message_id message) in
       let input = [ Mentat_llm.Content.text text ] in
-      let deliver_in_process () =
-        match attach t child_session with
-        | Error _ -> ()
-        | Ok driver -> (
-            let enqueue () =
+      let origin = Mentat_session.Origin.agent parent in
+      Eio.Fiber.fork ~sw:t.sw (fun () ->
+          (match find_driver t child_session with
+          | Some driver ->
               ignore
                 (Driver.enqueue driver
-                   (Mentat_session.Queue.Entry.make
-                      ~id:(Mentat_session.Queue.Id.of_string derived)
-                      ~input))
-            in
-            match kind with
-            | `Context -> Eio.Fiber.fork ~sw:t.sw (fun () -> enqueue ())
-            | `Follow_up -> (
-                match
-                  Mentat_protocol.Command.prompt ~session:child_session
-                    ~turn:(Mentat_session.Turn.Id.of_string derived)
-                    ~input ()
-                with
-                | Error _ -> ()
-                | Ok command ->
-                    Eio.Fiber.fork ~sw:t.sw (fun () ->
-                        match Driver.submit driver command with
-                        | Ok () -> ()
-                        | Error _ ->
-                            (* The immediate turn did not take: a busy child
-                               ([Active_turn_exists]) admits the parked entry at
-                               its next idle boundary; a faulted or shutting-down
-                               child ([Unavailable]) leaves the parent's durable
-                               receipt to re-drive it on the next attach. The
-                               receipt already promised delivery, so no submit
-                               error may drop the message on the floor. The queue
-                               entry carries the same derived id, so this park is
-                               idempotent with that recovery. *)
-                            enqueue ())))
-      in
-      match t.child_backend with
-      | Ports.In_process -> deliver_in_process ()
-      | Ports.Brokered ops ->
-          if Option.is_some (find_driver t child_session) then
-            deliver_in_process ()
-          else
-            Eio.Fiber.fork ~sw:t.sw (fun () ->
-                let queued () =
-                  match
-                    Mentat_protocol.Command.queue_next
-                      ~id:(Mentat_session.Queue.Id.of_string derived)
-                      ~session:child_session ~input ()
-                  with
-                  | Error _ -> `Refused
-                  | Ok command -> ops.Ports.deliver ~command
-                in
-                let wire =
-                  match kind with
-                  | `Context -> queued ()
-                  | `Follow_up -> (
-                      match
-                        Mentat_protocol.Command.prompt ~session:child_session
-                          ~turn:(Mentat_session.Turn.Id.of_string derived)
-                          ~input ()
-                      with
-                      | Error _ -> `Delivered (* malformed: mirror the drop *)
-                      | Ok command -> (
-                          match ops.Ports.deliver ~command with
-                          | `Refused -> queued ()
-                          | (`Delivered | `Gone) as outcome -> outcome))
-                in
-                match wire with
-                | `Delivered | `Refused -> ()
-                | `Gone -> deliver_in_process ()))
+                   (Mentat_session.Queue.Entry.make ~origin ~id ~input ()))
+          | None -> (
+              match
+                Mentat_broker.send t.broker ~origin ~target:child_session ~id
+                  ~input ()
+              with
+              | `Delivered -> ()
+              | `Undelivered reason ->
+                  (* The receipt already promised delivery: the next attach's
+                     recovery scan or the observed child exit re-drives the
+                     same derived id. *)
+                  Eio.traceln "mentat: message to %s undelivered: %s"
+                    (Mentat_session.Id.to_string child_session)
+                    reason));
+          match kind with `Context -> () | `Follow_up -> wake_child t edge)
+
+(* The wake half of a follow-up: make the child run so it consumes the mail.
+   Under [In_process] attaching is the wake — the attach's own admission (or
+   an already-attached driver's idle boundary) consumes the pending entry,
+   and a child some other process drives answers Busy, whose driver consumes
+   the mail itself. Under [Brokered] materialization is the wake, and the
+   broker's unfinished-work probe sees the queued mail. *)
+and wake_child t edge =
+  let child = Mentat_session.Delegation.child edge in
+  match t.child_backend with
+  | Ports.In_process -> ignore (attach t child)
+  | Ports.Brokered ops ->
+      if Option.is_none (find_driver t child) then ops.Ports.materialize ~child
 
 (* Recovery's message re-drive (the idempotent pattern): a settled receipt
-   whose derived id reached neither a child turn nor a child queue fact was
+   whose derived id is not recorded as an enqueue in the child journal was
    never delivered — the process died between the receipt commit and the
-   routing. Re-drive it; the derived id makes the replay safe. [only] narrows
+   send. Re-drive it; the derived id makes the replay safe. [only] narrows
    the sweep to one delegation edge — the brokered wake re-drives a child's
    messages the moment its process exits and frees the fence, without touching
    its siblings. *)
 and redrive_messages ?only t session =
   let module S = (val t.store : Ports.STORE) in
+  let parent = Mentat_session.id session in
   let edges = Mentat_session.State.delegations (Mentat_session.state session) in
   let relevant (message : Mentat_agent_step.Step.Child_message.t) =
     match only with
@@ -715,21 +678,15 @@ and redrive_messages ?only t session =
           match child_edge with
           | None -> true (* no edge: nothing to deliver to *)
           | Some edge -> (
-              let derived = derived_message_id message in
               match S.view (Mentat_session.Delegation.child edge) with
               | Error _ -> false
               | Ok loaded ->
-                  let child_session = S.session_of loaded in
-                  let state = Mentat_session.state child_session in
-                  Option.is_some
-                    (Mentat_session.State.turn
-                       (Mentat_session.Turn.Id.of_string derived)
-                       state)
-                  || Mentat_session.State.enqueue_recorded
-                       (Mentat_session.Queue.Id.of_string derived)
-                       state)
+                  Mentat_session.State.enqueue_recorded
+                    (Mentat_session.Queue.Id.of_string
+                       (derived_message_id message))
+                    (Mentat_session.state (S.session_of loaded)))
         in
-        if not delivered then deliver_child_message t ~edges message
+        if not delivered then deliver_child_message t ~parent ~edges message
       end)
     (Mentat_agent_step.settled_messages session)
 

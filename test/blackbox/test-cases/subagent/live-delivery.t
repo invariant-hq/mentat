@@ -1,11 +1,10 @@
 A message to a RUNNING brokered child crosses the wire while the child still
 runs — never parked until its exit. The child is held mid-turn by a long
-shell tool; the parent then records a send_message and a follow_up. Both land
-in the child journal as derived-id queue entries while the first turn is
-still active (the follow-up's immediate turn is refused by the busy child and
-parks as its queue-entry fallback, exactly as in-process delivery does), and
-the journal's event order proves it: both queue facts precede the first
-turn's settlement. Once the tool is released the child completes its task and
+shell tool; the parent then records a send_message and a follow_up. Both are
+mail: the broker's send dials the serving child's socket and lands each as a
+derived-id queue entry while the first turn is still active, and the
+journal's event order proves it: both queue facts precede the first turn's
+settlement. Once the tool is released the child completes its task and
 drains both entries as its own turns.
 
 The second fixture binds the first fixture's port: a daemon-hosted instance

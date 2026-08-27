@@ -414,6 +414,20 @@
  (libraries windtrap mentat_broker))
 
 (test
+ (name test_broker)
+ (modules test_broker)
+ (libraries
+  windtrap
+  eio
+  eio_main
+  unix
+  lpath
+  mentat_broker
+  mentat_llm
+  mentat_session
+  mentat_store))
+
+(test
  (name test_github_api)
  (modules test_github_api)
  (libraries windtrap mentat_github jsont jsont.bytesrw))
@@ -496,6 +510,7 @@
   jsont
   jsont.bytesrw
   mentat_agent
+  mentat_broker
   mentat_agent_step
   mentat_client
   mentat_diagnostic
@@ -586,6 +601,7 @@
   uri
   mentat_server
   mentat_agent
+  mentat_broker
   mentat_agent_step
   mentat_edit
   mentat_client

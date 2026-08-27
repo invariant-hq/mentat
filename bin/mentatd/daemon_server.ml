@@ -103,7 +103,6 @@ let broker_ops broker instance =
   {
     Mentat_agent.Ports.materialize =
       (fun ~child -> Mentat_broker.materialize broker engine ~child);
-    deliver = (fun ~command -> Mentat_broker.deliver broker ~command);
     cancel = (fun ~child -> Mentat_broker.cancel broker ~child);
   }
 
@@ -123,7 +122,7 @@ let boot registry ~root ~environment =
           ~overrides:[] ?environment
           ~child_backend:(fun instance ->
             Mentat_agent.Ports.Brokered (broker_ops registry.broker instance))
-          ()
+          ~broker:registry.broker ()
       with
       | Error status -> Eio.Promise.resolve set_ready (Error status)
       | Ok instance -> (
@@ -870,6 +869,20 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                       ~beside:"mentatd")
                   ~socket_base:(User_dirs.daemon_socket_dir dirs)
                   ~log_dir:(User_dirs.daemon_dir dirs)
+                  ~now:(fun () ->
+                    (* The same clock pin every composition honors, so the
+                       stamps a send's append writes stay deterministic under
+                       a pinned test clock. *)
+                    match
+                      Option.bind
+                        (List.assoc_opt "MENTAT_NOW"
+                           shared.Composition.environment)
+                        Int64.of_string_opt
+                    with
+                    | Some ms -> Mentat_session.Time.of_unix_ms ms
+                    | None ->
+                        Mentat_session.Time.of_unix_seconds_float
+                          (Eio.Time.now clock))
               in
               let registry = make_registry ~shared ~parent_sw:sw ~broker in
               (* The stop seam is created before the branches so the resident

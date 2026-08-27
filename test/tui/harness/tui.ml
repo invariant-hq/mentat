@@ -2597,7 +2597,7 @@ let submit_command (fixture : fixture) = function
       let entry =
         Session.Queue.Entry.make
           ~id:(mint_queue_id fixture.queue_runtime)
-          ~input
+          ~input ()
       in
       queue_update fixture session (Session.Queue.Update.enqueued entry);
       Ok ()
@@ -2608,7 +2608,7 @@ let submit_command (fixture : fixture) = function
               (fun input ->
                 Session.Queue.Entry.make
                   ~id:(mint_queue_id fixture.queue_runtime)
-                  ~input)
+                  ~input ())
               inputs
           in
           queue_update fixture session (Session.Queue.Update.replaced entries))

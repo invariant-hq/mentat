@@ -530,9 +530,9 @@ let capped_script ~cap f =
 (* Runtime harness. *)
 
 let mk_engine ~sw ~store ?(script = default_script) ?(config = default_config)
-    ?max_children ?child_backend ?(catalog = catalog) ?(workspace = workspace)
-    ?execution_for_mode ?background_probe ?running_view ?delegated_execution
-    ?delegated_role_spy () =
+    ?max_children ?child_backend ?broker ?(catalog = catalog)
+    ?(workspace = workspace) ?execution_for_mode ?background_probe
+    ?running_view ?delegated_execution ?delegated_role_spy () =
   let now =
     let r = ref 1000L in
     fun () ->
@@ -603,12 +603,24 @@ let mk_engine ~sw ~store ?(script = default_script) ?(config = default_config)
     in
     (select, Option.value running_view ~default:(fun () -> []))
   in
+  (* The mocked broker seam: the unit tier runs over the fake store, so a
+     send's real fence-and-append effects have nowhere to land — the default
+     stub answers [`Delivered] and a test that cares injects its own
+     recording stub. *)
+  let broker =
+    match broker with
+    | Some broker -> broker
+    | None ->
+        Mentat_broker.for_tests
+          ~send:(fun ~origin:_ ~target:_ ~id:_ ~input:_ -> `Delivered)
+  in
   Agent.create ~sw ~store:(store_of store) ~provider:script ~config ~now
-    ?max_children ?child_backend ~execution_for_mode ~delegated_execution ()
+    ?max_children ?child_backend ~broker ~execution_for_mode
+    ~delegated_execution ()
 
 (* One engine over a freshly-seeded [root] session, torn down (shutdown, then
    switch cancellation) inside a real-clock deadlock guard. *)
-let with_engine ?script ?config ?max_children ?child_backend ?catalog
+let with_engine ?script ?config ?max_children ?child_backend ?broker ?catalog
     ?workspace ?execution_for_mode ?background_probe ?running_view
     ?delegated_execution ?delegated_role_spy f =
   Eio_main.run @@ fun env ->
@@ -617,8 +629,8 @@ let with_engine ?script ?config ?max_children ?child_backend ?catalog
   let store = fresh_store () in
   seed_session store ~id:"root";
   let engine =
-    mk_engine ~sw ~store ?script ?config ?max_children ?child_backend ?catalog
-      ?workspace ?background_probe ?running_view ?execution_for_mode
+    mk_engine ~sw ~store ?script ?config ?max_children ?child_backend ?broker
+      ?catalog ?workspace ?background_probe ?running_view ?execution_for_mode
       ?delegated_execution ?delegated_role_spy ()
   in
   let client = { c = make_client engine; sw } in
@@ -4645,12 +4657,11 @@ let an_observation_made_while_waiting_reaches_the_parent () =
    the out-of-process child server (the exact serve-session topology — shared
    journals, separate runtimes), and the seam calls play the observer. *)
 
-let brokered_spy ?(deliver = fun ~command:_ -> `Gone) () =
+let brokered_spy () =
   let materialized = ref [] in
   let ops =
     {
       Ports.materialize = (fun ~child -> materialized := child :: !materialized);
-      deliver;
       cancel = (fun ~child:_ -> ());
     }
   in
@@ -4875,52 +4886,55 @@ let message_script ~verbs =
   end
   else Ok (plain_response "CHILD_SEEN")
 
-(* Under [Brokered], a message for a child this runtime does not drive crosses
-   the deliver seam, never an in-process attach: the spy plays a live broker —
-   it captures the wire commands and answers [`Delivered] — so the child
-   journal must stay untouched by this process. The [`Context] crosses as a
-   queue command carrying its derived client-minted id; the [`Follow_up] as a
-   prompt of the derived turn id. *)
-let a_brokered_live_delivery_crosses_the_deliver_seam () =
-  let delivered = ref [] in
-  let deliver ~command =
-    delivered := command :: !delivered;
-    `Delivered
+(* Under [Brokered], a message for a child this runtime does not drive is one
+   broker send with the derived queue id and the parent's agent origin —
+   never an in-process attach, never a prompt. The recording stub plays the
+   broker and answers [`Delivered], so the child journal must stay untouched
+   by this process. The [`Follow_up] additionally wakes the child through the
+   ops record's materialization — send then wake, two acts — while the
+   [`Context] sends without waking. *)
+let a_brokered_message_crosses_the_broker_send () =
+  let sent = ref [] in
+  let broker =
+    Mentat_broker.for_tests ~send:(fun ~origin ~target ~id ~input:_ ->
+        sent := (origin, target, id) :: !sent;
+        `Delivered)
   in
-  let _materialized, child_backend = brokered_spy ~deliver () in
+  let materialized, child_backend = brokered_spy () in
   let script =
     message_script
       ~verbs:
         [ ("send_message", "extra context"); ("follow_up", "one more thing") ]
   in
-  with_engine ~script:(capped_script ~cap:20 script) ~child_backend
+  with_engine ~script:(capped_script ~cap:20 script) ~child_backend ~broker
     (fun ~sw:_ ~client ~store ~engine:_ ->
       submit_ok client
         (prompt ~session:(sid "root") ~turn:(tid "t-msg") "PLEASE_SPAWN");
       ignore (drain_committed (follow_ok client (sid "root")));
-      await_yield (fun () -> List.length !delivered >= 2);
+      await_yield (fun () -> List.length !sent >= 2);
+      await_yield (fun () -> List.length !materialized >= 2);
       let edge = root_edge store in
       let child = Session.Delegation.child edge in
-      (match
-         List.find_opt
-           (function Protocol.Command.Queue_next _ -> true | _ -> false)
-           !delivered
-       with
-      | Some (Protocol.Command.Queue_next { session; id; _ }) ->
-          is_true ~msg:"the queue command targets the child session"
-            (Session.Id.equal session child);
-          is_true ~msg:"the wire queue entry carries its derived id"
-            (Option.is_some id)
-      | _ -> fail "no queue command crossed the deliver seam");
-      (match
-         List.find_opt
-           (function Protocol.Command.Prompt _ -> true | _ -> false)
-           !delivered
-       with
-      | Some (Protocol.Command.Prompt { session; _ }) ->
-          is_true ~msg:"the follow-up prompt targets the child session"
-            (Session.Id.equal session child)
-      | _ -> fail "no follow-up prompt crossed the deliver seam");
+      equal Testable.int ~msg:"two message kinds are two sends" 2
+        (List.length !sent);
+      List.iter
+        (fun (origin, target, id) ->
+          is_true ~msg:"the send targets the child session"
+            (Session.Id.equal target child);
+          is_true ~msg:"the send carries a derived id"
+            (String.length (Session.Queue.Id.to_string id) = 20);
+          match origin with
+          | Some (Session.Origin.Agent sender) ->
+              is_true ~msg:"the origin names the sending parent"
+                (Session.Id.equal sender (sid "root"))
+          | Some (Session.Origin.Trigger _) | None ->
+              fail "the origin must name the sending agent")
+        !sent;
+      (* Exactly the spawn and the follow-up's wake handed the child over:
+         the context send woke nothing. *)
+      equal Testable.int ~msg:"only the spawn and the follow-up wake the child"
+        2
+        (List.length !materialized);
       match Hashtbl.find_opt store.sessions (Session.Id.to_string child) with
       | None -> fail "the child document is missing"
       | Some session ->
@@ -4929,58 +4943,60 @@ let a_brokered_live_delivery_crosses_the_deliver_seam () =
             0
             (List.length (Session.events session)))
 
-(* A busy child refuses the immediate follow-up turn over the wire; the engine
-   then parks the derived-id queue entry over the same seam — the wire twin of
-   the in-process busy-child fallback. *)
-let a_refused_wire_follow_up_parks_the_queue_entry () =
-  let delivered = ref [] in
-  let deliver ~command =
-    delivered := command :: !delivered;
-    match command with
-    | Protocol.Command.Prompt _ -> `Refused
-    | _ -> `Delivered
+(* An undelivered send is covered by the parent's durable verb receipt: the
+   next engine attaching the parent re-drives it through its own broker with
+   the same derived id — at-least-once mechanics, exactly-once effect. *)
+let an_undelivered_message_redrives_at_the_next_attach () =
+  Eio_main.run @@ fun env ->
+  let clock = Eio.Stdenv.clock env in
+  Eio.Switch.run @@ fun sw ->
+  let store = fresh_store () in
+  seed_session store ~id:"root";
+  let run () =
+    let first = ref [] in
+    let broker1 =
+      Mentat_broker.for_tests ~send:(fun ~origin:_ ~target:_ ~id ~input:_ ->
+          first := id :: !first;
+          `Undelivered "the target's fence stayed held")
+    in
+    let _materialized, child_backend = brokered_spy () in
+    let script = message_script ~verbs:[ ("send_message", "extra context") ] in
+    let engine1 =
+      mk_engine ~sw ~store
+        ~script:(capped_script ~cap:20 script)
+        ~child_backend ~broker:broker1 ()
+    in
+    let client1 = { c = make_client engine1; sw } in
+    submit_ok client1
+      (prompt ~session:(sid "root") ~turn:(tid "t-msg") "PLEASE_SPAWN");
+    ignore (drain_committed (follow_ok client1 (sid "root")));
+    await_yield (fun () -> List.length !first >= 1);
+    Agent.shutdown engine1;
+    let redriven = ref [] in
+    let broker2 =
+      Mentat_broker.for_tests ~send:(fun ~origin:_ ~target:_ ~id ~input:_ ->
+          redriven := id :: !redriven;
+          `Delivered)
+    in
+    let _materialized2, child_backend2 = brokered_spy () in
+    let engine2 =
+      mk_engine ~sw ~store ~script:default_script
+        ~child_backend:child_backend2 ~broker:broker2 ()
+    in
+    let client2 = { c = make_client engine2; sw } in
+    submit_ok client2 (prompt ~session:(sid "root") ~turn:(tid "t-after") "hi");
+    await_yield (fun () -> List.length !redriven >= 1);
+    (match (!first, !redriven) with
+    | [ undelivered ], redriven_id :: _ ->
+        is_true ~msg:"the re-driven send carries the same derived id"
+          (Session.Queue.Id.equal undelivered redriven_id)
+    | _ -> fail "expected one undelivered send and its re-drive");
+    Agent.shutdown engine2;
+    Ok ()
   in
-  let _materialized, child_backend = brokered_spy ~deliver () in
-  let script = message_script ~verbs:[ ("follow_up", "one more thing") ] in
-  with_engine ~script:(capped_script ~cap:20 script) ~child_backend
-    (fun ~sw:_ ~client ~store ~engine:_ ->
-      submit_ok client
-        (prompt ~session:(sid "root") ~turn:(tid "t-fu") "PLEASE_SPAWN");
-      ignore (drain_committed (follow_ok client (sid "root")));
-      await_yield (fun () -> List.length !delivered >= 2);
-      let edge = root_edge store in
-      let child = Session.Delegation.child edge in
-      match List.rev !delivered with
-      | [
-       Protocol.Command.Prompt { session = first; _ };
-       Protocol.Command.Queue_next { session = second; id; _ };
-      ] ->
-          is_true ~msg:"both legs target the child session"
-            (Session.Id.equal first child && Session.Id.equal second child);
-          is_true ~msg:"the parked entry carries its derived id"
-            (Option.is_some id)
-      | _ -> fail "expected a refused prompt then its queue-entry fallback")
-
-(* [`Gone] — the broker no longer holds the child — falls back to the
-   in-process delivery the exit-time re-drive performs: the message lands in
-   the child journal and the idle admission runs it as the child's own turn. *)
-let a_gone_brokered_delivery_falls_back_in_process () =
-  let _materialized, child_backend = brokered_spy () in
-  let script = message_script ~verbs:[ ("send_message", "extra context") ] in
-  with_engine ~script:(capped_script ~cap:20 script) ~child_backend
-    (fun ~sw:_ ~client ~store ~engine:_ ->
-      submit_ok client
-        (prompt ~session:(sid "root") ~turn:(tid "t-gone") "PLEASE_SPAWN");
-      ignore (drain_committed (follow_ok client (sid "root")));
-      let edge = root_edge store in
-      let child = Session.Delegation.child edge in
-      await_yield (fun () ->
-          match
-            Hashtbl.find_opt store.sessions (Session.Id.to_string child)
-          with
-          | None -> false
-          | Some session ->
-              Session.State.turns (Session.state session) <> []))
+  match Eio.Time.with_timeout clock 15.0 run with
+  | Ok () -> ()
+  | Error `Timeout -> fail "deadlock guard: the redrive test exceeded 15s"
 
 let mutation_event_value =
   Testable.make ~pp:Mutation.Event.pp ~equal:Mutation.Event.equal
@@ -6556,12 +6572,10 @@ let () =
             a_brokered_failure_settles_the_parked_wait;
           test "a reaped brokered child releases capacity"
             a_reaped_brokered_child_releases_capacity;
-          test "a brokered live delivery crosses the deliver seam"
-            a_brokered_live_delivery_crosses_the_deliver_seam;
-          test "a refused wire follow-up parks the queue entry"
-            a_refused_wire_follow_up_parks_the_queue_entry;
-          test "a gone brokered delivery falls back in-process"
-            a_gone_brokered_delivery_falls_back_in_process;
+          test "a brokered message crosses the broker send"
+            a_brokered_message_crosses_the_broker_send;
+          test "an undelivered message re-drives at the next attach"
+            an_undelivered_message_redrives_at_the_next_attach;
         ];
       group "online metadata cone (4a)"
         [

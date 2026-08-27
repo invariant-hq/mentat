@@ -9,6 +9,7 @@
   base64
   eio
   mentat_agent_step
+  mentat_broker
   mentat_client
   mentat_diagnostic
   mentat_digest

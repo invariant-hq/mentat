@@ -411,7 +411,7 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
                     Mentat_agent.child_first_turn (Session.Delegation.id edge)
                   in
                   let cone = driver.Driver.session in
-                  let submit =
+                  let submit () =
                     match
                       Command.prompt ~session:child ~turn
                         ~input:(Session.Delegation.task edge) ()
@@ -424,7 +424,29 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
                             Error
                               (Format.asprintf "%a" Mentat_protocol.Error.pp e))
                   in
-                  (match submit with
+                  (* The first attach tolerates a custodial hold: a fence
+                     held under the send label is a brief mail append in
+                     flight, never a foreign driver, so the boot retries
+                     briefly instead of refusing the session. *)
+                  let send_hold () =
+                    match Store.Run_lock.holder store ~session:child with
+                    | `Held (Some owner) ->
+                        Option.equal String.equal
+                          (Store.Run_lock.Owner.label owner)
+                          (Some Mentat_broker.send_owner_label)
+                    | `Free | `Held None | `Io _ -> false
+                  in
+                  let rec submit_with_patience elapsed =
+                    match submit () with
+                    | Ok () -> Ok ()
+                    | Error _ as error ->
+                        if elapsed >= 5.0 || not (send_hold ()) then error
+                        else begin
+                          Eio.Time.sleep clock 0.1;
+                          submit_with_patience (elapsed +. 0.1)
+                        end
+                  in
+                  (match submit_with_patience 0. with
                   | Error message ->
                       Exit_status.runtime
                         (Printf.sprintf "session %s: first turn: %s" session

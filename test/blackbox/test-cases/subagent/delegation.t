@@ -144,10 +144,12 @@ materialization.
   $ diff child1.transcript child2.transcript && echo transcripts-identical
   transcripts-identical
 
-Stage 3 — messages. send_message records a context delivery (a queue entry
-the idle child consumes as its own turn); follow_up prompts the child
-directly. Both address the child by the delegation id from the receipt, and
-both keep driving inside the daemon after the parent's turn settles.
+Stage 3 — messages. Both kinds are mail: each recorded verb lands one
+derived-id queue entry in the child journal through the broker's send, and
+the follow_up additionally wakes the child — send then wake, two acts. The
+woken child drains both entries as its own turns in its own per-session
+server. Both address the child by the delegation id from the receipt, and
+both keep driving after the parent's turn settles.
 
   $ cat > stage3.jsonl <<JSONL
   > {"expect":{"body_contains":["PLEASE_MESSAGE"],"body_not_contains":["sm-call"]},"response":{"id":"r5","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"sm-item","call_id":"sm-call","name":"send_message","arguments":"{\"child\":\"$DELEG\",\"message\":\"extra context\"}"}]}}
@@ -184,6 +186,7 @@ follow-up turn (their relative order is scheduling-dependent, so the pin is
 counts and contents, not order).
 
   $ wait_child "$CHILD" 3
+  $ wait_child_exit "$CHILD"
   $ stop_daemon
   $ mentat session export "$CHILD" --format text --cwd "$PWD/work" >child3.transcript
   $ grep -c 'turn-finished' child3.transcript

@@ -390,6 +390,7 @@ let journal_family_tests =
             Session.Queue.Entry.make
               ~id:(Session.Queue.Id.of_string "q1")
               ~input:[ Llm.Content.text "next" ]
+              ()
           in
           let update = Session.Queue.Update.enqueued entry in
           let acc, _ = fold acc (position 1) (Fact.Journal_queue update) in

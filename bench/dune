@@ -117,6 +117,7 @@
  (modules bench_engine_latency)
  (libraries
   mentat_agent
+  mentat_broker
   mentat_client
   mentat_protocol
   mentat_session

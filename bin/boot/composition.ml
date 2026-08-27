@@ -106,6 +106,14 @@ type t = {
      supplied before the instance exists. [None] is the in-process default —
      the CLI's single-runtime shape; the daemon supplies a brokered backend. *)
   child_backend : (t -> Engine.Ports.child_backend) option;
+  (* The process broker the engine sends through. The daemon passes its one
+     node broker; absent, engine assembly constructs an instance-owned one
+     whose spawn resolver refuses — this process materializes no per-session
+     servers of its own, it only sends. An owned broker is stopped by
+     {!shutdown}: its reaper fiber lives under the instance switch, which
+     could not close otherwise. *)
+  broker : Mentat_broker.t option;
+  mutable owned_broker : Mentat_broker.t option;
   mutable engine : Engine.t option;
   mutable assembled :
     (Client.Driver.t * Mentat_workspace_io.t * Mentat_tool.t) option;
@@ -484,7 +492,7 @@ let stage_store_reported ~stdenv ~sw ~dirs ~getenv ?data_home () =
         | None -> message)
 
 let make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
-    ~review_base ?owner_label ?child_backend () : t =
+    ~review_base ?owner_label ?child_backend ?broker () : t =
   {
     shared;
     root;
@@ -500,6 +508,8 @@ let make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
     staged_default = None;
     listing_refresh_at = Hashtbl.create 4;
     child_backend;
+    broker;
+    owned_broker = None;
     engine = None;
     assembled = None;
     dune_rpc = None;
@@ -553,7 +563,7 @@ let stage_shared ~stdenv ~sw ?data_home () : (shared, Exit_status.t) result =
    one switch). No store is opened here — the shared handle is reused, which is
    what keeps the fence's same-process half honest. *)
 let instance shared ~sw ~cwd ~overrides ?environment ?review_base ?owner_label
-    ?child_backend () : (t, Exit_status.t) result =
+    ?child_backend ?broker () : (t, Exit_status.t) result =
   let ( let* ) = Result.bind in
   let environment = Option.value environment ~default:shared.environment in
   let getenv = environment_get environment in
@@ -565,7 +575,7 @@ let instance shared ~sw ~cwd ~overrides ?environment ?review_base ?owner_label
   in
   Ok
     (make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
-       ~review_base ?owner_label ?child_backend ())
+       ~review_base ?owner_label ?child_backend ?broker ())
 
 (* The engine's drivers are long-lived fibers under the instance switch; shut
    them down so the switch can close instead of blocking on idle drivers. The
@@ -578,7 +588,13 @@ let shutdown t =
   (match t.dune_watch with
   | Some supervisor -> Dune_watch.stop supervisor
   | None -> ());
-  match t.engine with Some engine -> Engine.shutdown engine | None -> ()
+  (match t.engine with Some engine -> Engine.shutdown engine | None -> ());
+  (* An instance-owned broker's reaper runs under the instance switch: stop it
+     so the switch can close. A daemon-passed broker is the daemon's to
+     stop. *)
+  match t.owned_broker with
+  | Some broker -> Mentat_broker.stop broker
+  | None -> ()
 
 let retained_hub_count t =
   match t.engine with
@@ -3250,11 +3266,34 @@ let build_driver t :
     | None -> Engine.Ports.In_process
     | Some backend -> backend t
   in
+  (* The engine's send path. A daemon hands every instance its one node
+     broker; an instance without one (the CLI's single-runtime shape, the
+     per-session server) gets its own, able to send — the fence-held append,
+     the socket dial — but refusing to spawn: nothing hands this process a
+     child to materialize, and a consulted resolver would mean a wiring
+     bug. *)
+  let broker =
+    match t.broker with
+    | Some broker -> broker
+    | None ->
+        let broker =
+          Mentat_broker.create ~sw:t.switch ~stdenv:t.shared.stdenv
+            ~store:t.shared.store
+            ~resolve_bin:(fun () ->
+              Error "this process materializes no per-session servers")
+            ~socket_base:(User_dirs.daemon_socket_dir t.shared.dirs)
+            ~log_dir:(User_dirs.daemon_dir t.shared.dirs)
+            ~now:(fun () -> now_time t)
+        in
+        t.owned_broker <- Some broker;
+        broker
+  in
   let engine =
     Engine.create ~sw:t.switch ~store:store_port ~provider:provider_call
       ~config:(config_callback t ~product_rules:build_product_rules)
       ~now:(fun () -> now_time t)
-      ~max_children ~child_backend ~execution_for_mode ~delegated_execution ()
+      ~max_children ~child_backend ~broker ~execution_for_mode
+      ~delegated_execution ()
   in
   t.engine <- Some engine;
   let driver_record : Client.Driver.t =
