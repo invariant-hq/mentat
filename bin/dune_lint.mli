@@ -18,17 +18,15 @@
     ({!Mentat_ocaml_dune_rpc.Instance.set_lint}) — one source of truth for
     the row's count and the drain's notices.
 
-    The lane's availability gate mirrors the watch's ladder, in both
-    worlds a project keeps its linter in: the dune lane must be live (the
-    trigger is its readings), the command non-empty, and the command
-    reachable — directly when its program resolves on the sealed child
-    PATH (the opam world), through a [dune exec] prefix otherwise (the
-    dune-pkg world, where the binary lives in the lock universe and may
-    need building). Whether the reached command exists is the first run's
-    answer: a structurally absent direct program, or dune's own
-    Program-not-found answer, takes the lane off for the session — off
-    means lint-absent, never lint-clean, and never a fossil of the last
-    word. A linter installed mid-session takes effect next session.
+    The lane's gate is the watch's ladder plus a non-empty command;
+    reachability is re-resolved at {e every} due settle, never once for
+    the session: the composition's resolver answers the sealed child PATH
+    (the opam world) or the built binary in the project's lock universe
+    (the dune-pkg world), and a settle it cannot answer is skipped —
+    lint-absent, never lint-clean, never a fossil. A linter that appears
+    mid-session (a lock universe freshly built, a PATH install) runs at
+    the next settle; one that vanishes skips until it returns. The lane
+    has no death: only [dune.lint_command = []] means no runner.
     Construction is pure; {!engage} forks the polling fiber. *)
 
 type t
@@ -40,23 +38,22 @@ val make :
   mono:_ Eio.Time.Mono.t ->
   sw:Eio.Switch.t ->
   workspace:Mentat_workspace.t ->
-  command:string list ->
+  resolve:(unit -> string list option) ->
   t
-(** [make ~rpc ~capability ~mono ~sw ~workspace ~command] is a lint runner
-    executing [command] from the workspace root through the sealed
-    [capability], watching [rpc]'s settled readings for its trigger and
-    publishing its findings back into [rpc]. [workspace] resolves reported
-    paths workspace-relative. Construction performs no IO and spawns
-    nothing. A run that exits — cleanly, or non-zero with findings parsed —
-    publishes its word ([Some []] is lint-clean); any other termination
-    keeps the lane's last one: a non-zero exit without findings, a timeout,
-    an output overrun, and a signal death alike are incomplete reports, and
-    an incomplete report never speaks — a signal-killed linter's partial
-    output would fabricate resolutions. Hostile or unparseable output is
-    the same incomplete case, never the fiber's death.
-
-    Raises [Invalid_argument] if [command] is empty — an empty command means
-    no runner is constructed at all. *)
+(** [make ~rpc ~capability ~mono ~sw ~workspace ~resolve] is a lint runner
+    executing the command [resolve] answers, from the workspace root
+    through the sealed [capability], watching [rpc]'s settled readings for
+    its trigger and publishing its findings back into [rpc]. [resolve] is
+    consulted at every due settle; [None] skips that settle. [workspace]
+    resolves reported paths workspace-relative. Construction performs no
+    IO and spawns nothing. A run that exits — cleanly, or non-zero with
+    findings parsed — publishes its word ([Some []] is lint-clean); any
+    other termination keeps the lane's last one: a non-zero exit without
+    findings, a timeout, an output overrun, a launch failure, and a signal
+    death alike are incomplete reports, and an incomplete report never
+    speaks — a signal-killed linter's partial output would fabricate
+    resolutions. Hostile or unparseable output is the same incomplete
+    case, never the fiber's death. *)
 
 val engage : t -> unit
 (** [engage t] forks the runner's fiber under the engagement switch.

@@ -17,18 +17,19 @@ type t = {
   mono : mono;
   sw : Eio.Switch.t;
   workspace : Mentat_workspace.t;
-  command : string list;
+  resolve : unit -> string list option;
   mutable engaged : bool;
   (* The activity count of the last run's trigger: a fresh Clean settle is
      one whose stream moved past it. A build that touches an error, or that
      outlasts dune's 0.2 s progress sample, produces events and advances
      the count; a sub-sample clean-to-clean rebuild can escape it, and a
      stale lint word from that blind spot heals at the next observed
-     build. In the dune-exec world the run's own forwarded no-op build can
-     itself advance the count and buy an echo run — bounded by the poll
-     and the run's own duration, and idempotent. *)
+     build. No dune runs in the lint path, so a run never advances the
+     count itself. *)
   mutable ran_at : int;
-  mutable dead : bool;
+  (* Whether the last settle found a runnable command — a log-noise latch
+     only: the transition into unreachable is said once, not per settle. *)
+  mutable resolved : bool;
 }
 
 (* The trigger poll is a memory read; the run itself is bounded generously —
@@ -40,18 +41,17 @@ let poll_s = 0.5
 let run_timeout_s = 600.0
 let capture_bytes = 8 * 1024 * 1024
 
-let make ~rpc ~capability ~mono ~sw ~workspace ~command =
-  if command = [] then invalid_arg "lint command must not be empty";
+let make ~rpc ~capability ~mono ~sw ~workspace ~resolve =
   {
     rpc;
     capability;
     mono = Mono mono;
     sw;
     workspace;
-    command;
+    resolve;
     engaged = false;
     ran_at = -1;
-    dead = false;
+    resolved = true;
   }
 
 let sleep t seconds =
@@ -78,73 +78,57 @@ let due t =
         Some at
     | Some _ | None -> None
 
-(* Availability is the first run's answer, in both worlds: a direct
-   command that cannot spawn is a structural error; a [dune exec]-reached
-   one that does not exist is dune's own not-found answer, rendered as
-   [Program 'name' not found!] (single quotes — [User_message.command]'s
-   rendering; the double-quoted form is matched too in case a dune version
-   renders otherwise). The match is deliberately fail-open: a dune that
-   rephrases the message downgrades lane-off to a warn per green settle,
-   never to a false lane-off. Only a dune-exec command consults it — a
-   direct linter printing this text is its own business — and only the
-   head of the output, where dune prints it. *)
-let target t =
-  match t.command with
-  | "dune" :: "exec" :: "--" :: name :: _ -> Some name
-  | _ -> None
-
-let says_not_found t output =
-  match target t with
-  | None -> false
-  | Some name ->
-      let head = String.take_first 8192 output in
-      String.includes ~affix:(Printf.sprintf "Program '%s' not found" name)
-        head
-      || String.includes ~affix:(Printf.sprintf "Program %S not found" name)
-           head
-
 let captured_text outcome =
   Command.Captured.render outcome.Command.stdout
   ^ "\n"
   ^ Command.Captured.render outcome.Command.stderr
 
-(* The lane goes off for good: absent, never a fossil — a dead lane that
-   kept its last word would show findings (or a clean) with no producer
-   behind them for the rest of the session. *)
-let lane_off t reason =
-  t.dead <- true;
-  Mentat_ocaml_dune_rpc.Instance.set_lint t.rpc None;
-  Log.info (fun m -> m "lint lane off: %s" reason)
-
+(* The command is resolved at every due settle, never once for the
+   session: a linter that is not there yet — a lock universe still
+   building, a PATH entry installed mid-session — simply skips settles
+   until it appears, and one that vanishes skips until it returns. The
+   lane has no death; only [dune.lint_command = []] means no runner. *)
 let run_once t at =
-  (* The run's cwd is the primary root of the same workspace the findings
-     resolve against — never the session cwd's root, which in a multi-root
-     session may be an auxiliary one and would skew every relative path the
-     linter prints. *)
-  let cwd =
-    Mentat_workspace.Path.make
-      ~root_key:
-        (Mentat_workspace.Root.key (Mentat_workspace.primary t.workspace))
-      Lpath.Rel.root
-  in
-  let (Mono mono) = t.mono in
-  let timeout = Eio.Time.Timeout.seconds mono run_timeout_s in
-  match
-    Command.run t.capability ~cwd ~capture:(Command.Limit capture_bytes)
-      ~timeout t.command
-  with
-  | Error (Command.Error.Spawn (Eio.Process.Executable_not_found _) as error)
-    ->
-      (* Structurally absent: the program the gate resolved is gone. *)
+  match t.resolve () with
+  | None ->
       t.ran_at <- at;
-      lane_off t (Format.asprintf "%a" Command.Error.pp error)
-  | Error error ->
-      (* A transient launch failure forfeits this settle, never the lane. *)
-      t.ran_at <- at;
-      Log.warn (fun m ->
-          m "lint run failed to launch; findings kept: %a" Command.Error.pp
-            error)
-  | Ok outcome -> (
+      if t.resolved then begin
+        t.resolved <- false;
+        Log.info (fun m ->
+            m
+              "lint target not reachable; settles are skipped until it \
+               appears")
+      end
+  | Some command -> (
+      if not t.resolved then begin
+        t.resolved <- true;
+        Log.info (fun m -> m "lint target reachable again")
+      end;
+      (* The run's cwd is the primary root of the same workspace the
+         findings resolve against — never the session cwd's root, which in
+         a multi-root session may be an auxiliary one and would skew every
+         relative path the linter prints. *)
+      let cwd =
+        Mentat_workspace.Path.make
+          ~root_key:
+            (Mentat_workspace.Root.key (Mentat_workspace.primary t.workspace))
+          Lpath.Rel.root
+      in
+      let (Mono mono) = t.mono in
+      let timeout = Eio.Time.Timeout.seconds mono run_timeout_s in
+      match
+        Command.run t.capability ~cwd ~capture:(Command.Limit capture_bytes)
+          ~timeout command
+      with
+      | Error error ->
+          (* A launch failure — a binary gone between the probe and the
+             spawn included — forfeits this settle, never the lane: the
+             next settle resolves afresh. *)
+          t.ran_at <- at;
+          Log.warn (fun m ->
+              m "lint run failed to launch; findings kept: %a"
+                Command.Error.pp error)
+      | Ok outcome -> (
       t.ran_at <- at;
       match outcome.Command.termination with
       | Command.Timed_out | Command.Stopped | Command.Output_limit _
@@ -179,27 +163,20 @@ let run_once t at =
                   Mentat_ocaml_dune_rpc.Instance.set_lint t.rpc
                     (Some findings)
               | `Exited _, [] ->
-                  if says_not_found t text then
-                    lane_off t "the lint target is not in the project"
-                  else
-                    Log.warn (fun m ->
-                        m "lint command failed without findings; findings \
-                           kept")
+                  Log.warn (fun m ->
+                      m "lint command failed without findings; findings kept")
               | `Signaled _, _ ->
                   Log.warn (fun m ->
-                      m "lint run died mid-report; findings kept"))))
+                      m "lint run died mid-report; findings kept")))))
 
 let engage t =
   if not t.engaged then begin
     t.engaged <- true;
     Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
         let rec loop () =
-          if t.dead then `Stop_daemon
-          else begin
-            (match due t with Some at -> run_once t at | None -> ());
-            sleep t poll_s;
-            loop ()
-          end
+          (match due t with Some at -> run_once t at | None -> ());
+          sleep t poll_s;
+          loop ()
         in
         loop ())
   end

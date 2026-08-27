@@ -79,21 +79,20 @@ settle.
   $ test -f fake-dune-argv
   [1]
 
-A linter off the PATH is reached through dune exec — the dune-pkg world,
-where a dev-dependency's binary lives in the lock universe: the gate falls
-back to the dune exec prefix, and the shim resolves the target from its
-fake lock bin.
+A linter off the PATH is the dune-pkg world: the resolver finds the built
+binary in the lock universe's package store and runs it directly — no
+dune in the lint path at all.
 
   $ rm fake-bin/lintprobe fake-litany-argv
-  $ mkdir -p fake-lock-bin
-  $ cat > fake-lock-bin/lintprobe <<'SH'
+  $ mkdir -p _build/_private/default/.pkg/lintprobe.1.0/target/bin
+  $ cat > _build/_private/default/.pkg/lintprobe.1.0/target/bin/lintprobe <<SH
   > #!/bin/sh
-  > echo "$@" >> "$PWD/fake-litany-argv"
+  > echo "\$@" >> "$PWD/fake-litany-argv"
   > cat "$PWD/lint-output" 2>/dev/null
-  > code=$(cat "$PWD/lint-exit" 2>/dev/null || echo 0)
-  > exit "$code"
+  > code=\$(cat "$PWD/lint-exit" 2>/dev/null || echo 0)
+  > exit "\$code"
   > SH
-  $ chmod +x fake-lock-bin/lintprobe
+  $ chmod +x _build/_private/default/.pkg/lintprobe.1.0/target/bin/lintprobe
   $ cat > lint-output <<'EOF'
   > File "lib/inventory.ml", line 5, characters 17-40:
   > Warning 12 [needless-list-length]: comparison through List.length is a needless emptiness test [needless-list-length]
@@ -101,42 +100,36 @@ fake lock bin.
   $ printf 1 > lint-exit
   $ printf clean > dune-state
   $ cat > lockbin.jsonl <<'JSONL'
-  > {"expect":{"body_contains":["lockbin prompt"]},"response":{"id":"k1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-k1","call_id":"call-k1","name":"shell","arguments":"{\"command\":\"for i in $(seq 100); do test -S _build/.rpc/dune && break; sleep 0.1; done; sleep 2\",\"description\":\"wait for the watch and the lint run\"}"}]}}
+  > {"expect":{"body_contains":["lockbin prompt"]},"response":{"id":"k1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-k1","call_id":"call-k1","name":"shell","arguments":"{\"command\":\"for i in $(seq 100); do test -S _build/.rpc/dune && break; sleep 0.1; done; for i in $(seq 200); do test -f fake-litany-argv && break; sleep 0.1; done; sleep 1\",\"description\":\"wait for the watch and the lint run's evidence\"}"}]}}
   > {"expect":{"body_contains":["1 finding (1 new)"]},"response":{"id":"k2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"lock linted"}]}]}}
   > JSONL
   $ start_fake_openai lockbin.jsonl capture-lockbin port-lockbin
   $ MENTAT_DUNE_WATCH=auto mentat run "lockbin prompt" --cwd "$PWD" --permission bypass --id lockbin-turn 2>/dev/null
   lock linted
   $ wait_fake_server
-  $ grep -c 'exec -- lintprobe check' fake-dune-exec-argv
-  1
   $ cat fake-litany-argv
   check
+  $ test -f fake-dune-exec-argv
+  [1]
 
-A linter that resolves nowhere is dune's own answer — Program not found —
-and the lane goes off for the session after that one run: a second green
-settle triggers nothing, no findings are ever stated, and the build lane is
-untouched.
+A linter that resolves nowhere skips its settle and the lane keeps
+waiting: no run, no findings, no death. When the binary appears
+mid-session — a lock universe freshly built — the next green settle runs
+it and states its findings.
 
-  $ rm -f fake-lock-bin/lintprobe fake-litany-argv fake-dune-exec-argv
+  $ rm -rf _build/_private fake-litany-argv fake-dune-exec-argv
   $ printf clean > dune-state
   $ cat > nolint.jsonl <<'JSONL'
-  > {"expect":{"body_contains":["nolint prompt"]},"response":{"id":"n1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-n1","call_id":"call-n1","name":"shell","arguments":"{\"command\":\"for i in $(seq 100); do test -S _build/.rpc/dune && break; sleep 0.1; done; sleep 2\",\"description\":\"wait for the watch and the doomed lint run\"}"}]}}
-  > {"expect":{"body_contains":["function_call_output","call-n1"]},"response":{"id":"n2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-n2","call_id":"call-n2","name":"shell","arguments":"{\"command\":\"printf failing > dune-state; sleep 1.5; printf clean > dune-state; sleep 2\",\"description\":\"force a second green settle\"}"}]}}
-  > {"expect":{"body_contains":["function_call_output","call-n2"]},"response":{"id":"n3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"no linter"}]}]}}
+  > {"expect":{"body_contains":["nolint prompt"]},"response":{"id":"n1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-n1","call_id":"call-n1","name":"shell","arguments":"{\"command\":\"for i in $(seq 100); do test -S _build/.rpc/dune && break; sleep 0.1; done; sleep 2\",\"description\":\"wait for the watch and the skipped settle\"}"}]}}
+  > {"expect":{"body_contains":["function_call_output","call-n1"]},"response":{"id":"n2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-n2","call_id":"call-n2","name":"shell","arguments":"{\"command\":\"mkdir -p _build/_private/default/.pkg/lintprobe.1.0/target/bin; printf '#!/bin/sh\\necho \\\"$@\\\" >> fake-litany-argv\\ncat lint-output\\nexit 1\\n' > _build/_private/default/.pkg/lintprobe.1.0/target/bin/lintprobe; chmod +x _build/_private/default/.pkg/lintprobe.1.0/target/bin/lintprobe; printf failing > dune-state; sleep 1.5; printf clean > dune-state; for i in $(seq 100); do test -f fake-litany-argv && break; sleep 0.1; done; sleep 1\",\"description\":\"build the linter into the lock universe and settle again\"}"}]}}
+  > {"expect":{"body_contains":["1 finding (1 new)"]},"response":{"id":"n3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"late linter"}]}]}}
   > JSONL
   $ start_fake_openai nolint.jsonl capture-nolint port-nolint
   $ MENTAT_DUNE_WATCH=auto mentat run "nolint prompt" --cwd "$PWD" --permission bypass --id nolint-turn 2>/dev/null
-  no linter
+  late linter
   $ wait_fake_server
 
-One doomed run, then silence: the not-found answer took the lane off, so
-the second green settle asked nothing.
+The first settle ran nothing; the appearance ran exactly once.
 
-  $ grep -c 'exec -- lintprobe check' fake-dune-exec-argv
+  $ grep -c check fake-litany-argv
   1
-  $ test -f fake-litany-argv
-  [1]
-  $ grep -cE 'findings? \(' capture-nolint/request-3.json
-  0
-  [1]

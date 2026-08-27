@@ -1436,7 +1436,8 @@ module Field = struct
           ~default:(builtin field [ "@check" ])
     | Dune_lint_command ->
         defaulted lint_command_codec ~shared:true
-          ~default:(builtin field [ "litany"; "check" ])
+          ~default:
+            (builtin field [ "litany"; "check"; "--no-build"; "--trust-build" ])
     | Workspace_tooling ->
         defaulted workspace_tooling_codec ~shared:true
           ~default:(builtin field "auto")
