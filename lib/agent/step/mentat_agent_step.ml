@@ -67,7 +67,9 @@ module Step = struct
       | Model of {
           claim : Mentat_session.Provider_request.Started.t;
           request : Mentat_llm.Request.t;
-          purpose : [ `Turn | `Compaction of Mentat_session.Compaction.Reason.t ];
+          purpose :
+            [ `Turn
+            | `Compaction of Mentat_session.Compaction.Reason.t * int ];
         }
       | Tool of {
           claim : Mentat_session.Tool_claim.Started.t;
@@ -972,14 +974,20 @@ let summary_cut env state =
    fallbacks keep [Request.make] the single error surface. *)
 let summary_request env session state contract =
   let view = Mentat_session.State.model_transcript state in
+  let cut = summary_cut env state in
   let tail_length =
     Mentat_llm.Transcript.length (Mentat_session.State.full_transcript state)
-    - summary_cut env state
+    - cut
   in
+  (* The view may carry the open pending-notices entry at its tail; it is
+     not-yet-history and the compaction claim's own freeze pins it after
+     [cut], so the head arithmetic excludes it — summarizing it would cover
+     an entry the reduced view goes on to retain. *)
+  let riding = Mentat_session.State.pending_entries_riding state in
   let head =
     let messages = Mentat_llm.Transcript.messages view in
-    let head_length = List.length messages - tail_length in
-    if tail_length = 0 || head_length <= 0 then view
+    let head_length = List.length messages - riding - tail_length in
+    if (tail_length = 0 && riding = 0) || head_length <= 0 then view
     else
       match Mentat_llm.Transcript.of_list (List.take head_length messages) with
       | Ok head -> head
@@ -994,9 +1002,11 @@ let summary_request env session state contract =
     | Ok transcript -> transcript
     | Error _ -> head
   in
-  Mentat_llm.Request.make
-    ~model:(Mentat_session.Contract.model contract)
-    ~prelude:summary_prelude ~cache_key:(cache_key session) transcript
+  Result.map
+    (fun request -> (request, cut))
+    (Mentat_llm.Request.make
+       ~model:(Mentat_session.Contract.model contract)
+       ~prelude:summary_prelude ~cache_key:(cache_key session) transcript)
 
 (* Nothing to summarize: the model view is empty, or a prior summary already
    covers the whole transcript and a fresh one would only summarize the
@@ -1021,8 +1031,9 @@ let compaction_request env session state contract =
       if context_tokens state < threshold || nothing_to_compact state then None
       else
         match summary_request env session state contract with
-        | Ok request ->
-            Some (request, Mentat_session.Compaction.Reason.Context_pressure)
+        | Ok (request, cut) ->
+            Some
+              (request, Mentat_session.Compaction.Reason.Context_pressure, cut)
         | Error _ -> None)
 
 (* Context overflow recovery.
@@ -1122,7 +1133,7 @@ let last_provider_failure_is_overflow session turn_id =
    time-varying the model must see — workspace notices, the whiff
    reminder — is an ordinary entry in the durable transcript, projected by
    {!Mentat_session.State} at its event position. *)
-let request_prelude env _session _turn_id contract =
+let request_prelude env contract =
   match Mentat_session.Contract.output_tool contract with
   | None -> env.Env.prelude
   | Some _ -> (
@@ -1144,7 +1155,7 @@ let model_boundary env session state turn_id turn =
       ~default:0
   in
   let limit = min (Mentat_session.Turn.max_steps turn) env.Env.max_steps in
-  let compaction_effect request reason =
+  let compaction_effect request reason cut =
     let claim =
       Mentat_session.Provider_request.Started.make ~turn:turn_id
         ~request_digest:(Mentat_llm.Request.digest request)
@@ -1152,8 +1163,8 @@ let model_boundary env session state turn_id turn =
     Act
       ( [ Mentat_session.Event.provider_requested claim ],
         Step.Perform
-          (Step.Effect.Model { claim; request; purpose = `Compaction reason })
-      )
+          (Step.Effect.Model
+             { claim; request; purpose = `Compaction (reason, cut) }) )
   in
   if count >= limit then
     let outcome = Mentat_session.Turn.Outcome.step_limit in
@@ -1168,17 +1179,17 @@ let model_boundary env session state turn_id turn =
     (* The turn's model request overflowed and the turn has not yet spent its one
        overflow compaction: compact ([Context_overflow]) before re-issuing. *)
     match summary_request env session state contract with
-    | Ok request ->
+    | Ok (request, cut) ->
         Ok
           (compaction_effect request
-             Mentat_session.Compaction.Reason.Context_overflow)
+             Mentat_session.Compaction.Reason.Context_overflow cut)
     | Error e ->
         (* The model view cannot become a summary request — the same terminal
            error the ordinary request boundary raises; recovery cannot loop. *)
         Error (Error.Request e)
   else
     match compaction_request env session state contract with
-    | Some (request, reason) -> Ok (compaction_effect request reason)
+    | Some (request, reason, cut) -> Ok (compaction_effect request reason cut)
     | None -> (
         match Mentat_session.Contract.output_tool contract with
         | Some output_tool
@@ -1206,7 +1217,7 @@ let model_boundary env session state turn_id turn =
             let request =
               Mentat_llm.Request.make
                 ~model:(Mentat_session.Contract.model contract)
-                ~prelude:(request_prelude env session turn_id contract)
+                ~prelude:(request_prelude env contract)
                 ~tools
                 ~options:(Mentat_session.Contract.options contract)
                 ~cache_key:(cache_key session)
@@ -1367,7 +1378,7 @@ let compact env contract ~id session =
         in
         match summary_request env session state contract with
         | Error e -> Error (Error.Request e)
-        | Ok request ->
+        | Ok (request, cut) ->
             let claim =
               Mentat_session.Provider_request.Started.make ~turn:id
                 ~request_digest:(Mentat_llm.Request.digest request)
@@ -1386,7 +1397,8 @@ let compact env contract ~id session =
                          request;
                          purpose =
                            `Compaction
-                             Mentat_session.Compaction.Reason.User_requested;
+                             ( Mentat_session.Compaction.Reason.User_requested,
+                               cut );
                        }))))
 
 (* Typed feed-backs. *)
@@ -1450,7 +1462,7 @@ let accept_response env id response session =
           [ settle; Mentat_session.Event.turn_finished ~turn:turn_id outcome ]
           (Step.Settled { turn = turn_id; outcome })
 
-let install_summary env id ~summary ~reason ?usage session =
+let install_summary env id ~summary ~reason ~summarized_upto ?usage session =
   let* turn = active_turn session in
   let turn_id = Mentat_session.Turn.id turn in
   let state = Mentat_session.state session in
@@ -1472,8 +1484,12 @@ let install_summary env id ~summary ~reason ?usage session =
       (* The summary re-enters the next request as the model-view prefix. With
          a verbatim tail the live conversation follows it directly; with none,
          the resume notice trails the summary so the reduced view ends on a
-         user message that prompts continuation rather than acknowledgement. *)
-      let summarized_upto = summary_cut env state in
+         user message that prompts continuation rather than acknowledgement.
+         The cut is the one decided when the summary request was built — the
+         claim's own freeze may have grown [full] since (the pending batch
+         pins after the cut and survives in the tail), so recomputing here
+         could summarize away what the summarizer never saw. *)
+      ignore env;
       let tail_retained =
         summarized_upto
         < Mentat_llm.Transcript.length

@@ -365,6 +365,12 @@ type t = {
      call and its result) and never reset: an observation a dying turn
      recorded is pending for the next request by construction. *)
   pending_notices : Notice.t list;
+  (* Whether the active schema turn has whiffed a structured delivery since
+     the last flush — the reminder pends exactly like a notice: shown by the
+     next request's tail, frozen at its [Provider_requested], and cleared
+     with the turn — a turn that dies unstated leaves no dangling
+     imperative in history. *)
+  pending_reminder : bool;
   suspension : suspension option;
   provider_ids : Provider_id_set.t;
   tool_claim_order_rev : Tool_claim.Id.t list;
@@ -397,6 +403,7 @@ let empty =
     model_context_start = 0;
     provider_ambiguous = false;
     pending_notices = [];
+    pending_reminder = false;
     suspension = None;
     provider_ids = Provider_id_set.empty;
     tool_claim_order_rev = [];
@@ -439,50 +446,65 @@ let can_undo_anchor id t =
   | None -> false
 
 (* The model-view rendering of workspace observations: one ordinary
-   user-role entry per pending batch, a stable header then each notice as
-   the same [- [severity] source: title] line (plus body) the human
-   transcript renders. Session-owned vocabulary, not a prompt: the entry is
-   a projection of the durable {!Event.Workspace_notice} facts. *)
+   user-role entry per flushed batch, a stable header then each notice's
+   facts as [- [severity] source: title] (plus body). Session-owned
+   vocabulary, not a prompt: the entry is a projection of the durable
+   {!Event.Workspace_notice} facts, and changing these bytes changes what
+   replay claims the model was shown. *)
 let rendered_notice notice =
   let severity =
     Format.asprintf "%a" Notice.Severity.pp (Notice.severity notice)
   in
   let body =
-    match Notice.body notice with Some body -> "
-" ^ body | None -> ""
+    match Notice.body notice with Some body -> "\n" ^ body | None -> ""
   in
   Printf.sprintf "- [%s] %s: %s%s" severity (Notice.source notice)
     (Notice.title notice) body
 
 let notices_entry notices =
   Mentat_llm.Message.user_text
-    ("Workspace notices:
-"
-    ^ String.concat "
-" (List.map rendered_notice notices))
+    ("Workspace notices:\n"
+    ^ String.concat "\n" (List.map rendered_notice notices))
 
-(* Fold the pending batch into the durable transcript at a legal seam. The
-   append can only be refused while tool calls await results, and flushes
-   run only at request-ready seams, so a refusal is unreachable; leaving
-   the batch pending on one keeps the projection total either way. *)
-let flush_pending_notices t =
-  match t.pending_notices with
-  | [] -> t
-  | notices when Transcript.is_ready t.full -> (
-      match Transcript.add (notices_entry notices) t.full with
-      | Ok full -> { t with full; pending_notices = [] }
-      | Error _ -> t)
-  | _ -> t
-
-(* The structured-output reminder, appended as an ordinary entry directly
-   after the response that whiffed a schema delivery — the same durable-
-   projection law as notices, derived from the settled event rather than
-   recorded as one. *)
+(* Fold the pending batch — the notices entry, then the whiff reminder —
+   into the durable transcript. Two seams, and only two: an idle
+   conversational append (so a batch pins before younger input, keeping
+   event order) and [Provider_requested] (freezing exactly the bytes the
+   request's tail ride just showed). Tool-result application deliberately
+   does not flush — the tail ride carries the batch to the claim that pins
+   it, and an eager pin under an open provider claim would land the entry
+   before a response whose request never showed it. The appends can only
+   be refused while tool calls await results, and flushes run only at
+   request-ready seams, so a refusal is unreachable; leaving the batch
+   pending on one keeps the projection total either way. *)
+(* The structured-output reminder, pending like a notice after a schema
+   whiff. Session-owned projection vocabulary, like the notices header:
+   changing these bytes changes what replay claims the model was shown. *)
 let structured_output_reminder =
   "You have not delivered the final answer yet. Call the \
    `structured_output` tool now with a value that matches its input \
    schema; that is the only way to complete this run."
 
+let pending_entries t =
+  (match t.pending_notices with
+  | [] -> []
+  | notices -> [ notices_entry notices ])
+  @
+  if t.pending_reminder then
+    [ Mentat_llm.Message.user_text structured_output_reminder ]
+  else []
+
+let flush_pending_notices t =
+  match pending_entries t with
+  | [] -> t
+  | entries when Transcript.is_ready t.full ->
+      List.fold_left
+        (fun t entry ->
+          match Transcript.add entry t.full with
+          | Ok full -> { t with full; pending_notices = []; pending_reminder = false }
+          | Error _ -> t)
+        t entries
+  | _ -> t
 
 let model_messages t =
   let msgs =
@@ -509,12 +531,18 @@ let model_messages t =
   in
   (* The still-open pending batch rides the tail so the request built before
      its freezing [Provider_requested] shows it; the flush then pins the same
-     bytes at the same position. *)
-  match t.pending_notices with
+     bytes at the same positions. *)
+  match pending_entries t with
   | [] -> msgs
-  | pending when Transcript.is_ready t.full ->
-      msgs @ [ notices_entry pending ]
+  | entries when Transcript.is_ready t.full -> msgs @ entries
   | _ -> msgs
+
+(* Whether the model view currently carries the open pending batch at its
+   tail — the one way the view is longer than the durable transcript. The
+   compaction arithmetic must subtract it: the batch is not-yet-history,
+   and the compaction claim's own freeze pins it after any cut. *)
+let pending_entries_riding t =
+  if Transcript.is_ready t.full then List.length (pending_entries t) else 0
 
 let model_transcript t =
   match Transcript.of_list (model_messages t) with
@@ -554,8 +582,6 @@ let active_turn_id t = t.active_turn
 
 let active_turn t =
   Option.map (fun id -> (Turn_map.find id t.turns).turn) t.active_turn
-
-
 
 let turns t =
   List.filter_map
@@ -843,6 +869,11 @@ let apply_turn_finished ~turn ~outcome t =
                     active_turn = None;
                     interrupt = false;
                     provider_ambiguous = false;
+                    (* A reminder is the dying turn's own imperative — it
+                       must not survive into a turn whose contract may not
+                       even declare the tool; pending notices do survive:
+                       observations belong to the workspace, not the turn. *)
+                    pending_reminder = false;
                     approved_plan = t.active_plan_approval;
                     queue;
                   }))
@@ -876,7 +907,7 @@ let apply_message_appended message t =
             when interrupt_forced
                  && String.equal (Decision.Requested.call_id d) call_id ->
               Result.map
-                (fun t -> flush_pending_notices { t with suspension = None })
+                (fun t -> { t with suspension = None })
                 (add_transcript message t)
           | Some (Tool s)
             when String.equal
@@ -887,7 +918,24 @@ let apply_message_appended message t =
             when String.equal (Decision.Requested.call_id d) call_id ->
               Error (Error.Result_bypass call_id)
           | Some (Provider _) | Some (Tool _) | Some (Decision _) | None ->
-              Result.map flush_pending_notices (add_transcript message t)))
+              (* An errored result of the schema turn's own output tool is
+                 the other whiff class: the payload did not conform. The
+                 reminder pends the same way. *)
+              let t =
+                match t.active_turn with
+                | Some active -> (
+                    let record = Turn_map.find active t.turns in
+                    match Contract.output_tool (Turn.contract record.turn) with
+                    | Some output_tool
+                      when String.equal
+                             (Mentat_llm.Tool.Result.name result)
+                             (Mentat_llm.Tool.name output_tool)
+                           && Mentat_llm.Tool.Result.is_error result ->
+                        { t with pending_reminder = true }
+                    | Some _ | None -> t)
+                | None -> t
+              in
+              add_transcript message t))
   (* [Event.message_appended] rejects assistant messages in the constructor and
      the decoder, so this never arises. *)
   | Mentat_llm.Message.Assistant _ -> assert false
@@ -946,25 +994,20 @@ let apply_provider_settled settled t =
             | Error error -> transcript_error error
             | Ok full ->
                 (* A schema turn's response without a tool call whiffed the
-                   delivery: the reminder follows it as an ordinary entry,
-                   at its event position, once per whiff. *)
-                let full =
+                   delivery: the reminder pends — shown by the next
+                   request's tail, frozen at its claim, gone with a turn
+                   that dies before one. *)
+                let pending_reminder =
+                  t.pending_reminder
+                  ||
                   match
                     Contract.output_tool (Turn.contract record_turn.turn)
                   with
-                  | Some _
-                    when not (Mentat_llm.Response.has_tool_calls response)
-                    -> (
-                      match
-                        Transcript.add
-                          (Mentat_llm.Message.user_text
-                             structured_output_reminder)
-                          full
-                      with
-                      | Ok full -> full
-                      | Error _ -> full)
-                  | Some _ | None -> full
+                  | Some _ ->
+                      not (Mentat_llm.Response.has_tool_calls response)
+                  | None -> false
                 in
+                let t = { t with pending_reminder } in
                 let text =
                   String.trim (Mentat_llm.Response.text ~sep:"\n" response)
                 in
@@ -1538,8 +1581,10 @@ let apply_queue_updated update t =
       | None -> Ok { t with queue = entries })
   | Queue.Update.Cleared -> Ok { t with queue = [] }
 
-(* A workspace observation is turn-scoped: it is admitted only while a turn is
-   active and accrues to that turn's notices, cleared at the next turn start. *)
+(* A workspace observation is admitted only while a turn is active — the
+   drain runs under one — but what it records is the workspace's, not the
+   turn's: it pends until a request states it, across turn boundaries if
+   need be. *)
 let apply_workspace_notice notice t =
   match require_active_turn t with
   | Error _ as e -> e

@@ -86,16 +86,9 @@ type t =
       update : Model_download.t;
     }
   | Compaction of { turn : Mentat_session.Turn.Id.t; update : Compaction.t }
-  | Notice of {
-      turn : Mentat_session.Turn.Id.t;
-      notice : Mentat_workspace.Notice.t;
-    }
 
 let turn = function
-  | Model { turn; _ }
-  | Model_download { turn; _ }
-  | Compaction { turn; _ }
-  | Notice { turn; _ } ->
+  | Model { turn; _ } | Model_download { turn; _ } | Compaction { turn; _ } ->
       turn
 
 let equal a b =
@@ -108,9 +101,7 @@ let equal a b =
   | Compaction { turn = ta; update = ua }, Compaction { turn = tb; update = ub }
     ->
       Mentat_session.Turn.Id.equal ta tb && Compaction.equal ua ub
-  | Notice { turn = ta; notice = na }, Notice { turn = tb; notice = nb } ->
-      Mentat_session.Turn.Id.equal ta tb && Mentat_workspace.Notice.equal na nb
-  | (Model _ | Model_download _ | Compaction _ | Notice _), _ -> false
+  | (Model _ | Model_download _ | Compaction _), _ -> false
 
 let pp ppf t =
   let name =
@@ -130,7 +121,6 @@ let pp ppf t =
     | Compaction { update = Compaction.Summarizing; _ } ->
         "compaction.summarizing"
     | Compaction { update = Compaction.Failed _; _ } -> "compaction.failed"
-    | Notice _ -> "workspace.notice"
   in
   Format.fprintf ppf "%s(%a)" name Mentat_session.Turn.Id.pp (turn t)
 
@@ -261,16 +251,6 @@ let jsont =
     |> Jsont.Object.error_unknown |> Jsont.Object.finish
     |> Jsont.Object.Case.map "compaction.failed" ~dec:Fun.id
   in
-  let notice_case =
-    Jsont.Object.map ~kind:"workspace-notice progress" (fun turn notice ->
-        Notice { turn; notice })
-    |> turn_mem
-    |> Jsont.Object.mem "notice" Mentat_workspace.Notice.jsont ~enc:(function
-      | Notice { notice; _ } -> notice
-      | _ -> assert false)
-    |> Jsont.Object.error_unknown |> Jsont.Object.finish
-    |> Jsont.Object.Case.map "workspace.notice" ~dec:Fun.id
-  in
   let cases =
     List.map Jsont.Object.Case.make
       [
@@ -283,7 +263,6 @@ let jsont =
         compaction_started_case;
         summarizing_case;
         failed_case;
-        notice_case;
       ]
   in
   let enc_case = function
@@ -304,7 +283,6 @@ let jsont =
         Jsont.Object.Case.value summarizing_case p
     | Compaction { update = Compaction.Failed _; _ } as p ->
         Jsont.Object.Case.value failed_case p
-    | Notice _ as p -> Jsont.Object.Case.value notice_case p
   in
   Jsont.Object.map ~kind:"progress" (fun v p ->
       Wire.check v;

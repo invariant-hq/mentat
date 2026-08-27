@@ -385,14 +385,21 @@ request shows them}. A notice is one journal fact (`Workspace_notice`)
 with two projections: the human transcript's ⊙ row, and an {e ordinary
 user-role conversation entry} in the model view — `Workspace notices:`
 then every pending notice as `- [severity] source: title` plus its body,
-one entry per drain batch, placed in event order at the next request-ready
-seam (a user message cannot sit between a tool call and its result, so a
-notice recorded mid-settlement waits the few events until results
-complete). Entries append at the tail of history and are frozen once any
-later message lands, so the request prefix — the system prompt above all —
-never moves and the provider cache survives every notice. Replay
-reconstructs the same bytes at the same positions: the model can re-read
-what it was told, whenever it was told it.
+one entry per flushed batch (drains between seams merge), pinned at the
+next request-ready seam: before younger conversational input when one
+arrives first, else at the request whose tail ride just showed it (a user
+message cannot sit between a tool call and its result, so a batch drained
+mid-settlement rides until the claim that pins it — a dying turn's batch
+pins at the next turn's request, after the input that started it).
+A compaction claim freezes a riding batch too — pinned after its own cut,
+retained in the reduced view, shown by the next turn request; only two
+summaries before any turn request (degenerate thresholds, back-to-back
+manual compacts) can cover an entry unshown, accepted as the corner it is.
+Entries append at the tail of history and are frozen once shown, so the
+request prefix — the system prompt above all — never moves and the
+provider cache survives every notice. Replay reconstructs the same bytes
+at the same positions: the model can re-read what it was told, whenever
+it was told it.
 
 This law replaced a request-scoped {e prelude} injection that carried the
 active turn's notices before the transcript on every request — and, on
@@ -402,8 +409,10 @@ been shown (it quoted a notice correctly, then recanted as
 "hallucinated" — faithful to a falsified history), and every notice change
 mutated the conversation head, invalidating the whole prefix cache. The
 same law covers the structured-output nudge — the schema-delivery reminder
-escalated after a whiff — which rode the same prelude and mutated the head
-mid-turn; it too is an ordinary entry now. The driver's carried
+after a whiff — which rode the same prelude and mutated the head mid-turn;
+it too pends as an ordinary entry now, shown by the turn's next request and
+cleared with a turn that dies before one: no dangling imperative survives a
+failed schema turn. The driver's carried
 "unstated notices" memory and its duplicate re-record against the next
 turn delete: a pending entry is replay-derived state, and a turn that dies
 before a request leaves it pending for the next one by construction.
@@ -416,7 +425,7 @@ versioned (pre-release).
 `path:l:c-l:c: head`, the path workspace-relative (dune reports absolute
 paths; columns are ocamlc's 0-based end-exclusive offsets), then
 `n unchanged since the last notice`; at most 20 findings then `… and k
-more` — ≈ 0.5 KTok, paid once per batch, not per request. Sources `dune`
+more` — ≈ 0.5 KTok, paid once per flushed batch, not per request. Sources `dune`
 and `lint`; keys `dune.build`, `dune.lint`, `dune.watch` (coalescing per
 `notice.mli:64-79`).
 

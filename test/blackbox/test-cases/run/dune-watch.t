@@ -40,9 +40,10 @@ The first settlement states the failure the watch held at attach.
   1
 
 A different error at the same count is a change — what appeared and what
-resolved — never a silent count match. The turn's earlier observation is
-restated too: a request carries every notice its turn recorded, in order,
-so the model replays exactly what it saw.
+resolved — never a silent count match. The turn's earlier observation still
+reads in this request too — frozen history now, not a restatement: the
+entry keeps its position and bytes, so the model replays exactly what it
+saw.
 
   $ grep -c 'Build failing (1 error: 1 new, 1 resolved)' capture-watch/request-3.json
   1

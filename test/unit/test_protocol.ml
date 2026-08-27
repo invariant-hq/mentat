@@ -1560,15 +1560,6 @@ let all_progress =
                 message = "summary model gone";
               };
         } );
-    ( "workspace.notice",
-      Protocol.Progress.Notice
-        {
-          turn = fix_turn_id;
-          notice =
-            Workspace.Notice.make ~source:"dune"
-              ~severity:Workspace.Notice.Severity.Warning ~title:"Build broken"
-              ~body:"3 errors" ~key:"dune.health" ();
-        } );
   ]
 
 let fix_session_id = session_id "session-c"

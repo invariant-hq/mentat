@@ -114,20 +114,11 @@ type t =
     }
       (** Transparent preparation of [turn]'s model artifact before its call. *)
   | Compaction of { turn : Mentat_session.Turn.Id.t; update : Compaction.t }
-  | Notice of {
-      turn : Mentat_session.Turn.Id.t;
-          (** The turn whose request prelude drained the notice — carried so
-              {!turn} stays total. *)
-      notice : Mentat_workspace.Notice.t;
-    }
-      (** A workspace data notice drained transactionally at [turn]'s
-          preparation. *)
 
 val turn : t -> Mentat_session.Turn.Id.t
 (** [turn t] is the turn [t] reports on — the routing key a frontend uses to
-    attach a pulse to that turn's rendering and to retire pulses when the turn's
-    superseding facts land. Total across every arm: a notice pulse carries the
-    turn whose request prelude drained it. *)
+    attach a pulse to that turn's rendering and to retire pulses when the
+    turn's superseding facts land. *)
 
 val equal : t -> t -> bool
 (** [equal a b] is [true] iff [a] and [b] are the same pulse. Composed from the
