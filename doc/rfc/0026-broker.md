@@ -194,6 +194,17 @@ through its own process's broker; a serve-session process therefore
 supervises its session's delegation children as processes, at every
 depth. mentatd holds one broker for its roots.
 
+**Observation.** The supervisor's read-only sibling: `Broker.watch`
+observes a session *without* owning it — the fence, its owner label,
+and the journal head, until the head is terminal — the monitor to
+`supervise`'s link, in OTP terms (exact signature at contact). It
+unifies three hand-rolled copies of the same probe loop: the broker's
+own internal foreign watch, charter reconcile's pending-run probes,
+and the dashboard's fence probes. `Broker.children` is the matching
+introspection query — the supervised set as (session, pid, state).
+Both are built at the rung reconcile consumes them (R2–R3), not
+before.
+
 **The engine depends on the broker directly** (maintainer-ruled,
 2026-08-27): `lib/agent` links `mentat_broker` and calls
 `Broker.send`/`Broker.supervise` at its delegation sites. The
@@ -409,6 +420,12 @@ entry's type.
   target's fence, in both arms — which is what makes it race-safe. A
   full mailbox is a loud send failure. Entry size rides the existing
   byte caps.
+- **Media** (landed adjudication, R1): `send` refuses inline and
+  referenced media before either arm — inline bytes would enter the
+  target's journal unexternalized, and a content reference names the
+  sender's namespace, not the target's. The refusal is deliberately
+  uniform across arms: deliverability must not depend on whether the
+  target happens to be served. `Uri` media passes.
 
 ### Failure semantics
 
@@ -606,7 +623,11 @@ intensity bound.
 nor a later one.* A mid-turn "check mail" tool; an
 `agent_message`-triggered charter answering its own PR comments; a
 mail view in the TUI side pane; remote delivery over the fleet relay
-riding the same entry shape.
+riding the same entry shape. A delayed send (`send_after`, "wake me
+at T") is RFC 0024's `schedule` and `self_schedule` trigger arms
+wearing mail's clothes — the durable record could ride the send, but
+the firing belongs to the scheduler's beat; the anti-ratchet rule
+applies.
 
 ## The ledger
 
@@ -646,9 +667,14 @@ this RFC implies nothing about priority or scheduling.
   admission dedups everything after; bounded, once per old edge.
 - **R1 — the send, first caller.** Parent-to-child delivery over
   `send` under today's topology — the transitional local arm carries
-  in-process children; the ladder and fallbacks are deleted. Holds:
-  parent transcripts. Changes, named: the wire corpus extends for
-  `Queue_next`'s optional origin member; child journals
+  in-process children; the ladder and fallbacks are deleted. The
+  accept gate's base table (the owner, the recorded parent, the
+  target's own recorded children; `Trigger` refused) lands at this
+  rung in both admissions: one judgment in the session library, run
+  by the target's driver on the wire arm and by the sender's broker
+  on the append arm — the charter arm arrives with R3, the grant arm
+  with R5. Holds: parent transcripts. Changes, named: the wire corpus
+  extends for `Queue_next`'s optional origin member; child journals
   gain the origin member; messaging crams lose the fallback arms.
 - **R-mail — the mandate ships.** The `send` tool verb with
   parent/child handles, `mentat session send`, and the serve-mount
@@ -657,14 +683,20 @@ this RFC implies nothing about priority or scheduling.
   replies and human-to-session mail — the messaging mandate's core
   (sibling mail needs granted contacts and arrives with R5) — the
   messaging mandate — before any process-model risk is taken. The
-  bridge is transitional and dies at R4.
+  bridge is transitional and dies at R4. R-mail also owns the
+  per-(target, origin) backlog cap — the first rung where non-kin
+  mail can accumulate — and the sender-name prompt framing from the
+  typed origin, which has no reader before foreign senders exist.
 - **R2 — one boot.** Shape-reading serve-session with the
   attach-at-boot rule; charter and root sessions servable. Holds: the
   delegated arm byte-for-byte.
 - **R3 — charter runs as sessions.** Fire = create + send + supervise;
   the one-shot deleted; runs attachable; trigger provenance through
-  queue admission. Holds: receipts, the fold, run ids. Changes,
-  named: the charter crams that pinned the one-shot.
+  queue admission. R3 also builds `Broker.watch` and
+  `Broker.children` — the observation seam reconcile and the dashboard
+  consume, retiring their hand-rolled fence probes. Holds: receipts,
+  the fold, run ids. Changes, named: the charter crams that pinned the
+  one-shot.
 - **R4 — recursion and eviction, gated.** Before this rung:
   measure activation spawn-to-socket and spawn-to-first-token, and
   run the process-heavy suites repeatedly; the RFC's gate is that the
