@@ -9,6 +9,20 @@ module Ports = Ports
 module Execution = Execution
 module Error = Error
 
+(* One delivery lane per delegation edge: the in-order queue of recorded
+   parent-to-child messages one fiber drains, so two messages to one child
+   can never race each other across the fence or the wire — per-sender FIFO
+   is a structure, not a hope. A registered lane always has a live drain
+   fiber; the fiber removes the lane in the same non-suspending step that
+   finds the queue empty, so a later message finds no lane and starts a
+   fresh one. *)
+type lane = {
+  lane_key : string;
+  parent : Mentat_session.Id.t;
+  edge : Mentat_session.Delegation.t;
+  pending : Mentat_agent_step.Step.Child_message.t Queue.t;
+}
+
 type t = {
   sw : Eio.Switch.t;
   store : (module Ports.STORE);
@@ -24,6 +38,7 @@ type t = {
   broker : Mentat_broker.t;
   scheduler : Scheduler.t;
   drivers : (string, Driver.t) Hashtbl.t;
+  lanes : (string, lane) Hashtbl.t;
   hubs : (string, Feed.Hub.t) Hashtbl.t;
       (* One feed hub per observed session: observation subscribes to it
          fence-free and the driver publishes to it, so a feed opened before this
@@ -59,6 +74,7 @@ let create ~sw ~store ~provider ~config ~now ?(max_children = 4)
     broker;
     scheduler = Scheduler.create ~capacity:max_children;
     drivers = Hashtbl.create 8;
+    lanes = Hashtbl.create 8;
     hubs = Hashtbl.create 8;
     shutting_down = false;
   }
@@ -133,23 +149,25 @@ let child_result session turn outcome =
 (* The one settled-child judgment: the journal's settled head projected into
    the parent's result. Recovery's rebuild and the broker's integration both
    consume it, so "what did the child conclude" has a single home; [None]
-   means work is (or must be presumed) outstanding. Unfinished work is head
-   OR queue: a settled head with unconsumed mail is not finished — the mail
-   buys the child another turn, so the delegation must not settle against
-   the pre-mail result. *)
+   means work is (or must be presumed) outstanding, gated on the state's own
+   {!Mentat_session.State.finished} — a settled head with unconsumed mail is
+   not finished, the mail buys the child another turn, so the delegation must
+   not settle against the pre-mail result. *)
 let settled_result child_session =
   let state = Mentat_session.state child_session in
-  match Mentat_session.State.settled_head state with
-  | None -> None
-  | Some _ when Mentat_session.State.pending_queue state <> [] -> None
-  | Some (last, outcome) ->
-      let turn = Mentat_session.Turn.id last in
-      let outcome =
-        Option.value outcome
-          ~default:
-            (Mentat_session.Turn.Outcome.failed ~message:"child outcome unknown")
-      in
-      Some (child_result child_session turn outcome)
+  if not (Mentat_session.State.finished state) then None
+  else
+    match Mentat_session.State.settled_head state with
+    | None -> None
+    | Some (last, outcome) ->
+        let turn = Mentat_session.Turn.id last in
+        let outcome =
+          Option.value outcome
+            ~default:
+              (Mentat_session.Turn.Outcome.failed
+                 ~message:"child outcome unknown")
+        in
+        Some (child_result child_session turn outcome)
 
 (* The one settlement tail every wake shares: buffer the result, return the
    capacity permit, and nudge the parent's parked wait. The parent driver may
@@ -191,262 +209,268 @@ let derived_message_id (message : Mentat_agent_step.Step.Child_message.t) =
       message.Mentat_agent_step.Step.Child_message.call_id;
     ]
 
-(* Attachment. *)
+(* Attachment. A shutting-down runtime attaches nothing — the guard lives
+   here, not only at the protocol boundary, so the internal wakers are
+   covered too: a delivery fiber that outlives [shutdown] must not register
+   a driver whose controller nothing will ever stop, pinning the runtime
+   switch forever. *)
 
 let rec attach t id =
-  match find_driver t id with
-  | Some driver -> Ok driver
-  | None -> (
-      let module S = (val t.store : Ports.STORE) in
-      (* Resolves the delegation depth and this child's own role. The role is
-         read from the immediate edge (the one whose child is [child] at this
-         level); the recursive parent role is not this child's and is
-         discarded. A root session has no lineage and no role. *)
-      let rec resolve_lineage ~seen ~child session =
-        match
-          Mentat_session.Metadata.delegated_from
-            (Mentat_session.metadata session)
-        with
-        | None -> Ok (0, None)
-        | Some lineage -> (
-            let parent =
-              Mentat_session.Metadata.Delegated_from.parent lineage
-            in
-            let delegation =
-              Mentat_session.Metadata.Delegated_from.delegation lineage
-            in
-            if List.exists (Mentat_session.Id.equal parent) seen then
-              Error (Error.Delegation (Error.Delegation.Cycle parent))
-            else
-              match S.view parent with
-              | Error Ports.Store_error.Not_found ->
-                  Error
-                    (Error.Delegation (Error.Delegation.Parent_not_found parent))
-              | Error e -> Error (Error.Store e)
-              | Ok loaded -> (
-                  let parent_session = S.session_of loaded in
-                  let edge =
-                    List.find_opt
-                      (fun edge ->
-                        Mentat_session.Delegation.Id.equal
-                          (Mentat_session.Delegation.id edge)
-                          delegation)
-                      (Mentat_session.State.delegations
-                         (Mentat_session.state parent_session))
-                  in
-                  match edge with
-                  | None ->
-                      Error
-                        (Error.Delegation
-                           (Error.Delegation.Edge_not_found
-                              { parent; delegation }))
-                  | Some edge -> (
-                      let found = Mentat_session.Delegation.child edge in
-                      if not (Mentat_session.Id.equal found child) then
+  if t.shutting_down then Error Error.Shutting_down
+  else
+    match find_driver t id with
+    | Some driver -> Ok driver
+    | None -> (
+        let module S = (val t.store : Ports.STORE) in
+        (* Resolves the delegation depth and this child's own role. The role is
+           read from the immediate edge (the one whose child is [child] at this
+           level); the recursive parent role is not this child's and is
+           discarded. A root session has no lineage and no role. *)
+        let rec resolve_lineage ~seen ~child session =
+          match
+            Mentat_session.Metadata.delegated_from
+              (Mentat_session.metadata session)
+          with
+          | None -> Ok (0, None)
+          | Some lineage -> (
+              let parent =
+                Mentat_session.Metadata.Delegated_from.parent lineage
+              in
+              let delegation =
+                Mentat_session.Metadata.Delegated_from.delegation lineage
+              in
+              if List.exists (Mentat_session.Id.equal parent) seen then
+                Error (Error.Delegation (Error.Delegation.Cycle parent))
+              else
+                match S.view parent with
+                | Error Ports.Store_error.Not_found ->
+                    Error
+                      (Error.Delegation (Error.Delegation.Parent_not_found parent))
+                | Error e -> Error (Error.Store e)
+                | Ok loaded -> (
+                    let parent_session = S.session_of loaded in
+                    let edge =
+                      List.find_opt
+                        (fun edge ->
+                          Mentat_session.Delegation.Id.equal
+                            (Mentat_session.Delegation.id edge)
+                            delegation)
+                        (Mentat_session.State.delegations
+                           (Mentat_session.state parent_session))
+                    in
+                    match edge with
+                    | None ->
                         Error
                           (Error.Delegation
-                             (Error.Delegation.Child_mismatch
-                                { delegation; expected = child; found }))
-                      else
-                        match
-                          resolve_lineage ~seen:(parent :: seen) ~child:parent
-                            parent_session
-                        with
-                        | Error _ as error -> error
-                        | Ok (parent_depth, _parent_role) ->
-                            Ok
-                              ( parent_depth + 1,
-                                Mentat_session.Delegation.role edge ))))
-      in
-      match S.try_acquire id with
-      | `Held owner -> Error (Error.Busy { owner })
-      | `Io d -> Error (Error.Store (Ports.Store_error.Io d))
-      | `Acquired guard -> (
-          let release_and e =
-            S.release guard;
-            Error e
-          in
-          match S.load guard with
-          | Error e -> release_and (Error.Store e)
-          | Ok loaded -> (
-              match S.mutation_events loaded with
-              | Error e -> release_and (Error.Store e)
-              | Ok mutation_events -> (
-                  match Mentat_mutation.State.of_events mutation_events with
-                  | Error e ->
-                      release_and
-                        (Error.Internal
-                           (Mentat_diagnostic.of_text
-                              (Mentat_mutation.State.Error.message e)))
-                  | Ok mutation -> (
-                      let session = S.session_of loaded in
-                      match resolve_lineage ~seen:[ id ] ~child:id session with
-                      | Error e -> release_and e
-                      | Ok (depth, role) ->
-                          (* A child drives through [delegated_execution]; its
-                             immutable role is closed in here so the driver's
-                             generic execution signature stays role-free and the
-                             child's prelude re-resolves the same role from the
-                             durable edge on every attach. Both factories share
-                             the [~background] contract: the delegated factory
-                             opens a per-child shell registry over the driver's
-                             nested switch (for a generic delegate's write/shell
-                             parity) exactly as the root factory does, so its
-                             background-process view is live rather than forced
-                             empty. *)
-                          let execution_for_mode =
-                            if Int.equal depth 0 then t.execution_for_mode
-                            else fun ~background:session_sw ->
-                              t.delegated_execution ~role ~background:session_sw
-                          in
-                          (* Rebuild reservations and settled buffers from child
-                             journals, and re-drive undelivered recorded
-                             messages, BEFORE this driver drives. *)
-                          rebuild_children t ~parent:id session;
-                          redrive_messages t session;
-                          let doc = ref loaded in
-                          let io =
-                            {
-                              Driver.session_id = id;
-                              commit =
-                                (fun events ->
-                                  match S.commit guard !doc events with
-                                  | Error e -> Error e
-                                  | Ok loaded ->
-                                      doc := loaded;
-                                      Ok (S.session_of loaded));
-                              commit_metadata =
-                                (fun session ->
-                                  match
-                                    S.commit_metadata guard !doc session
-                                  with
-                                  | Error e -> Error e
-                                  | Ok loaded ->
-                                      (* Adopt the new revision so the next
-                                         journal commit CASes against it. *)
-                                      doc := loaded;
-                                      Ok (S.session_of loaded));
-                              append_edit =
-                                (fun ~entries event ->
-                                  S.append_edit guard !doc ~entries event);
-                              append_mutation =
-                                (fun events ->
-                                  S.append_mutation guard !doc events);
-                              put_attachment =
-                                (fun bytes -> S.put_attachment id bytes);
-                              attachment =
-                                (fun reference -> S.attachment id reference);
-                              fork =
-                                (fun ~events session ->
-                                  Result.map
-                                    (fun _loaded -> ())
-                                    (S.fork ~from:id ~events session));
-                              revert =
-                                (fun ~scope ->
-                                  match S.revert guard !doc ~scope with
-                                  | Error e -> Error e
-                                  | Ok outcome -> (
-                                      (* Re-read the ledger the revert just
-                                         appended to, so the controller adopts a
-                                         current mutation mirror. *)
-                                      match S.mutation_events !doc with
-                                      | Error e -> Error e
-                                      | Ok events -> (
-                                          match
-                                            Mentat_mutation.State.of_events
-                                              events
-                                          with
-                                          | Ok mstate -> Ok (outcome, mstate)
-                                          | Error se ->
-                                              Error
-                                                (Ports.Store_error.Corrupt
-                                                   (Mentat_diagnostic.of_text
-                                                      (Mentat_mutation.State
-                                                       .Error
-                                                       .message se))))));
-                              undo_revert =
-                                (fun selection ->
-                                  match
-                                    S.revert_selection guard !doc ~selection
-                                  with
-                                  | Error e -> Error e
-                                  | Ok outcome -> (
-                                      match S.mutation_events !doc with
-                                      | Error e -> Error e
-                                      | Ok events -> (
-                                          match
-                                            Mentat_mutation.State.of_events
-                                              events
-                                          with
-                                          | Ok mstate -> Ok (outcome, mstate)
-                                          | Error se ->
-                                              Error
-                                                (Ports.Store_error.Corrupt
-                                                   (Mentat_diagnostic.of_text
-                                                      (Mentat_mutation.State
-                                                       .Error
-                                                       .message se))))));
-                              truncate =
-                                (fun ~keep session ->
-                                  match S.truncate guard !doc ~keep session with
-                                  | Error e -> Error e
-                                  | Ok (loaded, mstate) ->
-                                      doc := loaded;
-                                      Ok (S.session_of loaded, mstate));
-                              export = (fun () -> S.export guard);
-                              release = (fun () -> S.release guard);
-                              (* Resolve [`Ref] media back to [`Base64] strictly
-                                 after the request is digested and claimed, so
-                                 the adapters never see an unresolved reference
-                                 and the claim's digest stays over the [`Ref]
-                                 form. *)
-                              provider_call =
-                                (fun request
-                                  ~on_event
-                                  ~on_download
-                                  ~cancelled
-                                ->
-                                  match
-                                    Media.resolve_request
-                                      ~attachment:(fun reference ->
-                                        S.attachment id reference)
-                                      request
-                                  with
-                                  | Ok request ->
-                                      t.provider request ~on_event ~on_download
-                                        ~cancelled
-                                  | Error media_error ->
-                                      let message =
-                                        match media_error with
-                                        | Media.Rebuild detail ->
-                                            "request media could not be \
-                                             resolved: " ^ detail
-                                        | other -> Media.message other
-                                      in
-                                      Error
-                                        (Mentat_llm.Error.make
-                                           ~kind:
-                                             Mentat_llm.Error.Invalid_request
-                                           ~provider:
-                                             (Mentat_llm.Model.provider
-                                                (Mentat_llm.Request.model
-                                                   request))
-                                           message));
-                            }
-                          in
-                          let driver =
-                            Driver.create ~sw:t.sw ~io ~hooks:(hooks t ~id)
-                              ~resolve:(fun ~latest_model ->
-                                t.config id ~latest_model)
-                              ~execution_for_mode ~now:t.now ~depth ~session
-                              ~mutation
-                              ~hub:(hub_for t id ~session ~mutation)
-                          in
-                          (* Register before starting: hooks fired by the first
-                             drive resolve this driver through the registry. *)
-                          Hashtbl.replace t.drivers (key id) driver;
-                          Driver.start driver;
-                          Ok driver)))))
+                             (Error.Delegation.Edge_not_found
+                                { parent; delegation }))
+                    | Some edge -> (
+                        let found = Mentat_session.Delegation.child edge in
+                        if not (Mentat_session.Id.equal found child) then
+                          Error
+                            (Error.Delegation
+                               (Error.Delegation.Child_mismatch
+                                  { delegation; expected = child; found }))
+                        else
+                          match
+                            resolve_lineage ~seen:(parent :: seen) ~child:parent
+                              parent_session
+                          with
+                          | Error _ as error -> error
+                          | Ok (parent_depth, _parent_role) ->
+                              Ok
+                                ( parent_depth + 1,
+                                  Mentat_session.Delegation.role edge ))))
+        in
+        match S.try_acquire id with
+        | `Held owner -> Error (Error.Busy { owner })
+        | `Io d -> Error (Error.Store (Ports.Store_error.Io d))
+        | `Acquired guard -> (
+            let release_and e =
+              S.release guard;
+              Error e
+            in
+            match S.load guard with
+            | Error e -> release_and (Error.Store e)
+            | Ok loaded -> (
+                match S.mutation_events loaded with
+                | Error e -> release_and (Error.Store e)
+                | Ok mutation_events -> (
+                    match Mentat_mutation.State.of_events mutation_events with
+                    | Error e ->
+                        release_and
+                          (Error.Internal
+                             (Mentat_diagnostic.of_text
+                                (Mentat_mutation.State.Error.message e)))
+                    | Ok mutation -> (
+                        let session = S.session_of loaded in
+                        match resolve_lineage ~seen:[ id ] ~child:id session with
+                        | Error e -> release_and e
+                        | Ok (depth, role) ->
+                            (* A child drives through [delegated_execution]; its
+                               immutable role is closed in here so the driver's
+                               generic execution signature stays role-free and the
+                               child's prelude re-resolves the same role from the
+                               durable edge on every attach. Both factories share
+                               the [~background] contract: the delegated factory
+                               opens a per-child shell registry over the driver's
+                               nested switch (for a generic delegate's write/shell
+                               parity) exactly as the root factory does, so its
+                               background-process view is live rather than forced
+                               empty. *)
+                            let execution_for_mode =
+                              if Int.equal depth 0 then t.execution_for_mode
+                              else fun ~background:session_sw ->
+                                t.delegated_execution ~role ~background:session_sw
+                            in
+                            (* Rebuild reservations and settled buffers from child
+                               journals, and re-drive undelivered recorded
+                               messages, BEFORE this driver drives. *)
+                            rebuild_children t ~parent:id session;
+                            redrive_messages t session;
+                            let doc = ref loaded in
+                            let io =
+                              {
+                                Driver.session_id = id;
+                                commit =
+                                  (fun events ->
+                                    match S.commit guard !doc events with
+                                    | Error e -> Error e
+                                    | Ok loaded ->
+                                        doc := loaded;
+                                        Ok (S.session_of loaded));
+                                commit_metadata =
+                                  (fun session ->
+                                    match
+                                      S.commit_metadata guard !doc session
+                                    with
+                                    | Error e -> Error e
+                                    | Ok loaded ->
+                                        (* Adopt the new revision so the next
+                                           journal commit CASes against it. *)
+                                        doc := loaded;
+                                        Ok (S.session_of loaded));
+                                append_edit =
+                                  (fun ~entries event ->
+                                    S.append_edit guard !doc ~entries event);
+                                append_mutation =
+                                  (fun events ->
+                                    S.append_mutation guard !doc events);
+                                put_attachment =
+                                  (fun bytes -> S.put_attachment id bytes);
+                                attachment =
+                                  (fun reference -> S.attachment id reference);
+                                fork =
+                                  (fun ~events session ->
+                                    Result.map
+                                      (fun _loaded -> ())
+                                      (S.fork ~from:id ~events session));
+                                revert =
+                                  (fun ~scope ->
+                                    match S.revert guard !doc ~scope with
+                                    | Error e -> Error e
+                                    | Ok outcome -> (
+                                        (* Re-read the ledger the revert just
+                                           appended to, so the controller adopts a
+                                           current mutation mirror. *)
+                                        match S.mutation_events !doc with
+                                        | Error e -> Error e
+                                        | Ok events -> (
+                                            match
+                                              Mentat_mutation.State.of_events
+                                                events
+                                            with
+                                            | Ok mstate -> Ok (outcome, mstate)
+                                            | Error se ->
+                                                Error
+                                                  (Ports.Store_error.Corrupt
+                                                     (Mentat_diagnostic.of_text
+                                                        (Mentat_mutation.State
+                                                         .Error
+                                                         .message se))))));
+                                undo_revert =
+                                  (fun selection ->
+                                    match
+                                      S.revert_selection guard !doc ~selection
+                                    with
+                                    | Error e -> Error e
+                                    | Ok outcome -> (
+                                        match S.mutation_events !doc with
+                                        | Error e -> Error e
+                                        | Ok events -> (
+                                            match
+                                              Mentat_mutation.State.of_events
+                                                events
+                                            with
+                                            | Ok mstate -> Ok (outcome, mstate)
+                                            | Error se ->
+                                                Error
+                                                  (Ports.Store_error.Corrupt
+                                                     (Mentat_diagnostic.of_text
+                                                        (Mentat_mutation.State
+                                                         .Error
+                                                         .message se))))));
+                                truncate =
+                                  (fun ~keep session ->
+                                    match S.truncate guard !doc ~keep session with
+                                    | Error e -> Error e
+                                    | Ok (loaded, mstate) ->
+                                        doc := loaded;
+                                        Ok (S.session_of loaded, mstate));
+                                export = (fun () -> S.export guard);
+                                release = (fun () -> S.release guard);
+                                (* Resolve [`Ref] media back to [`Base64] strictly
+                                   after the request is digested and claimed, so
+                                   the adapters never see an unresolved reference
+                                   and the claim's digest stays over the [`Ref]
+                                   form. *)
+                                provider_call =
+                                  (fun request
+                                    ~on_event
+                                    ~on_download
+                                    ~cancelled
+                                  ->
+                                    match
+                                      Media.resolve_request
+                                        ~attachment:(fun reference ->
+                                          S.attachment id reference)
+                                        request
+                                    with
+                                    | Ok request ->
+                                        t.provider request ~on_event ~on_download
+                                          ~cancelled
+                                    | Error media_error ->
+                                        let message =
+                                          match media_error with
+                                          | Media.Rebuild detail ->
+                                              "request media could not be \
+                                               resolved: " ^ detail
+                                          | other -> Media.message other
+                                        in
+                                        Error
+                                          (Mentat_llm.Error.make
+                                             ~kind:
+                                               Mentat_llm.Error.Invalid_request
+                                             ~provider:
+                                               (Mentat_llm.Model.provider
+                                                  (Mentat_llm.Request.model
+                                                     request))
+                                             message));
+                              }
+                            in
+                            let driver =
+                              Driver.create ~sw:t.sw ~io ~hooks:(hooks t ~id)
+                                ~resolve:(fun ~latest_model ->
+                                  t.config id ~latest_model)
+                                ~execution_for_mode ~now:t.now ~depth ~session
+                                ~mutation
+                                ~hub:(hub_for t id ~session ~mutation)
+                            in
+                            (* Register before starting: hooks fired by the first
+                               drive resolve this driver through the registry. *)
+                            Hashtbl.replace t.drivers (key id) driver;
+                            Driver.start driver;
+                            Ok driver)))))
 
 and hooks t ~id =
   {
@@ -583,54 +607,106 @@ and rebuild_children t ~parent session =
 (* Delivery of a recorded parent-to-child message — one story for every
    backend. The idempotency id derives from the recording (turn, call), so an
    at-least-once re-drive lands the same queue entry once; both kinds are
-   mail. A child this runtime drives takes the local arm: the entry crosses
-   its driver's enqueue op, deduplicated against the journal's [Enqueued]
-   facts (a consumed entry's fact persists). This arm is transitional — it
-   exists while in-process drivers exist. Everything else is the broker's
-   send: durable in the child's journal, or a loud undelivered answer the
-   durable receipt re-drives at the parent's next attach or the observed
-   child exit. Sending never wakes: a [`Follow_up] additionally wakes the
-   child — send then wake, two acts — while a [`Context] entry waits for
-   whatever next runs the child. *)
+   mail. Delivery is queued on the edge's lane and performed by its one drain
+   fiber, in receipt order — recovery's re-drives fold into the same lane, so
+   a re-driven message cannot overtake a fresh one either. *)
 and deliver_child_message t ~parent ~edges
     (message : Mentat_agent_step.Step.Child_message.t) =
-  let { Mentat_agent_step.Step.Child_message.kind; child; message = text; _ } =
-    message
-  in
   match
     List.find_opt
       (fun edge ->
         Mentat_session.Delegation.Id.equal
           (Mentat_session.Delegation.id edge)
-          child)
+          message.Mentat_agent_step.Step.Child_message.child)
       edges
   with
   | None -> ()
-  | Some edge ->
-      let child_session = Mentat_session.Delegation.child edge in
-      let id = Mentat_session.Queue.Id.of_string (derived_message_id message) in
-      let input = [ Mentat_llm.Content.text text ] in
-      let origin = Mentat_session.Origin.agent parent in
-      Eio.Fiber.fork ~sw:t.sw (fun () ->
-          (match find_driver t child_session with
+  | Some edge -> (
+      let lane_key =
+        key parent ^ "/"
+        ^ Mentat_session.Delegation.Id.to_string
+            (Mentat_session.Delegation.id edge)
+      in
+      match Hashtbl.find_opt t.lanes lane_key with
+      | Some lane -> Queue.push message lane.pending
+      | None ->
+          let lane = { lane_key; parent; edge; pending = Queue.create () } in
+          Queue.push message lane.pending;
+          Hashtbl.replace t.lanes lane_key lane;
+          Eio.Fiber.fork ~sw:t.sw (fun () -> drain_lane t lane))
+
+(* The lane's drain fiber: one message at a time, in queue order. A failed
+   delivery is contained loudly and the drain moves on — the durable receipt
+   re-drives it later, and one message's failure must not park the lane's
+   siblings. On shutdown the rest of the queue is abandoned the same way:
+   receipts re-drive at the next attach, and a fiber that kept sending would
+   outlive the runtime it delivers for. The lane is removed in the same
+   non-suspending step that finds the queue empty, so a message enqueued
+   after that starts a fresh lane and fiber. *)
+and drain_lane t lane =
+  if t.shutting_down then Hashtbl.remove t.lanes lane.lane_key
+  else
+    match Queue.take_opt lane.pending with
+    | None -> Hashtbl.remove t.lanes lane.lane_key
+    | Some message ->
+        (try deliver_one t lane message with
+        | Eio.Cancel.Cancelled _ as exn ->
+            Hashtbl.remove t.lanes lane.lane_key;
+            raise exn
+        | exn ->
+            Eio.traceln "mentat: message to %s undelivered: %s"
+              (Mentat_session.Id.to_string
+                 (Mentat_session.Delegation.child lane.edge))
+              (Printexc.to_string exn));
+        drain_lane t lane
+
+(* One message's delivery. A child this runtime drives takes the local arm:
+   the entry crosses its driver's enqueue op, deduplicated against the
+   journal's [Enqueued] facts (a consumed entry's fact persists). This arm is
+   transitional — it exists while in-process drivers exist. Everything else
+   is the broker's send: durable in the child's journal, or a loud
+   undelivered answer the durable receipt re-drives at the parent's next
+   attach or the observed child exit. Sending never wakes: a [`Follow_up]
+   additionally wakes the child — send then wake, two acts — while a
+   [`Context] entry waits for whatever next runs the child. *)
+and deliver_one t lane (message : Mentat_agent_step.Step.Child_message.t) =
+  let child_session = Mentat_session.Delegation.child lane.edge in
+  let id = Mentat_session.Queue.Id.of_string (derived_message_id message) in
+  let input =
+    [
+      Mentat_llm.Content.text
+        message.Mentat_agent_step.Step.Child_message.message;
+    ]
+  in
+  let origin = Mentat_session.Origin.agent lane.parent in
+  let enqueue_local driver =
+    ignore
+      (Driver.enqueue driver
+         (Mentat_session.Queue.Entry.make ~origin ~id ~input ()))
+  in
+  (match find_driver t child_session with
+  | Some driver -> enqueue_local driver
+  | None -> (
+      match
+        Mentat_broker.send t.broker ~origin ~target:child_session ~id ~input ()
+      with
+      | `Delivered -> ()
+      | `Undelivered reason -> (
+          match find_driver t child_session with
           | Some driver ->
-              ignore
-                (Driver.enqueue driver
-                   (Mentat_session.Queue.Entry.make ~origin ~id ~input ()))
-          | None -> (
-              match
-                Mentat_broker.send t.broker ~origin ~target:child_session ~id
-                  ~input ()
-              with
-              | `Delivered -> ()
-              | `Undelivered reason ->
-                  (* The receipt already promised delivery: the next attach's
-                     recovery scan or the observed child exit re-drives the
-                     same derived id. *)
-                  Eio.traceln "mentat: message to %s undelivered: %s"
-                    (Mentat_session.Id.to_string child_session)
-                    reason));
-          match kind with `Context -> () | `Follow_up -> wake_child t edge)
+              (* A driver attached mid-send — its own fence is what spent the
+                 budget — so the local arm is the delivery now. *)
+              enqueue_local driver
+          | None ->
+              (* The receipt already promised delivery: the next attach's
+                 recovery scan or the observed child exit re-drives the
+                 same derived id. *)
+              Eio.traceln "mentat: message to %s undelivered: %s"
+                (Mentat_session.Id.to_string child_session)
+                reason)));
+  match message.Mentat_agent_step.Step.Child_message.kind with
+  | `Context -> ()
+  | `Follow_up -> wake_child t lane.edge
 
 (* The wake half of a follow-up: make the child run so it consumes the mail.
    Under [In_process] attaching is the wake — the attach's own admission (or
@@ -679,6 +755,8 @@ and redrive_messages ?only t session =
           | None -> true (* no edge: nothing to deliver to *)
           | Some edge -> (
               match S.view (Mentat_session.Delegation.child edge) with
+              | Error Ports.Store_error.Not_found ->
+                  true (* no child session: nothing to deliver to *)
               | Error _ -> false
               | Ok loaded ->
                   Mentat_session.State.enqueue_recorded
@@ -790,8 +868,7 @@ let protocol_error ~session (e : Error.t) : Mentat_protocol.Error.t =
       Mentat_protocol.Error.Unavailable (Error.diagnostic e)
 
 let route t session =
-  if t.shutting_down then Error (protocol_error ~session Error.Shutting_down)
-  else Result.map_error (protocol_error ~session) (attach t session)
+  Result.map_error (protocol_error ~session) (attach t session)
 
 let adopt t session =
   Result.map (fun (_ : Driver.t) -> ()) (route t session)
@@ -922,11 +999,9 @@ let follow t session ~(from : Mentat_client.Feed.from) =
           Ok (seam_of t session hub (subscribe_from hub ~from)))
 
 let flow t session f =
-  if t.shutting_down then Error (protocol_error ~session Error.Shutting_down)
-  else
-    match attach t session with
-    | Error e -> Error (protocol_error ~session e)
-    | Ok d -> Result.map_error (protocol_error ~session) (f d)
+  match attach t session with
+  | Error e -> Error (protocol_error ~session e)
+  | Ok d -> Result.map_error (protocol_error ~session) (f d)
 
 (* Fork and rewind take the client-minted target id and return [unit]: the
    caller holds the id and may follow it before this returns. *)

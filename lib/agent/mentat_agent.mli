@@ -138,10 +138,11 @@ val create :
     fence could only lose. [broker] is the process's one
     {!Mentat_broker.t}, through which every recorded parent-to-child message
     for a child this runtime does not itself drive is sent
-    ({!Mentat_broker.send}) — durable in the child's journal or loudly
-    undelivered, re-driven from the durable receipt at the next attach or the
-    observed child exit; sending never wakes the child, a follow-up's wake is
-    the separate materialization act. *)
+    ({!Mentat_broker.send}), one delegation edge's messages delivered in
+    receipt order — durable in the child's journal or loudly undelivered,
+    re-driven from the durable receipt at the next attach or the observed
+    child exit; sending never wakes the child, a follow-up's wake is the
+    separate materialization act. *)
 
 val child_first_turn :
   Mentat_session.Delegation.Id.t -> Mentat_session.Turn.Id.t

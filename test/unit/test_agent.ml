@@ -4943,6 +4943,69 @@ let a_brokered_message_crosses_the_broker_send () =
             0
             (List.length (Session.events session)))
 
+(* Two same-turn messages to one dormant child land in receipt order:
+   delivery runs on one lane per delegation edge, so a slow first send
+   cannot be overtaken by the second — the exact inversion a per-message
+   fiber fan-out allows. The stub's first send yields long enough that an
+   overtaking second fiber would record first. *)
+let same_edge_messages_deliver_in_order () =
+  let delivered = ref [] in
+  let calls = ref 0 in
+  let broker =
+    Mentat_broker.for_tests ~send:(fun ~origin:_ ~target:_ ~id:_ ~input ->
+        incr calls;
+        if !calls = 1 then
+          for _ = 1 to 100 do
+            Eio.Fiber.yield ()
+          done;
+        (match input with
+        | [ Llm.Content.Text text ] -> delivered := text :: !delivered
+        | _ -> fail "mail carries one text block");
+        `Delivered)
+  in
+  let _materialized, child_backend = brokered_spy () in
+  let script =
+    message_script
+      ~verbs:[ ("send_message", "first"); ("send_message", "second") ]
+  in
+  with_engine ~script:(capped_script ~cap:20 script) ~child_backend ~broker
+    (fun ~sw:_ ~client ~store:_ ~engine:_ ->
+      submit_ok client
+        (prompt ~session:(sid "root") ~turn:(tid "t-fifo") "PLEASE_SPAWN");
+      ignore (drain_committed (follow_ok client (sid "root")));
+      await_yield (fun () -> List.length !delivered >= 2);
+      equal
+        (Testable.list Testable.string)
+        ~msg:"messages land in receipt order" [ "first"; "second" ]
+        (List.rev !delivered))
+
+(* The driver's queue admission runs the accept judgment the broker's
+   fence-held append runs — one home, [Mentat_session.accepts_mail] — so an
+   origin the session's recorded facts cannot prove is a structured refusal
+   at the wire too, never a committed fact. *)
+let a_queued_entry_from_an_unprovable_sender_is_refused () =
+  with_engine (fun ~sw:_ ~client ~store:_ ~engine:_ ->
+      submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t1") "hi");
+      ignore (drain_committed (follow_ok client (sid "root")));
+      let queue_next ?origin () =
+        match
+          Protocol.Command.queue_next ?origin ~session:(sid "root")
+            ~input:[ Llm.Content.text "psst" ]
+            ()
+        with
+        | Ok c -> c
+        | Error e -> failf "queue_next: %s" (Protocol.Command.Invalid.message e)
+      in
+      (match
+         Client.submit client.c
+           (queue_next ~origin:(Session.Origin.agent (sid "stranger")) ())
+       with
+      | Error (Protocol.Error.Unavailable _) -> ()
+      | Ok () -> fail "an unprovable sender must be refused at admission"
+      | Error e -> failf "wrong refusal: %a" Protocol.Error.pp e);
+      (* The owner's plain entry (no origin) still admits. *)
+      submit_ok client (queue_next ()))
+
 (* An undelivered send is covered by the parent's durable verb receipt: the
    next engine attaching the parent re-drives it through its own broker with
    the same derived id — at-least-once mechanics, exactly-once effect. *)
@@ -6444,6 +6507,8 @@ let () =
             a_queue_replacement_mints_distinct_entries_in_input_order;
           test "an interrupt admits the queued correction"
             an_interrupt_admits_the_queued_correction;
+          test "a queued entry from an unprovable sender is refused"
+            a_queued_entry_from_an_unprovable_sender_is_refused;
         ];
       group "busy, faults, shutdown"
         [
@@ -6574,6 +6639,8 @@ let () =
             a_reaped_brokered_child_releases_capacity;
           test "a brokered message crosses the broker send"
             a_brokered_message_crosses_the_broker_send;
+          test "same-edge messages deliver in order"
+            same_edge_messages_deliver_in_order;
           test "an undelivered message re-drives at the next attach"
             an_undelivered_message_redrives_at_the_next_attach;
         ];

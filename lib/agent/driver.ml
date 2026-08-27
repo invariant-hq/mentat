@@ -1174,15 +1174,27 @@ and handle_command t command ~mid_effect ~ack =
                  idempotent, exactly as the in-process enqueue op's dedup. *)
               ack (Ok ())
           | Some _ | None ->
-              let id =
-                match id with Some id -> id | None -> mint_queue_id t
-              in
-              journal_commit t ~ack
-                [
-                  Mentat_session.Event.queue_updated
-                    (Mentat_session.Queue.Update.enqueued
-                       (Mentat_session.Queue.Entry.make ?origin ~id ~input ()));
-                ]))
+              (* The accept judgment, after the dedup exactly as the broker's
+                 fence-held append runs it: an origin the session's recorded
+                 facts do not admit is a structured refusal, never a committed
+                 fact. *)
+              if not (Mentat_session.accepts_mail ~origin t.session) then
+                ack
+                  (Error
+                     (Mentat_protocol.Error.unavailable
+                        (Printf.sprintf
+                           "session %s does not accept this sender's mail"
+                           (Mentat_session.Id.to_string t.io.session_id))))
+              else
+                let id =
+                  match id with Some id -> id | None -> mint_queue_id t
+                in
+                journal_commit t ~ack
+                  [
+                    Mentat_session.Event.queue_updated
+                      (Mentat_session.Queue.Update.enqueued
+                         (Mentat_session.Queue.Entry.make ?origin ~id ~input ()));
+                  ]))
   | Mentat_protocol.Command.Replace_queued { inputs; _ } -> (
       let rec externalize_all acc = function
         | [] -> Ok (List.rev acc)
@@ -1691,6 +1703,38 @@ let serve t =
     end
   done
 
+(* After the serve loop, nothing will ever take another message: resolve
+   every ask the mailbox still carries — one posted after [Stop] but before
+   the controller handled it, or one left behind by a fault — with the
+   shutdown refusal, so no caller parks forever on a resolver nothing serves.
+   [t.stopping] is set first: [ask]'s refusal check and its post share one
+   non-suspending step, so every ask is either refused up front or finds its
+   message drained here. *)
+let drain_mailbox t =
+  t.stopping <- true;
+  let refuse resolver =
+    Eio.Promise.resolve resolver (Error (unavailable Error.Shutting_down))
+  in
+  let rec drain () =
+    match Queue.take_opt t.mailbox with
+    | None -> ()
+    | Some msg ->
+        (match msg with
+        | Command (_, resolver)
+        | Unattended (_, resolver)
+        | Commit_metadata (_, resolver)
+        | Enqueue (_, resolver) ->
+            refuse resolver
+        | Fork (_, resolver) | Rewind (_, _, resolver) ->
+            Eio.Promise.resolve resolver (Error Error.Shutting_down)
+        | Compact (_, resolver) -> refuse resolver
+        | Revert (_, resolver) | Undo_op (_, resolver) -> refuse resolver
+        | Export resolver -> refuse resolver
+        | Deliver | Stop -> ());
+        drain ()
+  in
+  drain ()
+
 let recovery_execution t turn =
   match
     t.resolve ~latest_model:(Mentat_session.State.latest_model (state t))
@@ -1766,7 +1810,8 @@ let controller t =
                   drive t step));
       (* [serve] contains its own message and admission work; wrapping it too
          keeps an unforeseen escape from skipping the fence release below. *)
-      contain t (fun () -> serve t));
+      contain t (fun () -> serve t);
+      drain_mailbox t);
   t.io.release ();
   Eio.Promise.resolve (snd t.quiesced) ()
 
