@@ -87,9 +87,9 @@ let make_registry ~shared ~parent_sw ~broker =
 (* The broker's engine-reach seam for one instance: the workspace identity a
    child is spawned and dialed under, and the engine wrappers every
    observation reports through. *)
-let broker_instance instance =
+let broker_engine instance =
   {
-    Mentat_broker.Instance.root = Composition.root instance;
+    Mentat_broker.Engine.root = Composition.root instance;
     environment = Composition.environment instance;
     adopt_session = Composition.adopt_session instance;
     integrate_child =
@@ -99,10 +99,10 @@ let broker_instance instance =
   }
 
 let broker_ops broker instance =
-  let seam = broker_instance instance in
+  let engine = broker_engine instance in
   {
     Mentat_agent.Ports.materialize =
-      (fun ~child -> Mentat_broker.materialize broker seam ~child);
+      (fun ~child -> Mentat_broker.materialize broker engine ~child);
     deliver = (fun ~command -> Mentat_broker.deliver broker ~command);
     cancel = (fun ~child -> Mentat_broker.cancel broker ~child);
   }
@@ -870,7 +870,6 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                       ~beside:"mentatd")
                   ~socket_base:(User_dirs.daemon_socket_dir dirs)
                   ~log_dir:(User_dirs.daemon_dir dirs)
-                  ~serve_owner_label:Composition.child_server_owner_label
               in
               let registry = make_registry ~shared ~parent_sw:sw ~broker in
               (* The stop seam is created before the branches so the resident
@@ -973,20 +972,22 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                        parents through the ordinary get-or-boot, whose recovery
                        re-drives each edge into the broker's own materialize. *)
                     Mentat_broker.rediscover broker
-                      ~instance_for:(fun ~root ->
+                      ~engine_for:(fun ~root ->
                         match get_or_boot registry ~root () with
                         | Error status -> Error (exit_message status)
-                        | Ok entry -> Ok (broker_instance entry.instance))
-                      ~release:(fun instance ->
-                        let root =
-                          Lpath.Abs.to_string
-                            instance.Mentat_broker.Instance.root
-                        in
-                        Eio.Mutex.use_rw ~protect:true registry.mutex (fun () ->
-                            match Hashtbl.find_opt registry.entries root with
-                            | Some entry -> entry.lease <- entry.lease - 1
-                            | None -> ());
-                        sweep registry);
+                        | Ok entry ->
+                            let release () =
+                              Eio.Mutex.use_rw ~protect:true registry.mutex
+                                (fun () ->
+                                  match
+                                    Hashtbl.find_opt registry.entries root
+                                  with
+                                  | Some entry ->
+                                      entry.lease <- entry.lease - 1
+                                  | None -> ());
+                              sweep registry
+                            in
+                            Ok (broker_engine entry.instance, release));
                     (* The boot reconcile, settle-only: whatever record a
                        previous life left open is settled before the first
                        delivery is admitted — locally, with no network — so

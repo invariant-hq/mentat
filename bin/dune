@@ -55,6 +55,9 @@
   mentat_context
   mentat_prompts
   mentat_agent
+  ; mentat_broker: the serving fence label cli_serve_session acquires under is
+  ; the broker layer's shared vocabulary.
+  mentat_broker
   mentat_client
   mentat_connector
   mentat_github

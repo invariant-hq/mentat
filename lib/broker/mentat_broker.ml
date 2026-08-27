@@ -4,11 +4,6 @@
  ---------------------------------------------------------------------------*)
 
 module Reconcile = Reconcile
-module Server = Mentat_server
-module Client = Mentat_client
-module Store = Mentat_store
-module Session = Mentat_session
-module Command = Mentat_protocol.Command
 
 (* The socket layout beneath the configured base is this library's own
    vocabulary: the [s/] tree, and one leaf per session. A session id is
@@ -33,7 +28,12 @@ let socket_leaf ~session =
 let socket_dir ~base ~session =
   Filename.concat (Filename.concat base "s") (socket_leaf ~session)
 
-module Instance = struct
+(* The serving label is shared vocabulary, not configuration: the per-session
+   server acquires its fence under it, and the probe below reads it back to
+   tell a preemptable child server from a holder it must never signal. *)
+let serve_owner_label = "serve-session"
+
+module Engine = struct
   type t = {
     root : Lpath.Abs.t;
     environment : (string * string) list;
@@ -68,8 +68,8 @@ let reap_interval_s = 0.05
    nothing; [head_cache] keys the last decoded journal head on the document
    stamp, so the polls that watch a parked child decode only on change. *)
 type entry = {
-  child : Session.Id.t;
-  instance : Instance.t;
+  child : Mentat_session.Id.t;
+  engine : Engine.t;
   socket_dir : string;
   mutable pid : int option;
   respawns : int;
@@ -81,18 +81,17 @@ type entry = {
 type t = {
   sw : Eio.Switch.t;
   stdenv : Eio_unix.Stdenv.base;
-  store : Store.t;
+  store : Mentat_store.t;
   resolve_bin : unit -> (string, string) result;
   socket_base : string;
   log_dir : string;
-  serve_owner_label : string;
   entries : (string, entry) Hashtbl.t;
   stop_signal : unit Eio.Promise.t;
   stop_resolver : unit Eio.Promise.u;
   mutable stopped : bool;
 }
 
-let key child = Session.Id.to_string child
+let key child = Mentat_session.Id.to_string child
 let clock t = Eio.Stdenv.clock t.stdenv
 let net t = Eio.Stdenv.net t.stdenv
 let sleep t seconds = Eio.Time.sleep (clock t) seconds
@@ -116,25 +115,29 @@ let send_signal pid signal =
    resumed the child, an unreadable owner line, a foreign host — is
    [`Held None], which the table refuses to preempt. *)
 let probe_fence t entry () : Reconcile.fence =
-  match Store.Run_lock.holder t.store ~session:entry.child with
+  match Mentat_store.Run_lock.holder t.store ~session:entry.child with
   | `Free -> `Free
-  | `Io io -> `Io (Format.asprintf "%a" Store.Io.pp io)
+  | `Io io -> `Io (Format.asprintf "%a" Mentat_store.Io.pp io)
   | `Held None -> `Held None
   | `Held (Some owner) ->
-      let pid = Store.Run_lock.Owner.pid owner in
+      let pid = Mentat_store.Run_lock.Owner.pid owner in
       if pid = Unix.getpid () then `Held_self
       else if
-        String.equal (Store.Run_lock.Owner.host owner) (Unix.gethostname ())
+        String.equal
+          (Mentat_store.Run_lock.Owner.host owner)
+          (Unix.gethostname ())
         && Option.equal String.equal
-             (Store.Run_lock.Owner.label owner)
-             (Some t.serve_owner_label)
+             (Mentat_store.Run_lock.Owner.label owner)
+             (Some serve_owner_label)
       then `Held (Some pid)
       else `Held None
 
-let root_string entry = Lpath.Abs.to_string entry.instance.Instance.root
+let root_string entry = Lpath.Abs.to_string entry.engine.Engine.root
 
 let head_of session : Reconcile.head =
-  match Session.State.settled_head (Session.state session) with
+  match
+    Mentat_session.State.settled_head (Mentat_session.state session)
+  with
   | Some _ -> `Terminal
   | None -> `Unfinished
 
@@ -145,11 +148,11 @@ let head_of session : Reconcile.head =
 let child_head t entry : Reconcile.head =
   let store = t.store in
   let read () : Reconcile.head =
-    match Store.Session.load store entry.child with
+    match Mentat_store.Session.load store entry.child with
     | Error _ -> `Unfinished
-    | Ok document -> head_of (Store.Session.Document.session document)
+    | Ok document -> head_of (Mentat_store.Session.Document.session document)
   in
-  match Store.Session.stamp store entry.child with
+  match Mentat_store.Session.stamp store entry.child with
   | None -> read ()
   | Some stamp -> (
       match entry.head_cache with
@@ -160,9 +163,9 @@ let child_head t entry : Reconcile.head =
           head)
 
 let connect_child t entry ~sw =
-  Server.connect ~sw ~net:(net t) ~clock:(clock t)
+  Mentat_server.connect ~sw ~net:(net t) ~clock:(clock t)
     ~workspace:(root_string entry)
-    (Server.Bind.unix ~dir:(Lpath.Abs.of_string_exn entry.socket_dir))
+    (Mentat_server.Bind.unix ~dir:(Lpath.Abs.of_string_exn entry.socket_dir))
 
 (* A scoped reachability probe: one throwaway handshake, resources torn down
    with the scope. This is the decide table's probe — once per launch; the
@@ -185,7 +188,8 @@ let endpoint_reachable t entry () =
    never answers ready. *)
 let endpoint_connectable entry () =
   let socket =
-    Server.Bind.socket_path ~dir:(Lpath.Abs.of_string_exn entry.socket_dir)
+    Mentat_server.Bind.socket_path
+      ~dir:(Lpath.Abs.of_string_exn entry.socket_dir)
   in
   let fd = Unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
   Fun.protect
@@ -196,7 +200,8 @@ let endpoint_connectable entry () =
       | exception Unix.Unix_error _ -> false)
 
 let remove_endpoint entry =
-  Server.Bind.remove_endpoint ~dir:(Lpath.Abs.of_string_exn entry.socket_dir)
+  Mentat_server.Bind.remove_endpoint
+    ~dir:(Lpath.Abs.of_string_exn entry.socket_dir)
 
 (* Kill and reap an abandoned entry's process. The pid is this fiber's alone
    to wait on — the entry has left the table, so the reaper's sweep no longer
@@ -257,9 +262,9 @@ let give_up t entry message =
         entry.pid <- None;
         destroy t pid;
         remove_endpoint entry);
-    Eio.traceln "mentatd: delegation to %s abandoned: %s" (key entry.child)
+    Eio.traceln "broker: delegation to %s abandoned: %s" (key entry.child)
       message;
-    entry.instance.Instance.fail_child ~child:entry.child ~message
+    entry.engine.Engine.fail_child ~child:entry.child ~message
   end
 
 (* The escalation ladder for a child this broker spawned. Each signal is sent
@@ -321,7 +326,8 @@ let submit_wire t entry command =
     | Error _ -> Ok `Unreachable
     | Ok driver -> (
         match
-          driver.Client.Driver.session.Client.Driver.Session.submit command
+          driver.Mentat_client.Driver.session.Mentat_client.Driver.Session
+            .submit command
         with
         | Ok () -> Ok `Submitted
         | Error _ -> Ok `Refused)
@@ -334,7 +340,8 @@ let submit_wire t entry command =
 (* Best-effort semantic interrupt over the child's endpoint. *)
 let wire_interrupt t entry =
   match
-    Command.interrupt ~session:entry.child ~reason:"parent interrupted" ()
+    Mentat_protocol.Command.interrupt ~session:entry.child
+      ~reason:"parent interrupted" ()
   with
   | Error _ -> ()
   | Ok command -> ignore (submit_wire t entry command)
@@ -353,7 +360,7 @@ let follow_feed t entry =
        after the settlement was already delivered would resume past it and
        tail a feed that will never speak again — pinning the lingering child
        alive on a connection nothing closes. *)
-    match entry.instance.Instance.integrate_child ~child:entry.child with
+    match entry.engine.Engine.integrate_child ~child:entry.child with
     | `Integrated | `Unbound -> ()
     | `Not_settled -> (
         Eio.Switch.run @@ fun sw ->
@@ -367,39 +374,40 @@ let follow_feed t entry =
               | None -> `Beginning
             in
             match
-              driver.Client.Driver.session.Client.Driver.Session.follow
-                entry.child ~from
+              driver.Mentat_client.Driver.session
+                .Mentat_client.Driver.Session
+                .follow entry.child ~from
             with
             | Error (Mentat_protocol.Error.Invalid_position _) ->
                 entry.resume <- None
             | Error _ -> ()
             | Ok seam ->
                 let rec pull () =
-                  match seam.Client.Feed.next () with
+                  match seam.Mentat_client.Feed.next () with
                   | Ok
-                      (Client.Feed.Item
+                      (Mentat_client.Feed.Item
                          (Mentat_protocol.Update.Committed { position; fact }))
                     -> (
                       entry.resume <- Some position;
                       match fact with
                       | Mentat_protocol.Fact.Turn_settled _ -> (
                           match
-                            entry.instance.Instance.integrate_child
+                            entry.engine.Engine.integrate_child
                               ~child:entry.child
                           with
                           | `Integrated | `Unbound -> ()
                           | `Not_settled -> pull ())
                       | _ -> pull ())
-                  | Ok (Client.Feed.Item _) -> pull ()
+                  | Ok (Mentat_client.Feed.Item _) -> pull ()
                   | Error (Mentat_protocol.Error.Invalid_position _) ->
                       entry.resume <- None
-                  | Ok Client.Feed.Closed | Error _ -> ()
+                  | Ok Mentat_client.Feed.Closed | Error _ -> ()
                 in
                 (* The close releases the stream's fiber; without it the
                    scope's teardown would wait on a reader parked in the wire
                    feed. *)
                 Fun.protect
-                  ~finally:(fun () -> seam.Client.Feed.close ())
+                  ~finally:(fun () -> seam.Mentat_client.Feed.close ())
                   pull))
   with
   | () -> ()
@@ -435,7 +443,7 @@ let fork_entry t entry work =
 let rec settle_exit t entry =
   if current t entry then begin
     Hashtbl.remove t.entries (key entry.child);
-    match entry.instance.Instance.integrate_child ~child:entry.child with
+    match entry.engine.Engine.integrate_child ~child:entry.child with
     | `Integrated | `Unbound -> remove_endpoint entry
     | `Not_settled ->
         if entry.respawns >= max_respawns then begin
@@ -445,9 +453,9 @@ let rec settle_exit t entry =
               "the child process died before settling, %d times over"
               (entry.respawns + 1)
           in
-          Eio.traceln "mentatd: delegation to %s abandoned: %s"
+          Eio.traceln "broker: delegation to %s abandoned: %s"
             (key entry.child) message;
-          entry.instance.Instance.fail_child ~child:entry.child ~message
+          entry.engine.Engine.fail_child ~child:entry.child ~message
         end
         else begin
           (* A fresh record, honoring [current]'s discipline: the
@@ -471,8 +479,8 @@ and spawn_child t entry =
   match
     Spawn.spawn ~resolve_bin:t.resolve_bin ~log_dir:t.log_dir
       ~leaf:(socket_leaf ~session:(key entry.child))
-      ~environment:entry.instance.Instance.environment ~session:entry.child
-      ~interrupted:entry.cancelled ~cwd:entry.instance.Instance.root
+      ~environment:entry.engine.Engine.environment ~session:entry.child
+      ~interrupted:entry.cancelled ~cwd:entry.engine.Engine.root
   with
   | Error message -> give_up t entry message
   | Ok pid ->
@@ -506,7 +514,7 @@ and observe t entry =
   | `Timeout -> (
       match entry.pid with
       | Some pid ->
-          Eio.traceln "mentatd: child %s never bound its endpoint; escalating"
+          Eio.traceln "broker: child %s never bound its endpoint; escalating"
             (key entry.child);
           ladder_own t entry pid
           (* The reaper observes the exit and runs the policy. *)
@@ -554,7 +562,7 @@ let launch t entry =
   | Reconcile.Observe -> observe t entry
   | Reconcile.Preempt pid ->
       Eio.traceln
-        "mentatd: child %s is fenced by pid %d with no endpoint; preempting"
+        "broker: child %s is fenced by pid %d with no endpoint; preempting"
         (key entry.child) pid;
       if ladder_foreign t entry pid then spawn_child t entry
       else
@@ -572,7 +580,7 @@ let launch t entry =
 
 (* Admission: register the child in the node table and fork its work. A child
    already registered — running or observed — is left to its own fibers. *)
-let register t instance ~child work =
+let register t engine ~child work =
   if not t.stopped then
     match Hashtbl.find_opt t.entries (key child) with
     | Some _ -> ()
@@ -580,7 +588,7 @@ let register t instance ~child work =
         let entry =
           {
             child;
-            instance;
+            engine;
             socket_dir = socket_dir ~base:t.socket_base ~session:(key child);
             pid = None;
             respawns = 0;
@@ -592,16 +600,16 @@ let register t instance ~child work =
         Hashtbl.replace t.entries (key child) entry;
         fork_entry t entry (fun () -> work entry)
 
-let materialize t instance ~child =
-  register t instance ~child (fun entry -> launch t entry)
+let materialize t engine ~child =
+  register t engine ~child (fun entry -> launch t entry)
 
 (* Watch an already-running child this broker did not spawn (a previous node
    life's server): register the entry and observe, deciding nothing else — on
    its exit the ordinary policy integrates, re-drives shadowed messages, or
    re-materializes. A child the ordinary materialize already registered is left
    to it. *)
-let watch t instance ~child =
-  register t instance ~child (fun entry -> observe t entry)
+let watch t engine ~child =
+  register t engine ~child (fun entry -> observe t entry)
 
 let cancel t ~child =
   match Hashtbl.find_opt t.entries (key child) with
@@ -634,7 +642,7 @@ let cancel t ~child =
    retried within the boot budget; past it the delivery is refused and the
    parent's durable receipt re-drives it at the child's exit. *)
 let deliver t ~command =
-  let child = Command.session command in
+  let child = Mentat_protocol.Command.session command in
   let rec attempt elapsed =
     match Hashtbl.find_opt t.entries (key child) with
     | None -> `Gone
@@ -688,15 +696,14 @@ let run_reaper t =
       (try reap_sweep t with
       | Eio.Cancel.Cancelled _ as exn -> raise exn
       | exn ->
-          Eio.traceln "mentatd: the reaper failed: %s" (Printexc.to_string exn));
+          Eio.traceln "broker: the reaper failed: %s" (Printexc.to_string exn));
       sleep t reap_interval_s;
       loop ()
     end
   in
   loop ()
 
-let create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir
-    ~serve_owner_label =
+let create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir =
   let stop_signal, stop_resolver = Eio.Promise.create () in
   let t =
     {
@@ -706,7 +713,6 @@ let create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir
       resolve_bin;
       socket_base;
       log_dir;
-      serve_owner_label;
       entries = Hashtbl.create 8;
       stop_signal;
       stop_resolver;
@@ -725,7 +731,7 @@ let stop t =
    ordinary materialize path, reached through the adopted parent's recovery —
    one spawn path, probed once. *)
 
-let rediscover t ~instance_for ~release =
+let rediscover t ~engine_for =
   let store = t.store in
   let leaf_root = Filename.concat t.socket_base "s" in
   let leaves =
@@ -733,17 +739,17 @@ let rediscover t ~instance_for ~release =
     | entries -> Array.to_list entries
     | exception Sys_error _ -> []
   in
-  match Store.Session.scan store with
+  match Mentat_store.Session.scan store with
   | Error error ->
-      Eio.traceln "mentatd: orphan rediscovery skipped: %s"
-        (Store.Session.Error.message error)
+      Eio.traceln "broker: orphan rediscovery skipped: %s"
+        (Mentat_store.Session.Error.message error)
   | Ok (documents, _corrupt) ->
       let sessions = Hashtbl.create 16 in
       List.iter
         (fun document ->
-          let session = Store.Session.Document.session document in
+          let session = Mentat_store.Session.Document.session document in
           Hashtbl.replace sessions
-            (Session.Id.to_string (Session.id session))
+            (Mentat_session.Id.to_string (Mentat_session.id session))
             session)
         documents;
       (* Delegated children, keyed by their derived endpoint leaf so a digest
@@ -752,7 +758,8 @@ let rediscover t ~instance_for ~release =
         Hashtbl.fold
           (fun id session acc ->
             match
-              Session.Metadata.delegated_from (Session.metadata session)
+              Mentat_session.Metadata.delegated_from
+                (Mentat_session.metadata session)
             with
             | None -> acc
             | Some lineage -> (id, session, lineage) :: acc)
@@ -760,7 +767,7 @@ let rediscover t ~instance_for ~release =
       in
       let leaf_of id = socket_leaf ~session:id in
       let remove_leaf leaf =
-        Server.Bind.remove_endpoint
+        Mentat_server.Bind.remove_endpoint
           ~dir:(Lpath.Abs.of_string_exn (Filename.concat leaf_root leaf))
       in
       let leaf_set = Hashtbl.create 8 in
@@ -770,7 +777,9 @@ let rediscover t ~instance_for ~release =
           (fun (id, _, _) ->
             Hashtbl.mem leaf_set (leaf_of id)
             ||
-            match Store.Run_lock.holder store ~session:(Session.Id.of_string id)
+            match
+              Mentat_store.Run_lock.holder store
+                ~session:(Mentat_session.Id.of_string id)
             with
             | `Held _ -> true
             | `Free | `Io _ -> false)
@@ -787,66 +796,68 @@ let rediscover t ~instance_for ~release =
         leaves;
       List.iter
         (fun (id, session, lineage) ->
-          let child = Session.Id.of_string id in
+          let child = Mentat_session.Id.of_string id in
           let fence =
-            match Store.Run_lock.holder store ~session:child with
+            match Mentat_store.Run_lock.holder store ~session:child with
             | `Free -> `Free
             | `Held _ -> `Held
             | `Io _ -> `Io
           in
           let parent_id =
-            Session.Metadata.Delegated_from.parent lineage
+            Mentat_session.Metadata.Delegated_from.parent lineage
           in
           let parent =
             match
-              Hashtbl.find_opt sessions (Session.Id.to_string parent_id)
+              Hashtbl.find_opt sessions (Mentat_session.Id.to_string parent_id)
             with
             | None -> `Absent
             | Some parent_session -> (
                 match head_of parent_session with
                 | `Unfinished when
-                    Session.State.turns (Session.state parent_session) <> [] ->
+                    Mentat_session.State.turns
+                      (Mentat_session.state parent_session)
+                    <> [] ->
                     `Waiting
                 | `Unfinished | `Terminal | `Absent -> `Idle)
           in
           let dispose () = remove_leaf (leaf_of id) in
-          (* [with_instance] stages the child's workspace, runs [act] on it,
-             and returns the lease; [~adopt] additionally attaches the parent
-             so recovery re-drives the edge and a settlement has a waker. *)
-          let with_instance ~adopt act =
+          (* [with_engine] stages the child's workspace, runs [act] on its
+             engine, and returns the lease; [~adopt] additionally attaches the
+             parent so recovery re-drives the edge and a settlement has a
+             waker. *)
+          let with_engine ~adopt act =
             let root =
               Lpath.Abs.to_string
-                (Session.Metadata.cwd (Session.metadata session))
+                (Mentat_session.Metadata.cwd
+                   (Mentat_session.metadata session))
             in
-            match instance_for ~root with
+            match engine_for ~root with
             | Error message ->
                 Eio.traceln
-                  "mentatd: orphan %s: its workspace %s did not stage: %s" id
+                  "broker: orphan %s: its workspace %s did not stage: %s" id
                   root message
-            | Ok instance ->
+            | Ok (engine, release) ->
                 (if adopt then
-                   match instance.Instance.adopt_session parent_id with
+                   match engine.Engine.adopt_session parent_id with
                    | Ok () -> ()
                    | Error error ->
-                       Eio.traceln "mentatd: orphan %s: adopting its parent: %a"
+                       Eio.traceln "broker: orphan %s: adopting its parent: %a"
                          id Mentat_protocol.Error.pp error);
-                act instance;
-                release instance
+                act engine;
+                release ()
           in
           match
             Reconcile.boot_action ~fence ~head:(head_of session) ~parent
           with
-          | `Adopt -> with_instance ~adopt:true (fun _ -> ())
+          | `Adopt -> with_engine ~adopt:true (fun _ -> ())
           | `Adopt_and_watch ->
-              with_instance ~adopt:true (fun instance ->
-                  watch t instance ~child)
+              with_engine ~adopt:true (fun engine -> watch t engine ~child)
           | `Watch ->
-              with_instance ~adopt:false (fun instance ->
-                  watch t instance ~child)
+              with_engine ~adopt:false (fun engine -> watch t engine ~child)
           | `Adopt_and_dispose ->
-              with_instance ~adopt:true (fun _ -> ());
+              with_engine ~adopt:true (fun _ -> ());
               dispose ()
           | `Dispose -> dispose ()
           | `Skip reason ->
-              Eio.traceln "mentatd: orphan %s left alone: %s" id reason)
+              Eio.traceln "broker: orphan %s left alone: %s" id reason)
         candidates

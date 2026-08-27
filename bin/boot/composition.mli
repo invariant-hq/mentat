@@ -95,15 +95,6 @@ val stage_shared :
     {!with_base}'s does. A staging failure (unresolvable directories, an
     unopenable store) is an {!Exit_status.Runtime_error}. *)
 
-val child_server_owner_label : string
-(** The run-lock owner label a per-session child server ([mentat
-    serve-session]) acquires its fences under — that server passes it as
-    {!instance}'s [owner_label], and the daemon's broker reads it back from a
-    fence's owner line to decide preemption: only a holder carrying this label
-    is a child server the escalation ladder may signal; any other same-host
-    holder (an interactive CLI that resumed the child) fails the delegation
-    loudly instead. *)
-
 val instance :
   shared ->
   sw:Eio.Switch.t ->
@@ -131,7 +122,7 @@ val instance :
     the review cone's base spec, as in {!with_base}. [owner_label] labels the
     run-lock owner identity this instance acquires fences under (absent by
     default); a per-session child server passes
-    {!child_server_owner_label} so the broker can tell it apart from an
+    {!Mentat_broker.serve_owner_label} so the broker can tell it apart from an
     interactive holder. [child_backend] names
     where this instance's delegated children materialize
     ({!Mentat_agent.Ports.child_backend}); it is applied to the instance at

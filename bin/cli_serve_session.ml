@@ -356,7 +356,7 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
         (* The labeled owner is what lets the broker tell this server's fence
            hold apart from an interactive one it must never preempt. *)
         Composition.instance shared ~sw ~cwd ~overrides:[]
-          ~owner_label:Composition.child_server_owner_label ()
+          ~owner_label:Mentat_broker.serve_owner_label ()
       with
       | Error status -> status
       | Ok instance -> (

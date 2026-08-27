@@ -12,14 +12,17 @@
     watches the child's feed over its endpoint, reaps exits, re-materializes a
     child that died mid-work, escalates a cancel, and at boot re-adopts the
     parents of orphans a previous process life left running. Every observation
-    reports back through the owning instance's {!Instance} seam, and every
-    path terminates in either an integrated settlement or a parent-visible
+    reports back through the owning engine's {!Engine} seam, and every path
+    terminates in either an integrated settlement or a parent-visible
     failure — a parked wait is never abandoned silently.
 
     Deployment facts are construction arguments: how the activation executable
-    resolves, the socket base, the log directory, and the fence label a
-    per-session server acquires under all arrive through {!create}. The
-    library names no binary of its own and reads no ambient environment.
+    resolves, the socket base, and the log directory all arrive through
+    {!create}. The library names no binary of its own and reads no ambient
+    environment. The vocabulary both halves of a delegation must agree on is
+    exported rather than configured: the socket layout beneath the base
+    ({!socket_dir}) and the fence owner label a per-session server serves
+    under ({!serve_owner_label}).
 
     Two honest floors, by design: a child whose journal never settles (a
     corrupt store, a wedged callback) is observed for as long as its fence is
@@ -48,15 +51,25 @@ val socket_dir : base:string -> session:string -> string
     digest. Both forms are pure functions of the id, and both keep the socket
     path inside the [sun_path] budget for any [base] that respects it. *)
 
+val serve_owner_label : string
+(** The run-fence owner label a per-session child server acquires its fence
+    under — the serving label a server passes when it stages its instance, and
+    the one label this broker reads back from a fence's owner line as
+    preemptable: only a same-host holder carrying it is a child server the
+    escalation ladder may signal. Any other holder — an interactive driver
+    that resumed the child, an unreadable owner line, a foreign host — is
+    never preempted. One constant, shared through this library, because the
+    two sides must agree or the ladder never fires. *)
+
 (** The engine-reach seam for one workspace instance. *)
-module Instance : sig
+module Engine : sig
   type t = {
     root : Lpath.Abs.t;
         (** The canonical workspace root: the spawned child's working
             directory, and the workspace identity of every endpoint
             handshake. *)
     environment : (string * string) list;
-        (** The instance's process-environment snapshot, rendered whole as a
+        (** The engine's process-environment snapshot, rendered whole as a
             spawned child's environment — the child's own composition
             re-resolves everything else from it. *)
     adopt_session :
@@ -76,7 +89,7 @@ module Instance : sig
             [message] — the loud floor for a child the broker has
             abandoned. *)
   }
-  (** The type for the broker's reach back into the process hosting a
+  (** The type for the broker's reach back into the engine hosting a
       delegation: the workspace identity a child is spawned and dialed under,
       and the engine wrappers every observation reports through. The broker
       only ever holds the record it was handed; it never builds one. *)
@@ -93,28 +106,23 @@ val create :
   resolve_bin:(unit -> (string, string) result) ->
   socket_base:string ->
   log_dir:string ->
-  serve_owner_label:string ->
   t
-(** [create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir
-    ~serve_owner_label] is a broker over the process's one opened [store] and
-    its ambient [stdenv]. Its reaper fiber starts under [sw] immediately;
-    observers fork under [sw] as children materialize. The broker stops with
-    {!stop} — its fibers end promptly — while the children themselves are
-    deliberately not bound to [sw]: a delegated child outlives the process
-    that spawned it.
+(** [create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir] is a broker
+    over the process's one opened [store] and its ambient [stdenv]. Its reaper
+    fiber starts under [sw] immediately; observers fork under [sw] as children
+    materialize. The broker stops with {!stop} — its fibers end promptly —
+    while the children themselves are deliberately not bound to [sw]: a
+    delegated child outlives the process that spawned it.
 
     The deployment facts: [resolve_bin] resolves the executable a spawn
     launches, and is consulted at each spawn — a resolution failure fails
     that one delegation loudly, never the broker. [socket_base] is the
     per-user directory child endpoints derive under ({!socket_dir}).
     [log_dir] is where a spawned child's stdio log lands, created [0700] on
-    first use. [serve_owner_label] is the run-fence owner label a per-session
-    child server acquires under — the only label the escalation ladder may
-    signal; any other holder (an interactive driver that resumed the child,
-    an unreadable owner line, a foreign host) is never preempted. *)
+    first use. *)
 
-val materialize : t -> Instance.t -> child:Mentat_session.Id.t -> unit
-(** [materialize t instance ~child] makes the recorded child run. Idempotent
+val materialize : t -> Engine.t -> child:Mentat_session.Id.t -> unit
+(** [materialize t engine ~child] makes the recorded child run. Idempotent
     per child — a re-drive of a child this broker already runs or observes is
     a no-op — and non-blocking: the probe-spawn-observe work runs on a forked
     fiber. The call carries one identity and nothing else — the child's own
@@ -122,7 +130,7 @@ val materialize : t -> Instance.t -> child:Mentat_session.Id.t -> unit
     and re-reads the task and role from that durable edge. A child found
     already fenced by a live per-session server is observed rather than
     re-spawned; a child whose fence holder cannot be identified or signalled
-    fails the delegation loudly through [instance]'s seam. *)
+    fails the delegation loudly through [engine]'s seam. *)
 
 val deliver :
   t ->
@@ -154,26 +162,27 @@ val cancel : t -> child:Mentat_session.Id.t -> unit
 
 val rediscover :
   t ->
-  instance_for:(root:string -> (Instance.t, string) result) ->
-  release:(Instance.t -> unit) ->
+  engine_for:(root:string -> (Engine.t * (unit -> unit), string) result) ->
   unit
-(** [rediscover t ~instance_for ~release] is the boot orphan sweep, run
-    before serving. Candidates come from two sources, because neither alone
-    sees every orphan: the per-session endpoint directories left under the
-    socket tree (a digest leaf cannot be inverted, so leaves resolve against
-    the store's session index), and every delegated child session whose run
-    fence is held (a live child whose endpoint directory was lost). For each
-    candidate the pure {!Reconcile.boot_action} table decides: an unfinished
-    child — running or dead — has its parent adopted through [instance_for]'s
-    instance, whose recovery re-drives the edge into {!materialize} (the
-    single probe-and-spawn path); a live child is additionally watched, so its
-    exit re-drives whatever its held fence shadowed; a settled child with a
+(** [rediscover t ~engine_for] is the boot orphan sweep, run before serving.
+    Candidates come from two sources, because neither alone sees every
+    orphan: the per-session endpoint directories left under the socket tree
+    (a digest leaf cannot be inverted, so leaves resolve against the store's
+    session index), and every delegated child session whose run fence is held
+    (a live child whose endpoint directory was lost). For each candidate the
+    pure {!Reconcile.boot_action} table decides: an unfinished child —
+    running or dead — has its parent adopted through [engine_for]'s engine,
+    whose recovery re-drives the edge into {!materialize} (the single
+    probe-and-spawn path); a live child is additionally watched, so its exit
+    re-drives whatever its held fence shadowed; a settled child with a
     still-waiting parent is adopted so the buffered result wakes the wait; a
     settled or vanished child nobody waits for has its stale endpoint
     directory removed and nothing else — leftover directories after a forced
-    kill are expected. [release] returns the instance reference [instance_for]
-    took once the candidate's action has been issued. Failures are logged and
-    skip the candidate; they never abort the sweep or the boot. *)
+    kill are expected. [engine_for ~root] stages the engine hosting the
+    workspace at [root] and pairs it with the release of whatever lease the
+    staging took; the sweep calls that release exactly once, after the
+    candidate's action has been issued. Failures are logged and skip the
+    candidate; they never abort the sweep or the boot. *)
 
 val stop : t -> unit
 (** [stop t] ends the broker's fibers promptly: the reaper exits, observers

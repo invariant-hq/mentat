@@ -483,13 +483,6 @@ let stage_store_reported ~stdenv ~sw ~dirs ~getenv ?data_home () =
         | Some path -> Printf.sprintf "%s (report saved: %s)" message path
         | None -> message)
 
-(* The owner label a per-session child server acquires the run fence under.
-   The daemon's broker reads it back from a fence's owner line: only a holder
-   carrying this label is a child server its escalation ladder may preempt —
-   any other same-host holder (an interactive CLI that resumed the child) must
-   never be signalled. *)
-let child_server_owner_label = "serve-session"
-
 let make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
     ~review_base ?owner_label ?child_backend () : t =
   {
