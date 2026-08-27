@@ -175,7 +175,10 @@ let prepare_private_dir t =
   | Ok () ->
       (* Keeping the run scratch out of the project's status is a courtesy,
          not a precondition — a read-only checkout still gets its watch. *)
-      (match Config_io.ensure_gitignored ~root:t.root "run" with
+      (match
+         Config_io.ensure_gitignored ~root:t.root
+           Mentat_workspace.run_dir_name
+       with
       | Ok () | Error _ -> ());
       clear_private_registry t;
       Ok dir

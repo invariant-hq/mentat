@@ -37,7 +37,7 @@ val tooling :
     renders in every state but [Off Disabled] (nothing was attempted, no row).
     Muted status words: [dune · starting], [dune · building],
     [dune · off · no watch] and its siblings; warnings:
-    [dune · hung · restarting], [dune · unresponsive]. A settled verdict is
+    [dune · hung · restarting] and its restart siblings. A settled verdict is
     [dune · clean] muted, [dune · n errors] in the error style, or
     [dune · n warnings] warned when a failed build printed warnings alone,
     with a [· n lint] suffix when the lint lane holds findings. A foreign

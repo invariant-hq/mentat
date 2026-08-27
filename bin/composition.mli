@@ -458,9 +458,11 @@ module Probe : sig
       no project marker, the knob). *)
 
   val lint : t -> (string, string) result
-  (** [lint t] is the lint command and how it is reached — directly, or via
-      [dune exec] whose first run answers availability — or why the lane is
-      off. *)
+  (** [lint t] is the lint command and how it is reached — a path-shaped
+      program as a workspace file, else the lock universe's built binary,
+      else the sealed PATH, re-resolved by the runner at every settle — or
+      why the lane is off or the command unreachable (settles are then
+      skipped, never a lane death). *)
 end
 
 val with_probe :

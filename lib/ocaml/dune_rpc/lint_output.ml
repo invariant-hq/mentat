@@ -69,11 +69,10 @@ let from_first_block output =
 " (drop lines)
 
 (* A project lint finding can never live under [_build]: a block anchored
-   there is the toolchain's own noise — in the dune-exec world, the
-   linter's own failed build renders compiler blocks for its sources in
-   the lock universe, and publishing those as project findings would
-   mis-attribute them to files the agent must never edit. Structural, no
-   text convention. *)
+   there is the toolchain's own noise — a lint command that runs builds of
+   its own can render compiler blocks for build-tree sources, and
+   publishing those as project findings would mis-attribute them to files
+   the agent must never edit. Structural, no text convention. *)
 let in_build_dir finding =
   match Mentat_ocaml.Finding.path finding with
   | Some path ->
