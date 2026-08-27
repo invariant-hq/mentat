@@ -864,8 +864,8 @@ let%expect_test "dune row renders warnings with lint, and a building watch" =
   Tui.print t;
   [%expect {|
     01 |                                                                                 │ workspace
-    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium                     │   dune · theirs · 2 warnings · 3 lint
-    03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-pane-dun794b9825                   │
+    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium                     │   dune · theirs · 2 warnings
+    03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-pane-dun794b9825                   │   lint · 3 findings
     04 |                                                                                 │
     05 | ❯ just answer                                                                   │
     06 |                                                                                 │

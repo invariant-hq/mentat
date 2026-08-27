@@ -94,7 +94,7 @@ let warning_segs ~palette words =
 let verdict_segs ~palette (verdict : Mentat_workspace.Health.Verdict.t) =
   match verdict with
   | Mentat_workspace.Health.Verdict.Clean ->
-      [ Prims.seg (Theme.Palette.muted_style palette) "clean" ]
+      [ Prims.seg (Theme.Palette.success_style palette) "clean" ]
   | Mentat_workspace.Health.Verdict.Failing { errors = 0; warnings } ->
       [
         Prims.seg
@@ -108,16 +108,28 @@ let verdict_segs ~palette (verdict : Mentat_workspace.Health.Verdict.t) =
           (Printf.sprintf "%d error%s" errors (plural errors));
       ]
 
-let lint_segs ~palette lint =
+(* The lint lane's own row, under the dune row. [None] is absence — lane
+   off or targets unknown — and renders nothing: absence is never
+   cleanliness. The label is the lane's ([lint], as the notices and doctor
+   spell it): the wire carries no linter name, and the lane is
+   deliberately linter-agnostic. *)
+let lint_row ~palette lint =
   match lint with
-  | Some n when n > 0 ->
+  | None -> []
+  | Some n ->
       [
-        sep ~palette;
-        Prims.seg
-          (Theme.Palette.warning_style palette)
-          (Printf.sprintf "%d lint" n);
+        row
+          [
+            Prims.seg (Theme.Palette.muted_style palette) "lint";
+            sep ~palette;
+            (if n = 0 then
+               Prims.seg (Theme.Palette.success_style palette) "clean"
+             else
+               Prims.seg
+                 (Theme.Palette.warning_style palette)
+                 (Printf.sprintf "%d finding%s" n (plural n)));
+          ];
       ]
-  | Some _ | None -> []
 
 let owner_segs ~palette (owner : Mentat_workspace.Health.Owner.t) =
   match owner with
@@ -150,9 +162,8 @@ let tooling ~palette ~tooling =
           dune_row ~palette (prefix @ muted_segs ~palette [ "building" ])
       | Mentat_workspace.Health.Phase.Settled { build; lint } ->
           dune_row ~palette
-            (prefix
-            @ (sep ~palette :: verdict_segs ~palette build)
-            @ lint_segs ~palette lint))
+            (prefix @ (sep ~palette :: verdict_segs ~palette build))
+          @ lint_row ~palette lint)
 
 let muted_row ~palette value =
   row [ Prims.seg (Theme.Palette.muted_style palette) value ]

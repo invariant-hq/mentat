@@ -590,10 +590,10 @@ moment.
 |---|---|
 | `Probing` / `Starting` | `dune · starting` |
 | `Live {_, Building}` | `dune · building` |
-| `Live {Ours, Settled {Clean; None}}` | `dune · clean` |
+| `Live {Ours, Settled {Clean; None}}` | `dune · clean` (success colour) |
 | `Live {Ours, Settled {Failing {errors=3}}}` | `dune · 3 errors` (error colour) |
 | `Live {Ours, Settled {Failing {errors=0; warnings=2}}}` | `dune · 2 warnings` (warning colour) |
-| `Live {Ours, Settled {Clean; Some 2}}` | `dune · clean · 2 lint` (lint in warning colour) |
+| `Live {Ours, Settled {Clean; Some 2}}` | `dune · clean` plus its own `lint · 2 findings` row (warning colour); `Some 0` is `lint · clean` (success colour); `None` renders no lint row — absence, never cleanliness |
 | `Live {Theirs 4242, phase}` | as above with `theirs ·` prefix |
 | `Restarting (Exited "1")` / `(Hung)` | `dune · restarting (exit 1)` / `dune · hung · restarting` |
 | `Off No_dune` | `dune · off · not on PATH` |
