@@ -17,6 +17,7 @@ module Plan = Plan
 module Decision = Decision
 module Task = Task
 module Delegation = Delegation
+module Origin = Origin
 module Queue = Queue
 module Compaction = Compaction
 module Notice = Notice

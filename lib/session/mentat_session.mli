@@ -77,6 +77,9 @@ module Task = Task
 module Delegation = Delegation
 (** Subagent delegation edges. *)
 
+module Origin = Origin
+(** Message provenance — who sent a queued input. *)
+
 module Queue = Queue
 (** The next-turn queue. *)
 

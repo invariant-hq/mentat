@@ -127,6 +127,12 @@ type t = private
               inputs stay distinct entries. Carried by delivery paths whose
               at-least-once re-drives must not duplicate the entry (a parent's
               recorded child message, delivered over the wire). *)
+      origin : Mentat_session.Origin.t option;
+          (** Optional message provenance, recorded into the entry the engine
+              commits. Absent means the owner sent the input
+              ({!Mentat_session.Origin}). Attribution, never authority: the
+              origin changes nothing about how the entry is admitted or
+              consumed. *)
       input : Mentat_llm.Content.t list;
     }
   | Replace_queued of {
@@ -174,13 +180,15 @@ val interrupt :
 
 val queue_next :
   ?id:Mentat_session.Queue.Id.t ->
+  ?origin:Mentat_session.Origin.t ->
   session:Mentat_session.Id.t ->
   input:Mentat_llm.Content.t list ->
   unit ->
   (t, Invalid.t) result
-(** [queue_next ?id ~session ~input ()] appends [input] to the next-turn queue,
-    or {!Invalid.Empty_queue_input} if [input] is empty. [id] is the optional
-    client-minted entry id; see {!Queue_next}. *)
+(** [queue_next ?id ?origin ~session ~input ()] appends [input] to the
+    next-turn queue, or {!Invalid.Empty_queue_input} if [input] is empty. [id]
+    is the optional client-minted entry id and [origin] the optional message
+    provenance; see {!Queue_next}. *)
 
 val replace_queued :
   session:Mentat_session.Id.t ->

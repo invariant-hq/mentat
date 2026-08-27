@@ -1,0 +1,18 @@
+{
+  "type": "queue_next",
+  "v": 1,
+  "session": "session-c",
+  "id": "q-derived",
+  "origin": {
+    "type": "trigger",
+    "charter": "nightly-review",
+    "digest": "0f9a4c1d2e3b4a5f",
+    "key": "delivery-42"
+  },
+  "input": [
+    {
+      "type": "text",
+      "text": "Next."
+    }
+  ]
+}

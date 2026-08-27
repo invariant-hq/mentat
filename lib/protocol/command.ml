@@ -70,6 +70,7 @@ type t =
   | Queue_next of {
       session : Mentat_session.Id.t;
       id : Mentat_session.Queue.Id.t option;
+      origin : Mentat_session.Origin.t option;
       input : Mentat_llm.Content.t list;
     }
   | Replace_queued of {
@@ -118,9 +119,9 @@ let interrupt ~session ?reason () =
       Error Invalid.Empty_interrupt_reason
   | Some _ | None -> Ok (Interrupt { session; reason })
 
-let queue_next ?id ~session ~input () =
+let queue_next ?id ?origin ~session ~input () =
   if List.is_empty input then Error Invalid.Empty_queue_input
-  else Ok (Queue_next { session; id; input })
+  else Ok (Queue_next { session; id; origin; input })
 
 let replace_queued ~session ~inputs =
   let rec first_empty index = function
@@ -238,13 +239,16 @@ let jsont =
     |> Jsont.Object.Case.map "interrupt" ~dec:Fun.id
   in
   let queue_next_case =
-    Jsont.Object.map ~kind:"queue-next command" (fun session id input ->
-        decode_result (queue_next ?id ~session ~input ()))
+    Jsont.Object.map ~kind:"queue-next command" (fun session id origin input ->
+        decode_result (queue_next ?id ?origin ~session ~input ()))
     |> Jsont.Object.mem "session" Mentat_session.Id.jsont ~enc:(function
       | Queue_next { session; _ } -> session
       | _ -> assert false)
     |> Jsont.Object.opt_mem "id" Mentat_session.Queue.Id.jsont ~enc:(function
       | Queue_next { id; _ } -> id
+      | _ -> assert false)
+    |> Jsont.Object.opt_mem "origin" Mentat_session.Origin.jsont ~enc:(function
+      | Queue_next { origin; _ } -> origin
       | _ -> assert false)
     |> Jsont.Object.mem "input" (Jsont.list Mentat_llm.Content.jsont)
          ~enc:(function

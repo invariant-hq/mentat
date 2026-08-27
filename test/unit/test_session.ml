@@ -395,6 +395,7 @@ let board items = ok_or "board" (Session.Task.Board.make items)
 
 let queue_entry ?(id = "q-1") text =
   Session.Queue.Entry.make ~id:(queue_id id) ~input:[ Llm.Content.text text ]
+    ()
 
 let finish ?(outcome = Session.Turn.Outcome.completed) t =
   Event.turn_finished ~turn:(Session.Turn.id t) outcome
@@ -4008,10 +4009,87 @@ let queue_group =
             (State.pending_queue cleared));
       test "constructors validate entries" (fun () ->
           expect_invalid_arg "empty input" (fun () ->
-              Session.Queue.Entry.make ~id:(queue_id "q-1") ~input:[]);
+              Session.Queue.Entry.make ~id:(queue_id "q-1") ~input:[] ());
           expect_invalid_arg "duplicate ids in a replacement" (fun () ->
               Session.Queue.Update.replaced
                 [ queue_entry ~id:"q-1" "one"; queue_entry ~id:"q-1" "two" ]));
+      test "entry origins round-trip and absence means the owner" (fun () ->
+          let roundtrip entry =
+            decode Session.Queue.Entry.jsont
+              (encode Session.Queue.Entry.jsont entry)
+          in
+          let owner = queue_entry ~id:"q-owner" "from the owner" in
+          is_true ~msg:"an owner entry has no origin"
+            (Option.is_none (Session.Queue.Entry.origin owner));
+          is_true ~msg:"an owner entry round-trips"
+            (Session.Queue.Entry.equal owner (roundtrip owner));
+          let from_agent =
+            Session.Queue.Entry.make
+              ~origin:(Session.Origin.agent (Session.Id.of_string "s-parent"))
+              ~id:(queue_id "q-agent")
+              ~input:[ Llm.Content.text "from the parent" ]
+              ()
+          in
+          is_true ~msg:"an agent-origin entry round-trips"
+            (Session.Queue.Entry.equal from_agent (roundtrip from_agent));
+          let from_trigger =
+            Session.Queue.Entry.make
+              ~origin:
+                (Session.Origin.trigger ~charter:"nightly-review"
+                   ~digest:"0f9a4c1d2e3b4a5f" ~key:"delivery-42")
+              ~id:(queue_id "q-trigger")
+              ~input:[ Llm.Content.text "from the trigger" ]
+              ()
+          in
+          is_true ~msg:"a trigger-origin entry round-trips"
+            (Session.Queue.Entry.equal from_trigger (roundtrip from_trigger));
+          let event =
+            Event.queue_updated (Session.Queue.Update.enqueued from_agent)
+          in
+          is_true ~msg:"the enqueued fact keeps the origin"
+            (Event.equal event (decode Event.jsont (encode Event.jsont event)));
+          (* Decoder-first: an entry written before the member existed
+             decodes forever, as the owner's. *)
+          let bare =
+            decode Session.Queue.Entry.jsont
+              (json_object
+                 [
+                   ("id", Json.string "q-old");
+                   ( "input",
+                     json_array
+                       [
+                         json_object
+                           [
+                             ("type", Json.string "text");
+                             ("text", Json.string "old journal");
+                           ];
+                       ] );
+                 ])
+          in
+          is_true ~msg:"an origin-less entry decodes as the owner's"
+            (Option.is_none (Session.Queue.Entry.origin bare));
+          assert_decode_error "unknown origin tag" Session.Origin.jsont
+            (json_object [ ("type", Json.string "cron") ]);
+          assert_decode_error "agent origin without a session"
+            Session.Origin.jsont
+            (json_object [ ("type", Json.string "agent") ]);
+          assert_decode_error "trigger origin with an empty member"
+            Session.Origin.jsont
+            (json_object
+               [
+                 ("type", Json.string "trigger");
+                 ("charter", Json.string "");
+                 ("digest", Json.string "0f9a4c1d2e3b4a5f");
+                 ("key", Json.string "delivery-42");
+               ]);
+          assert_decode_error "origin with an unknown member"
+            Session.Origin.jsont
+            (json_object
+               [
+                 ("type", Json.string "agent");
+                 ("session", Json.string "s-parent");
+                 ("actor", Json.string "host");
+               ]));
       test "pending-fix F13: a duplicate pending entry id is rejected"
         (fun () ->
           (* Two pending entries with one id would make Queued-origin admission

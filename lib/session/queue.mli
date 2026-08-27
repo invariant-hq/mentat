@@ -6,12 +6,14 @@
 (** Durable next-turn queue facts.
 
     While a turn runs, the user may queue further inputs to be admitted as their
-    own turns once the current one settles. The queue's mutations are durable
-    facts ({!Update.t}); {e admission} is not a fact but a derived read: a
-    {!Turn.t} whose origin is {!Turn.Origin.Queued} consumes the named entry. An
-    interrupted turn preserves the pending queue for immediate correction
-    admission; a failed turn empties it because failure does not establish a
-    safe handoff boundary.
+    own turns once the current one settles — and the queue is also the mailbox:
+    an input delivered on another agent's behalf is the same kind of entry,
+    carrying its sender as an {!Origin} member. The queue's mutations are
+    durable facts ({!Update.t}); {e admission} is not a fact but a derived
+    read: a {!Turn.t} whose origin is {!Turn.Origin.Queued} consumes the named
+    entry. An interrupted turn preserves the pending queue for immediate
+    correction admission; a failed turn empties it because failure does not
+    establish a safe handoff boundary.
 
     Queue values carry no ordering cursor and no timestamp; order is journal
     order. *)
@@ -23,8 +25,8 @@ module Id : sig
   (** The type for stable queue-entry identifiers, minted engine-side by one of
       two schemes: an interactive entry's id is minted from its journal position
       (at-most-once, position-keyed so identical inputs stay distinct entries);
-      a child [send_message] entry's id is content-derived from its
-      [(turn, call_id)] (at-least-once delivery, idempotent under re-drive).
+      a delivered message's id is content-derived from the sender's recorded
+      position (at-least-once delivery, idempotent under re-drive).
 
       Invariant: an identifier's stable textual form is non-empty. *)
 
@@ -55,11 +57,19 @@ end
 (** {1:entries Entries} *)
 
 module Entry : sig
-  type t = private { id : Id.t; input : Mentat_llm.Content.t list }
-  (** The type for a queued turn input. Invariant: [input] is non-empty. *)
+  type t = private {
+    id : Id.t;
+    input : Mentat_llm.Content.t list;
+    origin : Origin.t option;
+  }
+  (** The type for a queued turn input. Invariant: [input] is non-empty.
+      [origin] is the sender when the entry was delivered on another agent's
+      behalf; an absent origin means the owner ({!Origin}). *)
 
-  val make : id:Id.t -> input:Mentat_llm.Content.t list -> t
-  (** [make ~id ~input] is a queue entry.
+  val make : ?origin:Origin.t -> id:Id.t -> input:Mentat_llm.Content.t list ->
+    unit -> t
+  (** [make ~id ~input ()] is a queue entry, carrying [origin] when the input
+      was sent on another agent's behalf.
 
       Raises [Invalid_argument] if [input] is empty. *)
 
@@ -68,6 +78,9 @@ module Entry : sig
 
   val input : t -> Mentat_llm.Content.t list
   (** [input t] is [t]'s queued user content. *)
+
+  val origin : t -> Origin.t option
+  (** [origin t] is [t]'s sender; [None] means the owner. *)
 
   val equal : t -> t -> bool
   (** [equal a b] is [true] iff [a] and [b] are the same entry. *)

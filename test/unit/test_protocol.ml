@@ -292,6 +292,7 @@ let board items = ok_or "board" (Session.Task.Board.make items)
 
 let queue_entry ?(id = "q-1") text =
   Session.Queue.Entry.make ~id:(queue_id id) ~input:[ Llm.Content.text text ]
+    ()
 
 let finish ?(outcome = Session.Turn.Outcome.completed) t =
   Event.turn_finished ~turn:(Session.Turn.id t) outcome
@@ -1865,6 +1866,30 @@ let command_codec_group =
           assert_v_and_tag ~msg:"queue_next with id" "queue_next" json;
           equal command_value ~msg:"queue_next with id: round-trip" command
             (decode Protocol.Command.jsont json));
+      test "queue_next round-trips its origin member" (fun () ->
+          (* The optional [origin] member: present it survives the round trip
+             with either arm — the sender a delivery attributes the entry to —
+             and absent it stays absent (the owner's spelling). *)
+          List.iter
+            (fun origin ->
+              let command =
+                ok_or "queue_next with origin"
+                  (Protocol.Command.queue_next
+                     ~id:(Session.Queue.Id.of_string "q-derived")
+                     ~origin ~session:fix_session_id
+                     ~input:[ Llm.Content.text "Next." ]
+                     ())
+              in
+              let json = encode Protocol.Command.jsont command in
+              assert_v_and_tag ~msg:"queue_next with origin" "queue_next" json;
+              equal command_value ~msg:"queue_next with origin: round-trip"
+                command
+                (decode Protocol.Command.jsont json))
+            [
+              Session.Origin.agent (session_id "session-b");
+              Session.Origin.trigger ~charter:"nightly-review"
+                ~digest:"0f9a4c1d2e3b4a5f" ~key:"delivery-42";
+            ]);
       test "retired goal vocabulary is a loud decode error" (fun () ->
           (* Goals were retired outright: the tags never decode again, and a
              payload that carries them stops loading rather than being
@@ -2630,6 +2655,29 @@ let variant_shapes =
               ~rules:
                 [ Permission.Policy.Rule.allow Permission.Policy.Match.any ]))
     );
+    (* The queue command's optional origin member: the origin-less shape rides
+       the base command.queue_next; these pin the delivery shape — the derived
+       id plus each origin arm. *)
+    ( "command.queue_next.origin",
+      canonical Protocol.Command.jsont
+        (ok_or "queue_next with an agent origin"
+           (Protocol.Command.queue_next
+              ~id:(Session.Queue.Id.of_string "q-derived")
+              ~origin:(Session.Origin.agent (session_id "session-b"))
+              ~session:fix_session_id
+              ~input:[ Llm.Content.text "Next." ]
+              ())) );
+    ( "command.queue_next.origin.trigger",
+      canonical Protocol.Command.jsont
+        (ok_or "queue_next with a trigger origin"
+           (Protocol.Command.queue_next
+              ~id:(Session.Queue.Id.of_string "q-derived")
+              ~origin:
+                (Session.Origin.trigger ~charter:"nightly-review"
+                   ~digest:"0f9a4c1d2e3b4a5f" ~key:"delivery-42")
+              ~session:fix_session_id
+              ~input:[ Llm.Content.text "Next." ]
+              ())) );
     (* Model-download phases: downloading rides the base arm. *)
     ( "progress.model.download.checking",
       canonical Protocol.Progress.jsont

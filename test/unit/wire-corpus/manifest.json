@@ -9,6 +9,8 @@
     "command.interrupt",
     "command.prompt",
     "command.queue_next",
+    "command.queue_next.origin",
+    "command.queue_next.origin.trigger",
     "command.replace_queued",
     "error.active_turn_exists",
     "error.already_resolved",

@@ -1,0 +1,16 @@
+{
+  "type": "queue_next",
+  "v": 1,
+  "session": "session-c",
+  "id": "q-derived",
+  "origin": {
+    "type": "agent",
+    "session": "session-b"
+  },
+  "input": [
+    {
+      "type": "text",
+      "text": "Next."
+    }
+  ]
+}

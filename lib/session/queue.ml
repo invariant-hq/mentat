@@ -16,28 +16,41 @@ module Id =
     ()
 
 module Entry = struct
-  type t = { id : Id.t; input : Mentat_llm.Content.t list }
+  type t = {
+    id : Id.t;
+    input : Mentat_llm.Content.t list;
+    origin : Origin.t option;
+  }
 
-  let make ~id ~input =
+  let make ?origin ~id ~input () =
     if List.is_empty input then invalid "Entry.make" "input must not be empty";
-    { id; input }
+    { id; input; origin }
 
   let id t = t.id
   let input t = t.input
+  let origin t = t.origin
 
   (* Content blocks carry no JSON and no functions, so structural equality is
      exact here (see {!Mentat_llm.Content}). *)
-  let equal a b = Id.equal a.id b.id && a.input = b.input
+  let equal a b =
+    Id.equal a.id b.id && a.input = b.input
+    && Option.equal Origin.equal a.origin b.origin
 
   let pp ppf t =
-    Format.fprintf ppf "@[<hov>{ id = %a; input = [%d block(s)] }@]" Id.pp t.id
+    Format.fprintf ppf "@[<hov>{ id = %a; input = [%d block(s)]%a }@]" Id.pp
+      t.id
       (List.length t.input)
+      (fun ppf -> function
+        | None -> ()
+        | Some origin -> Format.fprintf ppf "; origin = %a" Origin.pp origin)
+      t.origin
 
   let jsont =
-    Jsont.Object.map ~kind:"queue entry" (fun id input ->
-        decode_invalid_arg (fun () -> make ~id ~input))
+    Jsont.Object.map ~kind:"queue entry" (fun id input origin ->
+        decode_invalid_arg (fun () -> make ?origin ~id ~input ()))
     |> Jsont.Object.mem "id" Id.jsont ~enc:id
     |> Jsont.Object.mem "input" (Jsont.list Mentat_llm.Content.jsont) ~enc:input
+    |> Jsont.Object.opt_mem "origin" Origin.jsont ~enc:origin
     |> Jsont.Object.error_unknown |> Jsont.Object.finish
 end
 
