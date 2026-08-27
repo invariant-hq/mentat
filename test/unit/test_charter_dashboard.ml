@@ -83,11 +83,11 @@ let observed ?(receipts = Ok []) ?(runs = []) loaded =
   Charter_dashboard.Observed.Charter
     { Charter_dashboard.Observed.loaded; receipts; runs }
 
-let open_run ~fence (pending : Charter_reconcile.Pending.t) =
+let open_run ~fence (pending : Receipt.Pending.t) =
   { Charter_dashboard.Observed.pending; fence }
 
 let pending ?(spawned_at = now -. 60.) ~digest ~identity session =
-  { Charter_reconcile.Pending.identity; digest; session; spawned_at }
+  { Receipt.Pending.identity; digest; session; spawned_at }
 
 let store_error message =
   { Charter_store.Error.operation = "read"; path = "/nonexistent"; reason = message }

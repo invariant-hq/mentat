@@ -3,6 +3,16 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
+(* The actions that all say "this head wants review" collapse to one class:
+   the head commit already separates pushes, so a second delivery about the
+   same head — reopened after opened, ready after draft — is the same event,
+   not a fresh spend. This is the one definition of the class fold: the
+   identity mint, the review-class predicate, and the delivery rebuild all
+   read it here. *)
+let action_class = function
+  | "opened" | "reopened" | "ready_for_review" | "synchronize" -> "head"
+  | action -> action
+
 module Pull_request = struct
   type t = {
     action : string;
@@ -175,20 +185,81 @@ module Pull_request = struct
         in
         Ok { action; number; head_sha; base_ref; draft; author_association; repo }
       | Ok _ -> error ~context:"" "payload must be a JSON object"
+
+  (* The identity grammar this reads back is [Identity.to_string]'s:
+     [github:<repo>#<number>@<head_sha>:<class>]. The validated member
+     shapes leave no byte free to shift across a delimiter — the repository
+     grammar admits no ['#'], the number is digits, the head hash is hex —
+     so the first ['#'], the following ['@'], and the following [':'] are
+     the members' own boundaries. *)
+  let identity_parts identity =
+    let prefix = "github:" in
+    if not (String.starts_with ~prefix identity) then None
+    else
+      let start = String.length prefix in
+      match String.index_from_opt identity start '#' with
+      | None -> None
+      | Some hash -> (
+          match String.index_from_opt identity (hash + 1) '@' with
+          | None -> None
+          | Some at -> (
+              match String.index_from_opt identity (at + 1) ':' with
+              | None -> None
+              | Some colon ->
+                  let repo = String.sub identity start (hash - start) in
+                  let number =
+                    String.sub identity (hash + 1) (at - hash - 1)
+                  in
+                  let head_sha = String.sub identity (at + 1) (colon - at - 1) in
+                  let cls =
+                    String.sub identity (colon + 1)
+                      (String.length identity - colon - 1)
+                  in
+                  Some (repo, number, head_sha, cls)))
+
+  let of_delivery ~identity ~action ~base_ref ~draft ~author_association =
+    match identity_parts identity with
+    | None -> None
+    | Some (repo, number, head_sha, cls) -> (
+        match int_of_string_opt number with
+        | None -> None
+        | Some number ->
+            let repo_ok =
+              match Mentat_json.repo_full_name ~context:"" repo with
+              | Ok _ -> true
+              | Error _ -> false
+            in
+            if
+              repo_ok && number >= 1 && commit_sha head_sha
+              && action_token action
+              && String.equal cls (action_class action)
+              && ref_name base_ref
+              && association_token author_association
+            then
+              Some
+                {
+                  action;
+                  number;
+                  head_sha;
+                  base_ref;
+                  draft;
+                  author_association;
+                  repo;
+                }
+            else None)
 end
+
+let ping bytes =
+  match Mentat_json.Lenient.decode bytes with
+  | None -> false
+  | Some json ->
+      Option.is_some (Mentat_json.Lenient.mem "zen" json)
+      || Option.is_some (Mentat_json.Lenient.mem "hook_id" json)
 
 module Identity = struct
   type t = string
 
-  (* The actions that all say "this head wants review" collapse to one
-     class: the head commit already separates pushes, so a second delivery
-     about the same head — reopened after opened, ready after draft — is the
-     same event, not a fresh spend. *)
-  let review_class = function
-    | "opened" | "reopened" | "ready_for_review" | "synchronize" -> true
-    | _ -> false
-
-  let action_class action = if review_class action then "head" else action
+  let review_class action = String.equal (action_class action) "head"
 
   let of_pull_request (pr : Pull_request.t) =
     let { Pull_request.action; number; head_sha; repo; _ } = pr in

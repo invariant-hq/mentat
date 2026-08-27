@@ -448,7 +448,15 @@ let sample_session = "c-fdfec12877f34773"
 
 let all_kinds =
   [
-    Receipt.Kind.Delivery;
+    Receipt.Kind.Delivery None;
+    Receipt.Kind.Delivery
+      (Some
+         {
+           Receipt.Delivery.action = "opened";
+           base_ref = "main";
+           draft = false;
+           author_association = "OWNER";
+         });
     Receipt.Kind.Disposition
       (Receipt.Disposition.Spawned { session = sample_session });
     Receipt.Kind.Disposition (Receipt.Disposition.Skipped "draft pull requests are not admitted");
@@ -645,7 +653,7 @@ let receipt_diagnostics () =
      arithmetic, no local zone. *)
   equal string ~msg:"delivery line"
     (Printf.sprintf "1970-01-02T01:01:01Z delivery %s" sample_identity)
-    (Receipt.diagnostic (receipt Receipt.Kind.Delivery));
+    (Receipt.diagnostic (receipt (Receipt.Kind.Delivery None)));
   equal string ~msg:"bare dispositions render their wire token"
     (Printf.sprintf "1970-01-02T01:01:01Z already_exists %s" sample_identity)
     (Receipt.diagnostic
@@ -710,7 +718,7 @@ let receipt_log_queries () =
   in
   let log =
     [
-      receipt Receipt.Kind.Delivery;
+      receipt (Receipt.Kind.Delivery None);
       receipt (Receipt.Kind.Disposition (Receipt.Disposition.Spawned { session = "c-1" }));
       receipt
         (Receipt.Kind.Alert
@@ -732,7 +740,7 @@ let receipt_log_queries () =
        ~identity:"cli:0123456789abcdef:k" log);
   is_false ~msg:"a delivery is not a spawn"
     (Receipt.spawn_recorded ~digest:sample_digest ~identity:sample_identity
-       [ receipt Receipt.Kind.Delivery ]);
+       [ receipt (Receipt.Kind.Delivery None) ]);
   equal (option string) ~msg:"the last clean settled reap names its session"
     (Some "c-2")
     (Receipt.settled_session ~digest:sample_digest ~identity:sample_identity
@@ -1172,6 +1180,378 @@ let run_id_mint () =
   | exception Invalid_argument _ -> ()
   | _ -> fail "a malformed policy digest must raise"
 
+(* The delivery event members: the group codec, the rebuild, and the ping
+   recognizer behind the body-derived route. *)
+
+let delivery_fields =
+  {
+    Receipt.Delivery.action = "opened";
+    base_ref = "main";
+    draft = false;
+    author_association = "OWNER";
+  }
+
+let delivery_members () =
+  let line =
+    Receipt.encode (receipt (Receipt.Kind.Delivery (Some delivery_fields)))
+  in
+  (match Receipt.decode line with
+  | Ok { Receipt.kind = Receipt.Kind.Delivery (Some d); _ } ->
+      equal string ~msg:"action survives" "opened" d.Receipt.Delivery.action;
+      equal string ~msg:"base_ref survives" "main" d.Receipt.Delivery.base_ref;
+      is_false ~msg:"draft survives" d.Receipt.Delivery.draft;
+      equal string ~msg:"association survives" "OWNER"
+        d.Receipt.Delivery.author_association
+  | Ok _ -> fail "expected a delivery with members"
+  | Error e -> failf "decode: %s" (Receipt.Error.message e));
+  let base = {|"at":90061,"identity":"i","digest":"ab"|} in
+  (match
+     Receipt.decode (Printf.sprintf {|{"kind":"delivery",%s}|} base)
+   with
+  | Ok { Receipt.kind = Receipt.Kind.Delivery None; _ } -> ()
+  | Ok _ -> fail "a memberless delivery line must decode to None"
+  | Error e -> failf "legacy decode: %s" (Receipt.Error.message e));
+  receipt_rejects ~msg:"a partial member set is a torn line"
+    ~expect:{|missing member "base_ref"|}
+    (Printf.sprintf {|{"kind":"delivery",%s,"action":"opened"}|} base);
+  receipt_rejects ~msg:"draft must be a boolean" ~expect:"draft"
+    (Printf.sprintf
+       {|{"kind":"delivery",%s,"action":"opened","base_ref":"main","draft":"no","author_association":"OWNER"}|}
+       base)
+
+let event_of_delivery () =
+  let pr =
+    {
+      Event.Pull_request.action = "opened";
+      number = 312;
+      head_sha = sample_sha;
+      base_ref = "main";
+      draft = false;
+      author_association = "OWNER";
+      repo = "invariant/spice";
+    }
+  in
+  let identity = Event.Identity.to_string (Event.Identity.of_pull_request pr) in
+  let rebuild ?(identity = identity) ?(action = "opened") ?(base_ref = "main")
+      ?(draft = false) ?(author_association = "OWNER") () =
+    Event.Pull_request.of_delivery ~identity ~action ~base_ref ~draft
+      ~author_association
+  in
+  (match rebuild () with
+  | Some rebuilt ->
+      equal string ~msg:"the rebuilt event re-derives its own identity"
+        identity
+        (Event.Identity.to_string (Event.Identity.of_pull_request rebuilt));
+      equal int ~msg:"the number reads back" 312
+        rebuilt.Event.Pull_request.number;
+      equal string ~msg:"the head reads back" sample_sha
+        rebuilt.Event.Pull_request.head_sha
+  | None -> fail "a well-formed record must rebuild");
+  is_true ~msg:"a review-class sibling action shares the identity's class"
+    (Option.is_some (rebuild ~action:"synchronize" ()));
+  is_true ~msg:"an action outside the identity's class is refused"
+    (Option.is_none (rebuild ~action:"labeled" ()));
+  is_true ~msg:"a cli identity rebuilds nothing"
+    (Option.is_none
+       (rebuild ~identity:"cli:0123456789abcdef:k" ()));
+  is_true ~msg:"a malformed identity rebuilds nothing"
+    (Option.is_none (rebuild ~identity:"github:oops" ()));
+  is_true ~msg:"a base ref that fails the ref grammar is refused"
+    (Option.is_none (rebuild ~base_ref:"-evil" ()));
+  is_true ~msg:"an association outside the token grammar is refused"
+    (Option.is_none (rebuild ~author_association:"owner" ()))
+
+let ping_recognizer () =
+  is_true ~msg:"a zen body is a ping" (Event.ping {|{"zen":"keep it simple"}|});
+  is_true ~msg:"a hook_id body is a ping"
+    (Event.ping {|{"hook_id":42,"hook":{}}|});
+  is_false ~msg:"a pull_request body is not a ping"
+    (Event.ping {|{"action":"opened"}|});
+  is_false ~msg:"garbage is not a ping" (Event.ping "not json");
+  is_false ~msg:"a bare array is not a ping" (Event.ping "[]")
+
+(* The reconcile fold's decision tables, driven arm by arm over thunk
+   probes — including which probes each arm may spend. *)
+
+let run_decision =
+  Testable.make
+    ~pp:(fun ppf -> function
+      | `Settle -> Format.pp_print_string ppf "Settle"
+      | `Leave -> Format.pp_print_string ppf "Leave"
+      | `Overdue -> Format.pp_print_string ppf "Overdue"
+      | `Skip reason -> Format.fprintf ppf "Skip %S" reason)
+    ~equal:(fun (a : Record.run) (b : Record.run) ->
+      match (a, b) with
+      | `Settle, `Settle | `Leave, `Leave | `Overdue, `Overdue -> true
+      | `Skip _, `Skip _ -> true
+      | _ -> false)
+
+let never_overdue () : bool = fail "overdue must not be read on this arm"
+
+let run_action ?(overdue = never_overdue) fence =
+  Record.run_action ~fence:(fun () -> fence) ~overdue
+
+let run_table () =
+  equal run_decision ~msg:"a free fence settles the orphaned record honestly"
+    `Settle (run_action `Free);
+  equal run_decision ~msg:"an unprobeable fence is never settled over"
+    (`Skip "") (run_action (`Io "boom"));
+  equal run_decision ~msg:"a live holder within budget is left alone" `Leave
+    (run_action ~overdue:(fun () -> false) `Held);
+  equal run_decision ~msg:"a live holder past budget is narrated, not killed"
+    `Overdue
+    (run_action ~overdue:(fun () -> true) `Held)
+
+let sweep_decision =
+  Testable.make
+    ~pp:(fun ppf -> function
+      | `Drive -> Format.pp_print_string ppf "Drive"
+      | `Republish session -> Format.fprintf ppf "Republish %s" session
+      | `Done -> Format.pp_print_string ppf "Done")
+    ~equal:(fun (a : Record.sweep) (b : Record.sweep) ->
+      match (a, b) with
+      | `Drive, `Drive | `Done, `Done -> true
+      | `Republish a, `Republish b -> String.equal a b
+      | _ -> false)
+
+let never_spawned () : bool = fail "spawned must not be read on this arm"
+let never_egress () : bool = fail "egress must not be read on this arm"
+
+let never_settled () : string option =
+  fail "settled must not be read on this arm"
+
+let sweep_action ?(spawned = never_spawned) ?(egress = never_egress)
+    ?(settled = never_settled) claimed =
+  Record.sweep_action ~claimed ~spawned ~egress ~settled
+
+let sweep_table () =
+  equal sweep_decision ~msg:"an unclaimed identity is driven whole" `Drive
+    (sweep_action false);
+  equal sweep_decision
+    ~msg:"a claim with no spawned line is adopted and driven" `Drive
+    (sweep_action ~spawned:(fun () -> false) true);
+  equal sweep_decision ~msg:"an egress line completes the record" `Done
+    (sweep_action ~spawned:(fun () -> true) ~egress:(fun () -> true) true);
+  equal sweep_decision
+    ~msg:"a publishable settle with no egress re-enters the publisher"
+    (`Republish "s1")
+    (sweep_action
+       ~spawned:(fun () -> true)
+       ~egress:(fun () -> false)
+       ~settled:(fun () -> Some "s1")
+       true);
+  equal sweep_decision
+    ~msg:"a committed record with nothing publishable is left alone" `Done
+    (sweep_action
+       ~spawned:(fun () -> true)
+       ~egress:(fun () -> false)
+       ~settled:(fun () -> None)
+       true)
+
+(* The open-record folds: pending runs and undecided deliveries. *)
+
+let pending_receipt ?(at = 1000.) ~identity ~digest kind =
+  { Receipt.at; identity; digest; kind }
+
+let fold_spawned ?at ~identity ~digest session =
+  pending_receipt ?at ~identity ~digest
+    (Receipt.Kind.Disposition (Receipt.Disposition.Spawned { session }))
+
+let fold_reaped ?at ~identity ~digest session =
+  pending_receipt ?at ~identity ~digest
+    (Receipt.Kind.Disposition
+       (Receipt.Disposition.Reaped
+          {
+            session;
+            exit = 0;
+            head = Receipt.Head.Settled;
+            usage = Jsont.Json.object' [];
+            usd = None;
+            cause = Receipt.Cause.Exited;
+          }))
+
+let pending =
+  Testable.make
+    ~pp:(fun ppf (p : Receipt.Pending.t) ->
+      Format.fprintf ppf "%s@%s:%s at %g" p.Receipt.Pending.identity
+        p.Receipt.Pending.digest p.Receipt.Pending.session
+        p.Receipt.Pending.spawned_at)
+    ~equal:(fun (a : Receipt.Pending.t) b ->
+      String.equal a.Receipt.Pending.identity b.Receipt.Pending.identity
+      && String.equal a.Receipt.Pending.digest b.Receipt.Pending.digest
+      && String.equal a.Receipt.Pending.session b.Receipt.Pending.session
+      && Float.equal a.Receipt.Pending.spawned_at b.Receipt.Pending.spawned_at)
+
+let open_run ~identity ~digest ~session ~spawned_at =
+  { Receipt.Pending.identity; digest; session; spawned_at }
+
+let pending_fold () =
+  let runs = Testable.list pending in
+  equal runs ~msg:"an empty log holds nothing open" [] (Receipt.pending_runs []);
+  equal runs ~msg:"a delivery alone opens nothing" []
+    (Receipt.pending_runs
+       [ pending_receipt ~identity:"i" ~digest:"d" (Receipt.Kind.Delivery None) ]);
+  equal runs ~msg:"other dispositions neither open nor close" []
+    (Receipt.pending_runs
+       [
+         pending_receipt ~identity:"i" ~digest:"d"
+           (Receipt.Kind.Disposition (Receipt.Disposition.Skipped "draft"));
+         pending_receipt ~identity:"i" ~digest:"d"
+           (Receipt.Kind.Disposition Receipt.Disposition.Dup);
+       ]);
+  equal runs ~msg:"a spawned line with no reap is open"
+    [ open_run ~identity:"i" ~digest:"d" ~session:"s" ~spawned_at:7. ]
+    (Receipt.pending_runs [ fold_spawned ~at:7. ~identity:"i" ~digest:"d" "s" ]);
+  equal runs ~msg:"a reaped line closes its spawn" []
+    (Receipt.pending_runs
+       [
+         fold_spawned ~identity:"i" ~digest:"d" "s";
+         fold_reaped ~identity:"i" ~digest:"d" "s";
+       ]);
+  equal runs ~msg:"pairing is by digest and identity, never by session" []
+    (Receipt.pending_runs
+       [
+         fold_spawned ~identity:"i" ~digest:"d" "s";
+         fold_reaped ~identity:"i" ~digest:"d" "other";
+       ]);
+  equal runs ~msg:"a reap under another digest closes nothing"
+    [ open_run ~identity:"i" ~digest:"d1" ~session:"s" ~spawned_at:7. ]
+    (Receipt.pending_runs
+       [
+         fold_spawned ~at:7. ~identity:"i" ~digest:"d1" "s";
+         fold_reaped ~identity:"i" ~digest:"d2" "s";
+       ]);
+  equal runs ~msg:"a reap under another identity closes nothing"
+    [ open_run ~identity:"a" ~digest:"d" ~session:"s" ~spawned_at:7. ]
+    (Receipt.pending_runs
+       [
+         fold_spawned ~at:7. ~identity:"a" ~digest:"d" "s";
+         fold_reaped ~identity:"b" ~digest:"d" "s";
+       ]);
+  equal runs ~msg:"open runs keep log order"
+    [
+      open_run ~identity:"a" ~digest:"d" ~session:"s1" ~spawned_at:1.;
+      open_run ~identity:"b" ~digest:"d" ~session:"s2" ~spawned_at:2.;
+    ]
+    (Receipt.pending_runs
+       [
+         fold_spawned ~at:1. ~identity:"a" ~digest:"d" "s1";
+         pending_receipt ~identity:"c" ~digest:"d" (Receipt.Kind.Delivery None);
+         fold_spawned ~at:2. ~identity:"b" ~digest:"d" "s2";
+       ])
+
+let open_deliveries_fold () =
+  let ats receipts =
+    List.map (fun (r : Receipt.t) -> r.Receipt.at) receipts
+  in
+  let deliver ~at ~identity ~digest =
+    pending_receipt ~at ~identity ~digest (Receipt.Kind.Delivery None)
+  in
+  equal (Testable.list float_exact) ~msg:"an empty log owes nothing" []
+    (ats (Receipt.open_deliveries []));
+  equal (Testable.list float_exact)
+    ~msg:"an undecided delivery is open" [ 1. ]
+    (ats (Receipt.open_deliveries [ deliver ~at:1. ~identity:"i" ~digest:"d" ]));
+  equal (Testable.list float_exact)
+    ~msg:"any disposition closes the pair" []
+    (ats
+       (Receipt.open_deliveries
+          [
+            deliver ~at:1. ~identity:"i" ~digest:"d";
+            pending_receipt ~identity:"i" ~digest:"d"
+              (Receipt.Kind.Disposition (Receipt.Disposition.Skipped "draft"));
+          ]));
+  equal (Testable.list float_exact)
+    ~msg:"a redelivery collapses to its last line" [ 2. ]
+    (ats
+       (Receipt.open_deliveries
+          [
+            deliver ~at:1. ~identity:"i" ~digest:"d";
+            deliver ~at:2. ~identity:"i" ~digest:"d";
+          ]));
+  equal (Testable.list float_exact)
+    ~msg:"another digest's disposition closes nothing" [ 1. ]
+    (ats
+       (Receipt.open_deliveries
+          [
+            deliver ~at:1. ~identity:"i" ~digest:"d1";
+            pending_receipt ~identity:"i" ~digest:"d2"
+              (Receipt.Kind.Disposition Receipt.Disposition.Dup);
+          ]))
+
+let status_projections () =
+  equal string ~msg:"a bare disposition labels its wire token" "dup"
+    (Receipt.Disposition.label Receipt.Disposition.Dup);
+  equal string ~msg:"a fenced disposition names its meter"
+    "fenced:runs_per_hour"
+    (Receipt.Disposition.label
+       (Receipt.Disposition.Fenced Receipt.Meter.Runs_per_hour));
+  equal string ~msg:"a reaped disposition names its exit" "reaped:130"
+    (Receipt.Disposition.label
+       (Receipt.Disposition.Reaped
+          {
+            session = sample_session;
+            exit = 130;
+            head = Receipt.Head.Interrupted;
+            usage = Jsont.Json.object' [];
+            usd = None;
+            cause = Receipt.Cause.Wall_clock;
+          }));
+  let budget ?usd_per_day ?runs_per_hour () =
+    { Charter.Budget.wall_clock = 900.; usd_per_day; runs_per_hour }
+  in
+  let reaped_now =
+    pending_receipt ~at:90000. ~identity:sample_identity ~digest:sample_digest
+      (Receipt.Kind.Disposition
+         (Receipt.Disposition.Reaped
+            {
+              session = sample_session;
+              exit = 0;
+              head = Receipt.Head.Settled;
+              usage = Jsont.Json.object' [];
+              usd = Some 1.25;
+              cause = Receipt.Cause.Exited;
+            }))
+  in
+  equal string ~msg:"the metered spend line"
+    "spend 24h: 1.25 usd of 15.00"
+    (Fence.spend_line ~digest:sample_digest ~now:90061.
+       ~budget:(budget ~usd_per_day:15.0 ())
+       [ reaped_now ]);
+  equal string ~msg:"the unmetered spend line" "spend 24h: 1.25 usd (no limit)"
+    (Fence.spend_line ~digest:sample_digest ~now:90061. ~budget:(budget ())
+       [ reaped_now ]);
+  equal string ~msg:"the webhook rate line carries the in-admission default"
+    "runs 1h: 0 of 6"
+    (Fence.runs_line ~digest:sample_digest ~now:90061. ~budget:(budget ())
+       ~trigger:`Webhook []);
+  equal string ~msg:"the cli rate line is unmetered" "runs 1h: 0 (no limit)"
+    (Fence.runs_line ~digest:sample_digest ~now:90061. ~budget:(budget ())
+       ~trigger:`Cli []);
+  match Charter.decode conforming with
+  | Error e -> failf "decode: %s" (Charter.Error.message e)
+  | Ok charter ->
+      is_true ~msg:"a webhook arm is a webhook-shaped delivery"
+        (match Charter.delivery_trigger charter with
+        | `Webhook -> true
+        | `Cli -> false)
+
+let reap_recorded_fold () =
+  let log =
+    [
+      fold_spawned ~identity:sample_identity ~digest:sample_digest "c-1";
+      fold_reaped ~identity:sample_identity ~digest:sample_digest "c-1";
+    ]
+  in
+  is_true ~msg:"the reap is recorded"
+    (Receipt.reap_recorded ~digest:sample_digest ~identity:sample_identity log);
+  is_false ~msg:"another digest's reap does not answer"
+    (Receipt.reap_recorded ~digest:"feedfacefeedface"
+       ~identity:sample_identity log);
+  is_false ~msg:"a spawn alone records no reap"
+    (Receipt.reap_recorded ~digest:sample_digest ~identity:sample_identity
+       [ fold_spawned ~identity:sample_identity ~digest:sample_digest "c-1" ])
+
 (* Suite. *)
 
 let () =
@@ -1204,4 +1584,16 @@ let () =
       test "the first fence trip in a window alerts, later trips stay silent"
         fence_alert_dedup;
       test "run ids are stable, admissible session ids" run_id_mint;
+      test "delivery event members ride the line codec as a group"
+        delivery_members;
+      test "a delivery receipt rebuilds its admitted event" event_of_delivery;
+      test "the ping recognizer reads the body, never a header"
+        ping_recognizer;
+      test "the pending-run table" run_table;
+      test "the sweep table" sweep_table;
+      test "the pending fold" pending_fold;
+      test "the open-deliveries fold" open_deliveries_fold;
+      test "status projections speak the log's own vocabulary"
+        status_projections;
+      test "the reap-recorded fold discriminates settles" reap_recorded_fold;
     ]

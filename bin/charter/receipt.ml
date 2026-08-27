@@ -129,11 +129,27 @@ module Disposition = struct
     | Superseded -> "superseded"
     | Refused _ -> "refused"
     | Reaped _ -> "reaped"
+
+  let label t =
+    match t with
+    | Fenced meter -> Printf.sprintf "%s:%s" (name t) (Meter.to_string meter)
+    | Reaped { exit; _ } -> Printf.sprintf "%s:%d" (name t) exit
+    | Spawned _ | Skipped _ | Dup | Already_exists | Superseded | Refused _ ->
+        name t
+end
+
+module Delivery = struct
+  type t = {
+    action : string;
+    base_ref : string;
+    draft : bool;
+    author_association : string;
+  }
 end
 
 module Kind = struct
   type t =
-    | Delivery
+    | Delivery of Delivery.t option
     | Disposition of Disposition.t
     | Egress of {
         summary : [ `Created | `Updated | `None_needed | `Skipped_no_token ];
@@ -180,7 +196,16 @@ let disposition_mems disposition =
       @ [ mem "cause" (str (Cause.to_string cause)) ])
 
 let kind_mems = function
-  | Kind.Delivery -> (str "delivery", [])
+  | Kind.Delivery None -> (str "delivery", [])
+  | Kind.Delivery (Some { Delivery.action; base_ref; draft; author_association })
+    ->
+      ( str "delivery",
+        [
+          mem "action" (str action);
+          mem "base_ref" (str base_ref);
+          mem "draft" (Jsont.Json.bool draft);
+          mem "author_association" (str author_association);
+        ] )
   | Kind.Disposition d -> (str "disposition", disposition_mems d)
   | Kind.Egress { summary; threads } ->
       ( str "egress",
@@ -302,8 +327,39 @@ let decode line =
       let* kind_word = peek_string "kind" mems in
       (match kind_word with
       | "delivery" ->
-          let* slots = route [] in
-          finish slots Kind.Delivery
+          let event_members =
+            [ "action"; "base_ref"; "draft"; "author_association" ]
+          in
+          let* slots = route event_members in
+          (* The event members arrive as a group: a line written before they
+             existed carries none of them; a partial set is a torn line. *)
+          if
+            List.for_all
+              (fun name -> Option.is_none !(List.assoc name slots))
+              event_members
+          then finish slots (Kind.Delivery None)
+          else
+            let* action =
+              let* json = value slots "action" in
+              Mentat_json.as_non_empty_string ~context:"action" json
+            in
+            let* base_ref =
+              let* json = value slots "base_ref" in
+              Mentat_json.as_non_empty_string ~context:"base_ref" json
+            in
+            let* draft =
+              let* json = value slots "draft" in
+              Mentat_json.as_bool ~context:"draft" json
+            in
+            let* author_association =
+              let* json = value slots "author_association" in
+              Mentat_json.as_non_empty_string ~context:"author_association"
+                json
+            in
+            finish slots
+              (Kind.Delivery
+                 (Some
+                    { Delivery.action; base_ref; draft; author_association }))
       | "disposition" -> (
           let* word = peek_string "disposition" mems in
           match word with
@@ -458,7 +514,7 @@ let rfc3339 at =
 let diagnostic t =
   let stamp = rfc3339 t.at in
   match t.kind with
-  | Kind.Delivery -> Printf.sprintf "%s delivery %s" stamp t.identity
+  | Kind.Delivery _ -> Printf.sprintf "%s delivery %s" stamp t.identity
   | Kind.Disposition d -> (
       match d with
       | Disposition.Spawned { session } ->
@@ -503,7 +559,7 @@ let spawn_recorded ~digest ~identity receipts =
       match t.kind with
       | Kind.Disposition (Disposition.Spawned _) ->
           String.equal t.digest digest && String.equal t.identity identity
-      | Kind.Disposition _ | Kind.Delivery | Kind.Egress _ | Kind.Alert _ ->
+      | Kind.Disposition _ | Kind.Delivery _ | Kind.Egress _ | Kind.Alert _ ->
           false)
     receipts
 
@@ -516,7 +572,7 @@ let settled_session ~digest ~identity receipts =
         when String.equal t.digest digest && String.equal t.identity identity
         ->
           Some session
-      | Kind.Disposition _ | Kind.Delivery | Kind.Egress _ | Kind.Alert _ ->
+      | Kind.Disposition _ | Kind.Delivery _ | Kind.Egress _ | Kind.Alert _ ->
           acc)
     None receipts
 
@@ -526,7 +582,17 @@ let egress_recorded ~digest ~identity receipts =
       match t.kind with
       | Kind.Egress _ ->
           String.equal t.digest digest && String.equal t.identity identity
-      | Kind.Delivery | Kind.Disposition _ | Kind.Alert _ -> false)
+      | Kind.Delivery _ | Kind.Disposition _ | Kind.Alert _ -> false)
+    receipts
+
+let reap_recorded ~digest ~identity receipts =
+  List.exists
+    (fun t ->
+      match t.kind with
+      | Kind.Disposition (Disposition.Reaped _) ->
+          String.equal t.digest digest && String.equal t.identity identity
+      | Kind.Disposition _ | Kind.Delivery _ | Kind.Egress _ | Kind.Alert _ ->
+          false)
     receipts
 
 let alerted ~digest ~identity ~transition receipts =
@@ -545,6 +611,66 @@ let alerted ~digest ~identity ~transition receipts =
                ->
                  false)
       | Kind.Alert { window = `Meter _; _ }
-      | Kind.Delivery | Kind.Disposition _ | Kind.Egress _ ->
+      | Kind.Delivery _ | Kind.Disposition _ | Kind.Egress _ ->
           false)
     receipts
+
+module Pending = struct
+  type t = {
+    identity : string;
+    digest : string;
+    session : string;
+    spawned_at : float;
+  }
+end
+
+let pending_runs receipts =
+  let reaped = Hashtbl.create 8 in
+  List.iter
+    (fun t ->
+      match t.kind with
+      | Kind.Disposition (Disposition.Reaped _) ->
+          Hashtbl.replace reaped (t.digest, t.identity) ()
+      | _ -> ())
+    receipts;
+  List.filter_map
+    (fun t ->
+      match t.kind with
+      | Kind.Disposition (Disposition.Spawned { session })
+        when not (Hashtbl.mem reaped (t.digest, t.identity)) ->
+          Some
+            {
+              Pending.identity = t.identity;
+              digest = t.digest;
+              session;
+              spawned_at = t.at;
+            }
+      | _ -> None)
+    receipts
+
+let open_deliveries receipts =
+  let disposed = Hashtbl.create 8 in
+  List.iter
+    (fun t ->
+      match t.kind with
+      | Kind.Disposition _ -> Hashtbl.replace disposed (t.digest, t.identity) ()
+      | _ -> ())
+    receipts;
+  (* The last delivery line per open pair: a redelivery re-records arrival,
+     and the freshest members are the ones worth re-driving. *)
+  let last = Hashtbl.create 8 in
+  List.iter
+    (fun t ->
+      match t.kind with
+      | Kind.Delivery _ when not (Hashtbl.mem disposed (t.digest, t.identity))
+        ->
+          Hashtbl.replace last (t.digest, t.identity) t
+      | _ -> ())
+    receipts;
+  List.filter_map
+    (fun t ->
+      match Hashtbl.find_opt last (t.digest, t.identity) with
+      | Some kept when kept == t -> Some t
+      | Some _ | None -> None)
+    receipts
+

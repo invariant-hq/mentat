@@ -62,6 +62,31 @@ val spawns_in_window : digest:string -> now:float -> Receipt.t list -> int
 (** [spawns_in_window ~digest ~now receipts] is the count of spawned
     dispositions inside the trailing one-hour window. *)
 
+val spend_line :
+  digest:string ->
+  now:float ->
+  budget:Charter.Budget.t ->
+  Receipt.t list ->
+  string
+(** [spend_line ~digest ~now ~budget receipts] is the one-line spend
+    projection every status surface prints — ["spend 24h: 1.25 usd of
+    15.00"], or ["spend 24h: 1.25 usd (no limit)"] when spend is
+    unmetered: {!spend_in_window} rendered against the budget. One
+    projection, so the CLI roster and the dashboard can never disagree on
+    the same meter. *)
+
+val runs_line :
+  digest:string ->
+  now:float ->
+  budget:Charter.Budget.t ->
+  trigger:[ `Cli | `Webhook ] ->
+  Receipt.t list ->
+  string
+(** [runs_line ~digest ~now ~budget ~trigger receipts] is the one-line
+    rate projection — ["runs 1h: 2 of 6"], or ["runs 1h: 2 (no limit)"]
+    when {!effective_runs_per_hour} answers [None]: {!spawns_in_window}
+    rendered against the limit admission itself applies. *)
+
 val should_alert :
   digest:string -> now:float -> meter:Receipt.Meter.t -> Receipt.t list -> bool
 (** [should_alert ~digest ~now ~meter receipts] is [true] iff no alert

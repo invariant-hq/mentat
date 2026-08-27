@@ -68,6 +68,9 @@ let webhook_arm t =
       | Trigger.Github_webhook arm -> Some arm | Trigger.Cli -> None)
     t.triggers
 
+let delivery_trigger t =
+  match webhook_arm t with Some _ -> `Webhook | None -> `Cli
+
 module Error = Mentat_json.Error
 
 let ( let* ) = Result.bind

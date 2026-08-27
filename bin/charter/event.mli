@@ -58,7 +58,34 @@ module Pull_request : sig
       payload could ever need is an [Error] before parsing begins — the
       parser recurses per level, and a hostile megabyte of brackets must be
       a decode error, never a stack fault. *)
+
+  val of_delivery :
+    identity:string ->
+    action:string ->
+    base_ref:string ->
+    draft:bool ->
+    author_association:string ->
+    t option
+  (** [of_delivery ~identity ~action ~base_ref ~draft ~author_association]
+      rebuilds the event a delivery receipt admitted: the repository,
+      number, and head commit are read back from [identity] (the
+      pull-request identity grammar {!Identity.to_string} renders), and the
+      remaining members come from the receipt's own delivery fields. Every
+      member walks the same shape validation {!decode} applies, and the
+      identity's action class must be [action]'s own — [None] for a
+      cli-fire identity, a malformed identity, a member that fails its
+      shape, or an action whose class disagrees with the identity, so a
+      corrupt record can never re-enter the pipeline as an event. *)
 end
+
+val ping : string -> bool
+(** [ping bytes] is [true] iff [bytes] is recognizably a GitHub webhook
+    [ping] payload: a JSON object carrying a [zen] or [hook_id] member.
+    The delivery route consults it only after the narrow [pull_request]
+    decode has refused the body — the body is the arbiter of what a
+    delivery is, never its unverified headers — so a genuine ping is
+    acknowledged without custody while a relabeled real event can never
+    hide behind a header. *)
 
 (** Event identities — what deduplication and the run-id mint key on. *)
 module Identity : sig

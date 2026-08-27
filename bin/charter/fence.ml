@@ -49,6 +49,18 @@ let effective_runs_per_hour ~(budget : Charter.Budget.t) ~trigger =
       | `Webhook -> Some webhook_default_runs_per_hour
       | `Cli -> None)
 
+let spend_line ~digest ~now ~(budget : Charter.Budget.t) receipts =
+  let spend = spend_in_window ~digest ~now receipts in
+  match budget.Charter.Budget.usd_per_day with
+  | Some limit -> Printf.sprintf "spend 24h: %.2f usd of %.2f" spend limit
+  | None -> Printf.sprintf "spend 24h: %.2f usd (no limit)" spend
+
+let runs_line ~digest ~now ~budget ~trigger receipts =
+  let spawns = spawns_in_window ~digest ~now receipts in
+  match effective_runs_per_hour ~budget ~trigger with
+  | Some limit -> Printf.sprintf "runs 1h: %d of %d" spawns limit
+  | None -> Printf.sprintf "runs 1h: %d (no limit)" spawns
+
 let admit ~digest ~(budget : Charter.Budget.t) ~trigger ~now receipts =
   let spend_tripped =
     match budget.Charter.Budget.usd_per_day with

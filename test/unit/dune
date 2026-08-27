@@ -390,10 +390,7 @@
  (libraries windtrap eio eio.unix eio_main unix))
 
 ; The shared notification hook lives in bin/boot; it strips event strings
-; through [Output], so both sources are copied in. The charter-store suite
-; needs [Fs] and [User_dirs] too, whose copies are already owned by the
-; stanzas above, so it lives in the charter_store/ subdirectory with its own
-; copies.
+; through [Output], so both sources are copied in.
 
 (copy_files
  (files ../../bin/boot/notify.{ml,mli}))
@@ -449,6 +446,25 @@
  (flags
   (:standard -open Mentat_boot))
  (libraries windtrap mentat_boot mentat_charter jsont jsont.bytesrw))
+
+; The charter store is a boot-library module too, so its suite links the
+; library exactly as test_charter_fire does — no flat-directory copies.
+
+(test
+ (name test_charter_store)
+ (modules test_charter_store)
+ (flags
+  (:standard -open Mentat_boot))
+ (libraries
+  windtrap
+  mentat_boot
+  mentat_charter
+  eio
+  eio.unix
+  eio_main
+  unix
+  jsont
+  jsont.bytesrw))
 
 (test
  (name test_store)
@@ -661,11 +677,12 @@
   eio
   unix))
 
-; The node's charter reconcile fold lives in bin/mentatd as the module
-; charter_reconcile; its source is copied in like reconcile's and the pure
-; decision tables and receipt folds are driven directly, while the drivers
-; are exercised over a temporary charter estate. The copy compiles whole, so
-; the stanza links the fold's libraries under the executable's own -open.
+; The node's charter reconcile drivers live in bin/mentatd as the module
+; charter_reconcile; its source is copied in like reconcile's and the
+; drivers are exercised over a temporary charter estate (the pure tables
+; they interpret live in mentat_charter and are tested with that library).
+; The copy compiles whole, so the stanza links the drivers' libraries under
+; the executable's own -open.
 
 (copy_files
  (files ../../bin/mentatd/charter_reconcile.{ml,mli}))
@@ -686,4 +703,28 @@
   eio
   eio.unix
   eio_main
+  unix))
+
+; The daemon's charters dashboard lives in bin/mentatd as the module
+; charter_dashboard; its source is copied in and only the pure projection
+; is driven — the effectful observation needs a daemon estate behind it,
+; which the web blackbox family exercises end to end.
+
+(copy_files
+ (files ../../bin/mentatd/charter_dashboard.{ml,mli}))
+
+(test
+ (name test_charter_dashboard)
+ (modules test_charter_dashboard charter_dashboard)
+ (flags
+  (:standard -open Mentat_boot))
+ (libraries
+  windtrap
+  mentat_boot
+  mentat_charter
+  mentat_session
+  mentat_store
+  mentat_web
+  jsont
+  eio
   unix))

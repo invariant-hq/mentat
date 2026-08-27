@@ -275,7 +275,7 @@ let receipts_roundtrip () =
   equal (list string) ~msg:"a missing log reads empty" []
     (List.map Receipt.encode
        (ok ~msg:"read empty" (Charter_store.read_receipts dirs ~name)));
-  let delivery = receipt ~at:1000.0 Receipt.Kind.Delivery in
+  let delivery = receipt ~at:1000.0 (Receipt.Kind.Delivery None) in
   let spawned =
     receipt ~at:1001.0
       (Receipt.Kind.Disposition

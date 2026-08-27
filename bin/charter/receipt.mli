@@ -128,24 +128,56 @@ module Disposition : sig
       ["fenced"], ["already_exists"], ["superseded"], ["refused"], or
       ["reaped"]. Status projections build their labels on it, so a label
       can never drift from the log's own vocabulary. *)
+
+  val label : t -> string
+  (** [label t] is the one-word status label every status surface prints
+      for [t]: {!name}, suffixed with the tripped meter for a fenced
+      disposition (["fenced:usd_per_day"]) and with the exit code for a
+      reaped one (["reaped:0"]). One projection, so the CLI roster and the
+      dashboard can never disagree on the same fact. *)
+end
+
+(** The re-drivable half of an admitted delivery. *)
+module Delivery : sig
+  type t = {
+    action : string;  (** The delivery's action, for example ["opened"]. *)
+    base_ref : string;  (** The base branch name. *)
+    draft : bool;  (** Whether the pull request is a draft. *)
+    author_association : string;
+        (** The author's association, GitHub's uppercase token. *)
+  }
+  (** The type for a delivery receipt's event members: exactly the decoded
+      members the gate needs that the receipt's identity string does not
+      already carry (the identity names the repository, number, and head).
+      Together they let a reconcile pass re-synthesize the admitted event
+      and drive an acknowledged-then-lost delivery to its disposition —
+      without them a 202'd event whose process died before deciding would
+      be unrecoverable, since the sender never redelivers. *)
 end
 
 (** Receipt kinds — the closed sum of facts a receipt line may state. *)
 module Kind : sig
   type t =
-    | Delivery  (** The event arrived and was durably recorded. *)
+    | Delivery of Delivery.t option
+        (** The event arrived and was durably recorded. [Some] carries the
+            re-drivable event members; [None] is a line written before the
+            members existed — {!val:decode} accepts their absence, and a
+            reconcile pass closes such a record rather than re-driving
+            it. *)
     | Disposition of Disposition.t  (** What was decided about it. *)
     | Egress of {
         summary : [ `Created | `Updated | `None_needed | `Skipped_no_token ];
         threads : int;
       }
         (** What the publisher concluded: whether the summary comment was
-            created, updated, or — a clean suppressed run with nothing
-            posted before — the publisher converged with nothing to write,
-            and how many finding threads were posted. [`None_needed] is a
-            real egress fact: without it a settled run with no comment
-            would look egress-less forever and be re-published on every
-            reconcile pass. [`Skipped_no_token] states honestly that the
+            created, updated, or the publisher converged with nothing to
+            write, and how many finding threads were posted.
+            [`None_needed] is a real egress fact — a clean suppressed run
+            with nothing posted before, or a settled run whose log carries
+            no findings document (a step-limit or failed last turn, a lost
+            log): without it such a run would look egress-less forever and
+            re-enter the publisher on every reconcile pass.
+            [`Skipped_no_token] states honestly that the
             run completed but no write credential existed to publish with —
             publication was skipped, not attempted, and the fold treats the
             run's egress as decided rather than pending. *)
@@ -199,7 +231,10 @@ val decode : string -> (t, Error.t) result
     lowercase hexadecimal, an exit code outside [0]–[255], or a negative
     cost or thread count is an [Error] naming the offending part. The
     [usage] member of a reaped disposition must be a JSON object and is
-    otherwise preserved without interpretation. *)
+    otherwise preserved without interpretation. A delivery line may carry
+    the event members ([action], [base_ref], [draft],
+    [author_association]) — all four, or none at all for a line written
+    before they existed; a partial set is an [Error]. *)
 
 (** {1:folds Log queries}
 
@@ -228,6 +263,15 @@ val egress_recorded : digest:string -> identity:string -> t list -> bool
     publisher concluded, whichever way. A settled run with findings and no
     egress line is the one state a reconcile pass re-publishes. *)
 
+val reap_recorded : digest:string -> identity:string -> t list -> bool
+(** [reap_recorded ~digest ~identity receipts] is [true] iff [receipts]
+    carries a reaped disposition for [identity] stamped [digest]. This is
+    the settle discriminator: a run child's fence frees at its exit,
+    before its reaper's own append, so a reaper and a recovering pass can
+    both find the record open — whichever appends second consults this
+    fold under the charter's fire lock and yields, keeping the record to
+    exactly one reaped line per digest and identity. *)
+
 val alerted : digest:string -> identity:string -> transition:Transition.t -> t list -> bool
 (** [alerted ~digest ~identity ~transition receipts] is [true] iff
     [receipts] carries an alert receipt for [transition] with the
@@ -235,6 +279,37 @@ val alerted : digest:string -> identity:string -> transition:Transition.t -> t l
     [identity] under [digest]. An identity-scoped alert fires once per
     event, ever: the window is the event itself, not a trailing duration,
     so the fold reads no clock. *)
+
+(** One spawned run with no reaped line. *)
+module Pending : sig
+  type t = {
+    identity : string;  (** The triggering event's identity string. *)
+    digest : string;
+        (** The charter policy digest the run was spawned under. *)
+    session : string;  (** The run's derived session id. *)
+    spawned_at : float;
+        (** The spawned receipt's timestamp, seconds since the epoch — what
+            a pass re-arms the wall-clock judgment from. *)
+  }
+  (** The type for pending runs. *)
+end
+
+val pending_runs : t list -> Pending.t list
+(** [pending_runs receipts] is the runs whose record is open: every spawned
+    disposition in [receipts] with no reaped disposition under the same
+    charter digest and event identity, in log order. Pairing is by digest
+    and identity together — never by session — so each policy's record is
+    whole on its own: a policy edit's re-run neither adopts nor closes an
+    earlier policy's run. *)
+
+val open_deliveries : t list -> t list
+(** [open_deliveries receipts] is the deliveries whose decision never
+    landed: for each (digest, identity) pair that carries at least one
+    delivery receipt and no disposition, the {e last} delivery receipt of
+    the pair, in log order of that last line. These are acknowledged
+    arrivals a process lost between the 202 and the disposition — the
+    sender never redelivers, so a reconcile pass owes each one a drive
+    (rebuilt from the receipt's {!Delivery} members) or an honest close. *)
 
 val diagnostic : t -> string
 (** [diagnostic t] is [t] rendered as one human-readable line: the UTC

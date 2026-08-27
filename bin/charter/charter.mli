@@ -161,6 +161,15 @@ val webhook_arm : t -> Trigger.Webhook.t option
     arm webhook deliveries, replays, and sweeps run under. At most one
     exists: {!decode} refuses duplicate trigger kinds. *)
 
+val delivery_trigger : t -> [ `Cli | `Webhook ]
+(** [delivery_trigger t] is admission's judgment of the delivery kind
+    [t]'s events carry: [`Webhook] when a webhook arm exists — a
+    webhook-armed charter's deliveries are webhook-shaped whatever
+    transport replays them, and their rate is set by whoever opens pull
+    requests — and [`Cli] otherwise. Status surfaces derive their rate
+    limit through this same judgment ({!Fence.effective_runs_per_hour}),
+    so what is displayed is what admission applies. *)
+
 (** Decode errors. *)
 module Error : sig
   type t
