@@ -298,100 +298,44 @@ let%expect_test "a downloading turn shows artifact progress in the working line"
 let workspace_notice ~source ~severity ~title ?body ~key () =
   Mentat_workspace.Notice.make ~source ~severity ~title ?body ~key ()
 
-let%expect_test
-    "workspace notice progress replaces by owner key and expires at settlement"
-    =
+let session_notice ~source ~severity ~title ?body () =
+  Mentat_session.Notice.make ~source ~severity ~title ?body ()
+
+let%expect_test "a notice pulse paints nothing; the durable block renders" =
+  (* The live-tail glance the pulse used to paint duplicated the durable
+     transcript block that lands the moment the fact arrives; one
+     observation renders once, in place, and survives settlement. *)
   let turn =
     Tui.Turn_script.complete ~prompt:"inspect workspace health"
+      ~notices:
+        [
+          session_notice ~source:"dune"
+            ~severity:Mentat_session.Notice.Severity.Info
+            ~title:"Build is healthy" ~body:"No diagnostics remain." ();
+        ]
       "Workspace inspection is complete."
   in
   Tui.run ~name:"t" ~turns:[ turn ] @@ fun t ->
   submit t "inspect workspace health";
   Tui.notice t
-    (workspace_notice ~source:"dune"
-       ~severity:Mentat_workspace.Notice.Severity.Info ~title:"Build is healthy"
-       ~body:"No diagnostics remain." ~key:"build-health" ());
-  Tui.notice t
     (workspace_notice ~source:"fswatch"
        ~severity:Mentat_workspace.Notice.Severity.Warning
-       ~title:"Generated files changed" ~key:"file-watch" ());
+       ~title:"A pulse without a durable fact" ~key:"file-watch" ());
   Tui.settle t;
-  Tui.print t;
-  [%expect
-    {|
-    01 |
-    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium
-    03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-553b9dad
-    04 |
-    05 | ❯ inspect workspace health
-    06 |
-    07 | ⊙ dune · Build is healthy
-    08 |
-    09 | ⊙ warning · fswatch · Generated files changed
-    10 |
-    11 | ⠋ Working… (0s · esc to interrupt)
-    12 |
-    13 |
-    14 |
-    15 |
-    16 |
-    17 |
-    18 |
-    19 |
-    20 |
-    21 | ────────────────────────────────────────────────────────────────────────────────
-    22 | ❯ queue a message — sends after this turn
-    23 | ────────────────────────────────────────────────────────────────────────────────
-    24 |   ! not logged in · /login · ~/mentat… · openai/gpt-… · ! full access ? for s…
-    |}];
-  Tui.notice t
-    (workspace_notice ~source:"dune"
-       ~severity:Mentat_workspace.Notice.Severity.Error ~title:"Build failed"
-       ~key:"build-health" ());
-  Tui.settle t;
-  Tui.print t;
-  [%expect
-    {|
-    01 |
-    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium
-    03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-553b9dad
-    04 |
-    05 | ❯ inspect workspace health
-    06 |
-    07 | ⊙ error · dune · Build failed
-    08 |
-    09 | ⊙ warning · fswatch · Generated files changed
-    10 |
-    11 | ⠋ Working… (0s · esc to interrupt)
-    12 |
-    13 |
-    14 |
-    15 |
-    16 |
-    17 |
-    18 |
-    19 |
-    20 |
-    21 | ────────────────────────────────────────────────────────────────────────────────
-    22 | ❯ queue a message — sends after this turn
-    23 | ────────────────────────────────────────────────────────────────────────────────
-    24 |   ! not logged in · /login · ~/mentat… · openai/gpt-… · ! full access ? for s…
-    |}];
   Tui.finish_turn t;
   Tui.settle t;
   Tui.print t;
-  [%expect
-    {|
+  [%expect {|
     01 |
     02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium
     03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-553b9dad
     04 |
     05 | ❯ inspect workspace health
     06 |
-    07 | ⏺ Workspace inspection is complete.
-    08 |
+    07 | ⊙ dune — Build is healthy
+    08 |   No diagnostics remain.
     09 |
-    10 |
+    10 | ⏺ Workspace inspection is complete.
     11 |
     12 |
     13 |
@@ -408,98 +352,72 @@ let%expect_test
     24 |   ! not logged in · /login · ~/mentat… · openai/gpt-… · ! full access ? for s…
     |}]
 
-(* The exact two shapes bin/workspace_notices.ml emits, on the shared
-   [dune.build-health] owner key: [failing_notice] carries the count-titled
-   header and the head Dune diagnostic as its body, and [recovered_notice] is a
-   bodyless Info header. A body-bearing Error renders the diagnostic above the
-   next-step line — the real-binary frame captured driving mentat against a
-   failing Dune RPC — and a later recovery replaces it by key. The plain "Build
-   failed" case above pins the bodyless Error; this one pins the diagnostic body,
-   so a change to either the producer's titles or the body join is caught. *)
+(* The exact two shapes bin/workspace_notices.ml emits: [failing_notice]
+   carries the count-titled header and the head Dune diagnostic as its
+   body; [recovered_notice] is a bodyless Info header. Durable blocks are
+   history: the recovery renders below the failure it answers; nothing
+   replaces in place. *)
 let%expect_test
     "dune build-health failing and recovery notices render their shapes" =
-  let turn =
+  let failing =
     Tui.Turn_script.complete ~prompt:"trigger the build check"
+      ~notices:
+        [
+          session_notice ~source:"dune"
+            ~severity:Mentat_session.Notice.Severity.Error
+            ~title:"Build failing (1 diagnostic)"
+            ~body:
+              "This expression has type string but an expression was \
+               expected of type int"
+            ();
+        ]
       "Build health noted."
   in
-  Tui.run ~name:"t" ~turns:[ turn ] @@ fun t ->
+  let recovered =
+    Tui.Turn_script.complete ~prompt:"and now"
+      ~notices:
+        [
+          session_notice ~source:"dune"
+            ~severity:Mentat_session.Notice.Severity.Info ~title:"Build recovered"
+            ();
+        ]
+      "Recovered."
+  in
+  Tui.run ~name:"t" ~turns:[ failing; recovered ] @@ fun t ->
   submit t "trigger the build check";
-  Tui.notice t
-    (workspace_notice ~source:"dune"
-       ~severity:Mentat_workspace.Notice.Severity.Error
-       ~title:"Build failing (1 diagnostic)"
-       ~body:
-         "This expression has type string but an expression was expected of \
-          type int"
-       ~key:"dune.build-health" ());
+  Tui.finish_turn t;
+  Tui.settle t;
+  submit t "and now";
+  Tui.finish_turn t;
   Tui.settle t;
   Tui.print t;
-  [%expect
-    {|
+  [%expect {|
     01 |
     02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium
     03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-553b9dad
     04 |
     05 | ❯ trigger the build check
     06 |
-    07 | ⊙ error · dune · Build failing (1 diagnostic)
-    08 |
-    09 | ⠋ Working… (0s · esc to interrupt)
-    10 |
+    07 | ✗ dune — Build failing (1 diagnostic)
+    08 |   This expression has type string but an expression was expected of type int
+    09 |
+    10 | ⏺ Build health noted.
     11 |
-    12 |
+    12 | ❯ and now
     13 |
-    14 |
+    14 | ⊙ dune — Build recovered
     15 |
-    16 |
+    16 | ⏺ Recovered.
     17 |
     18 |
     19 |
     20 |
     21 | ────────────────────────────────────────────────────────────────────────────────
-    22 | ❯ queue a message — sends after this turn
-    23 | ────────────────────────────────────────────────────────────────────────────────
-    24 |   ! not logged in · /login · ~/mentat… · openai/gpt-… · ! full access ? for s…
-    |}];
-  Tui.notice t
-    (workspace_notice ~source:"dune"
-       ~severity:Mentat_workspace.Notice.Severity.Info ~title:"Build recovered"
-       ~key:"dune.build-health" ());
-  Tui.settle t;
-  Tui.print t;
-  [%expect
-    {|
-    01 |
-    02 |  █▄█ ██▀ █▀▄ ▀█▀ ▄▀█ ▀█▀   ·    dev · openai/gpt-5.5 medium
-    03 |  █ █ █▄▄ █ █  █  █▀█  █  ▂▄▆▄▂  ~/mentat-tui-553b9dad
-    04 |
-    05 | ❯ trigger the build check
-    06 |
-    07 | ⊙ dune · Build recovered
-    08 |
-    09 | ⠋ Working… (0s · esc to interrupt)
-    10 |
-    11 |
-    12 |
-    13 |
-    14 |
-    15 |
-    16 |
-    17 |
-    18 |
-    19 |
-    20 |
-    21 | ────────────────────────────────────────────────────────────────────────────────
-    22 | ❯ queue a message — sends after this turn
+    22 | ❯ message mentat
     23 | ────────────────────────────────────────────────────────────────────────────────
     24 |   ! not logged in · /login · ~/mentat… · openai/gpt-… · ! full access ? for s…
     |}]
 
-(* The durable half of decision 5: a workspace notice recorded against the turn
-   renders its whole structured observation in the transcript — the level-colored
-   head and the full multi-line body — never the truncated one-row footer glance.
-   Driven through the real [Workspace_notice] fact the engine records at turn
-   preparation, projected by the protocol and rendered by the transcript. *)
 let%expect_test
     "a durable workspace notice renders its full body in the transcript" =
   let notice =
