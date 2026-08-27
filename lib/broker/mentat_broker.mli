@@ -3,7 +3,7 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(** The child broker: the process half of brokered delegation.
+(** The child broker: the process half of brokered delegation, and the send.
 
     One broker per process, shared by every workspace instance that process
     hosts. The engine keeps everything semantic — the durable edge, the child
@@ -16,13 +16,19 @@
     terminates in either an integrated settlement or a parent-visible
     failure — a parked wait is never abandoned silently.
 
+    The broker is also every process's one way to mail another agent:
+    {!val-send} lands an input in a target session's durable queue — over the
+    target's socket when a per-session server drives it, by a brief labeled
+    fence-held append when it is dormant — and never wakes anything. Waking is
+    a separate supervision act.
+
     Deployment facts are construction arguments: how the activation executable
-    resolves, the socket base, and the log directory all arrive through
-    {!create}. The library names no binary of its own and reads no ambient
-    environment. The vocabulary both halves of a delegation must agree on is
-    exported rather than configured: the socket layout beneath the base
-    ({!socket_dir}) and the fence owner label a per-session server serves
-    under ({!serve_owner_label}).
+    resolves, the socket base, the log directory, and the clock all arrive
+    through {!create}. The library names no binary of its own and reads no
+    ambient environment. The vocabulary both halves of a delegation must agree
+    on is exported rather than configured: the socket layout beneath the base
+    ({!socket_dir}) and the fence owner labels ({!serve_owner_label},
+    {!send_owner_label}).
 
     Two honest floors, by design: a child whose journal never settles (a
     corrupt store, a wedged callback) is observed for as long as its fence is
@@ -60,6 +66,14 @@ val serve_owner_label : string
     that resumed the child, an unreadable owner line, a foreign host — is
     never preempted. One constant, shared through this library, because the
     two sides must agree or the ladder never fires. *)
+
+val send_owner_label : string
+(** The custodial run-fence owner label {!send} appends mail to a dormant
+    session under. A custodial hold is a brief labeled hold that releases on
+    its own — never a driver — so every fence probe treats it as a transient
+    to re-probe shortly, never a holder to preempt or fail over. Exported for
+    the same reason as {!serve_owner_label}: an activation's first attach must
+    recognize it and retry briefly instead of refusing a foreign driver. *)
 
 (** The engine-reach seam for one workspace instance. *)
 module Engine : sig
@@ -106,20 +120,23 @@ val create :
   resolve_bin:(unit -> (string, string) result) ->
   socket_base:string ->
   log_dir:string ->
+  now:(unit -> Mentat_session.Time.t) ->
   t
-(** [create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir] is a broker
-    over the process's one opened [store] and its ambient [stdenv]. Its reaper
-    fiber starts under [sw] immediately; observers fork under [sw] as children
-    materialize. The broker stops with {!stop} — its fibers end promptly —
-    while the children themselves are deliberately not bound to [sw]: a
-    delegated child outlives the process that spawned it.
+(** [create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir ~now] is a
+    broker over the process's one opened [store] and its ambient [stdenv]. Its
+    reaper fiber starts under [sw] immediately; observers fork under [sw] as
+    children materialize. The broker stops with {!stop} — its fibers end
+    promptly — while the children themselves are deliberately not bound to
+    [sw]: a delegated child outlives the process that spawned it.
 
     The deployment facts: [resolve_bin] resolves the executable a spawn
     launches, and is consulted at each spawn — a resolution failure fails
     that one delegation loudly, never the broker. [socket_base] is the
     per-user directory child endpoints derive under ({!socket_dir}).
     [log_dir] is where a spawned child's stdio log lands, created [0700] on
-    first use. *)
+    first use. [now] stamps the sessions this broker itself commits to — a
+    {!send}'s appended mail — the injected clock every library receives
+    rather than a clock read of its own. *)
 
 val materialize : t -> Engine.t -> child:Mentat_session.Id.t -> unit
 (** [materialize t engine ~child] makes the recorded child run. Idempotent
@@ -132,23 +149,44 @@ val materialize : t -> Engine.t -> child:Mentat_session.Id.t -> unit
     re-spawned; a child whose fence holder cannot be identified or signalled
     fails the delegation loudly through [engine]'s seam. *)
 
-val deliver :
+val send :
   t ->
-  command:Mentat_protocol.Command.t ->
-  [ `Delivered | `Refused | `Gone ]
-(** [deliver t ~command] submits [command] — a parent-recorded message,
-    already carrying its derived idempotency id — to the live child the
-    command's own session id names, over short-lived, grace-bounded
-    connections that never follow the feed or pin the child's connection
-    count. Blocking, but bounded: a child whose materialized process has not
-    yet bound its endpoint is retried within the boot budget. [`Delivered]
-    means the child durably admitted the command; the ids it carries make a
-    repeat delivery idempotent. [`Refused] means the child answered and
-    refused (a busy child refusing an immediate turn), or could not be
-    reached within the budget — the caller decides whether a refusal has a
-    fallback, and an undeliverable message stays covered by the parent's
-    durable receipt. [`Gone] means the broker holds no materialization for
-    the child — delivery is the caller's own in-process story. *)
+  ?origin:Mentat_session.Origin.t ->
+  ?budget_s:float ->
+  target:Mentat_session.Id.t ->
+  id:Mentat_session.Queue.Id.t ->
+  input:Mentat_llm.Content.t list ->
+  unit ->
+  [ `Delivered | `Undelivered of string ]
+(** [send t ~target ~id ~input ()] mails [input] to [target] as the queue entry
+    [id], attributed to [origin] (absent means the owner sent it,
+    {!Mentat_session.Origin}). [`Delivered] means exactly one thing: the
+    enqueued fact is durable in [target]'s journal — there is no weaker
+    success. Sending never wakes a dormant target; a delivered entry waits for
+    whatever next runs the session, and waking is {!materialize} — a distinct
+    act by whoever holds supervision authority.
+
+    Delivery is one bounded fence-first loop decided by the fence owner's
+    label. Acquiring the fence under {!send_owner_label} is itself the
+    liveness probe: acquired, the entry is admitted exactly as the target's
+    own driver would admit it — the recorded-enqueue dedup, the accept
+    judgment over the target's recorded facts, the committed fact — and
+    released. A fence held under the serving label is a live per-session
+    server: the entry crosses its socket as a queue command on a short-lived,
+    grace-bounded connection, and the driver's dedup makes redelivery
+    idempotent. A fence held under another custodial label is a transient,
+    re-probed on a short backoff, never dialed and never preempted. The loop
+    is symmetric — a holder that exits mid-pass is caught by the next pass's
+    acquire — and [budget_s] (default: the grace bound; a supervisor
+    delivering as part of a wake may pass more) bounds the whole loop: spent
+    with nothing delivered, the answer is [`Undelivered] with the reason,
+    against the sender's own durable record.
+
+    [id] is the sender's derived idempotency key: the same send retried lands
+    the same entry once (at-least-once mechanics, exactly-once effect).
+    [input] must not carry inline or referenced media — inline bytes would
+    enter the journal unexternalized, and a content reference names the
+    sender's namespace, not the target's; such a send is refused loudly. *)
 
 val cancel : t -> child:Mentat_session.Id.t -> unit
 (** [cancel t ~child] asks the broker to stop [child]'s work: the semantic
@@ -189,3 +227,19 @@ val stop : t -> unit
     are released, and no further materialization is accepted. Running children
     are left running — their journals are durable and a successor process's
     {!rediscover} re-adopts them. Idempotent. *)
+
+val for_tests :
+  send:
+    (origin:Mentat_session.Origin.t option ->
+    target:Mentat_session.Id.t ->
+    id:Mentat_session.Queue.Id.t ->
+    input:Mentat_llm.Content.t list ->
+    [ `Delivered | `Undelivered of string ]) ->
+  t
+(** [for_tests ~send] is a mocked broker for unit-tier tests of the engines
+    that hold one: {!val-send}'s fence, append, and dial effects are replaced
+    by the given function, which answers the outcome the test scripts and may
+    record what crossed. Every process-facing operation — {!materialize},
+    {!cancel}, {!rediscover} — raises [Invalid_argument]: the stub performs no
+    process work, and a test that reaches one of those has wired the wrong
+    seam. *)

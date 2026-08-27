@@ -3,7 +3,9 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-type fence = [ `Free | `Held_self | `Held of int option | `Io of string ]
+type fence =
+  [ `Free | `Held_self | `Held of int option | `Custodial | `Io of string ]
+
 type head = [ `Unfinished | `Terminal | `Absent ]
 
 type action =
@@ -12,12 +14,14 @@ type action =
   | Respawn
   | Dispose
   | Stand_down
+  | Reprobe
   | Fail of string
 
 let decide ~fence ~reachable ~head =
   match fence () with
   | `Io message -> Fail ("the run fence could not be probed: " ^ message)
   | `Held_self -> Stand_down
+  | `Custodial -> Reprobe
   | `Held holder -> (
       if reachable () then Observe
       else

@@ -20,10 +20,15 @@ type fence =
         Any other holder — an interactive CLI that resumed the child, an
         unreadable owner line, a foreign host — is [None] and is never
         preempted. *)
+  | `Custodial
+    (** A brief labeled custodial hold — a send appending mail, the store
+        removing the session — that releases on its own within moments. Never
+        a driver: the probe re-fires shortly rather than preempting or
+        failing. *)
   | `Io of string  (** The fence could not be probed. *) ]
 (** The type for a fence probe's answer, in the table's vocabulary — the probe
-    owns identity mapping (host comparison, self-detection, the child-server
-    owner label), the table owns the decision. *)
+    owns identity mapping (host comparison, self-detection, the owner labels),
+    the table owns the decision. *)
 
 type head =
   [ `Unfinished
@@ -45,6 +50,9 @@ type action =
   | Stand_down
       (** This process already drives the child in-process; the broker has no
           role. *)
+  | Reprobe
+      (** A custodial hold is in flight: re-run the table after a short
+          backoff — never preempt it, never fail over it. *)
   | Fail of string
       (** No safe move exists (an unprobeable fence, a holder the broker may
           not preempt): fail the delegation loudly. *)

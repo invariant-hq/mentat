@@ -19,13 +19,15 @@ let action =
       | Reconcile.Respawn -> Format.pp_print_string ppf "Respawn"
       | Reconcile.Dispose -> Format.pp_print_string ppf "Dispose"
       | Reconcile.Stand_down -> Format.pp_print_string ppf "Stand_down"
+      | Reconcile.Reprobe -> Format.pp_print_string ppf "Reprobe"
       | Reconcile.Fail message -> Format.fprintf ppf "Fail %S" message)
     ~equal:(fun a b ->
       match (a, b) with
       | Reconcile.Observe, Reconcile.Observe
       | Reconcile.Respawn, Reconcile.Respawn
       | Reconcile.Dispose, Reconcile.Dispose
-      | Reconcile.Stand_down, Reconcile.Stand_down ->
+      | Reconcile.Stand_down, Reconcile.Stand_down
+      | Reconcile.Reprobe, Reconcile.Reprobe ->
           true
       | Reconcile.Preempt a, Reconcile.Preempt b -> Int.equal a b
       | Reconcile.Fail _, Reconcile.Fail _ -> true
@@ -76,6 +78,9 @@ let materialize_table () =
   equal action ~msg:"an unreachable unidentifiable holder fails loudly"
     (Reconcile.Fail "")
     (decide ~reachable:(fun () -> false) (`Held None));
+  equal action
+    ~msg:"a custodial hold is re-probed — never preempted, never failed"
+    Reconcile.Reprobe (decide `Custodial);
   equal action ~msg:"a free fence with outstanding work respawns"
     Reconcile.Respawn
     (decide ~head:(fun () -> `Unfinished) `Free);
