@@ -49,7 +49,7 @@ module Jwt = struct
     let signing_input = b64url header ^ "." ^ b64url claims in
     (* PKCS 1.5 is deterministic and masking only blinds the transform's
        timing, so [`No] keeps the signing path free of any RNG dependency —
-       the mint runs in the owner's own fire process, not against an
+       the signer runs in the token owner's own process, not against an
        adversarial timing observer. *)
     match
       Mirage_crypto_pk.Rsa.PKCS1.sign ~mask:`No ~hash:`SHA256 ~key
@@ -76,8 +76,6 @@ let html_escape s =
   Buffer.contents buffer
 
 module Manifest = struct
-  let app_name ~suffix = "mentat-review-" ^ suffix
-
   let strip_slashes url =
     let rec strip url =
       if String.length url > 0 && url.[String.length url - 1] = '/' then
@@ -100,15 +98,7 @@ module Manifest = struct
           web_base org state
     | None -> Printf.sprintf "%s/settings/apps/new?state=%s" web_base state
 
-  let hook_url ~public_url ~ingress_id =
-    let base =
-      match public_url with
-      | Some url -> strip_slashes url
-      | None -> "https://unrouted.invalid"
-    in
-    Printf.sprintf "%s/ingress/github/%s" base ingress_id
-
-  let json ~name ~homepage ~redirect_url ~hook_url =
+  let json ~name ~homepage ~redirect_url ~hook_url ~events ~permissions =
     let mem name value = Jsont.Json.mem (Jsont.Json.name name) value in
     let manifest =
       Jsont.Json.object'
@@ -123,14 +113,15 @@ module Manifest = struct
                  mem "url" (Jsont.Json.string hook_url);
                  mem "active" (Jsont.Json.bool true);
                ]);
-          mem "default_events" (Jsont.Json.list [ Jsont.Json.string "pull_request" ]);
+          mem "default_events"
+            (Jsont.Json.list
+               (List.map (fun event -> Jsont.Json.string event) events));
           mem "default_permissions"
             (Jsont.Json.object'
-               [
-                 mem "contents" (Jsont.Json.string "read");
-                 mem "pull_requests" (Jsont.Json.string "write");
-                 mem "metadata" (Jsont.Json.string "read");
-               ]);
+               (List.map
+                  (fun (permission, access) ->
+                    mem permission (Jsont.Json.string access))
+                  permissions));
         ]
     in
     match Jsont_bytesrw.encode_string Jsont.json manifest with
@@ -141,7 +132,7 @@ module Manifest = struct
     Printf.sprintf
       {|<!doctype html>
 <html>
-<head><meta charset="utf-8"><title>mentat: create your GitHub App</title></head>
+<head><meta charset="utf-8"><title>create your GitHub App</title></head>
 <body>
 <p>Continuing to GitHub to create your App&hellip;</p>
 <form id="manifest-form" method="post" action="%s">
@@ -155,13 +146,22 @@ module Manifest = struct
       (html_escape create_url) (html_escape manifest)
 end
 
-let api_error e = Github_api.Error.message e
+let api_error e = Api.Error.message e
+
+(* Narrow reads over GitHub's response documents: take the named member when
+   it has the expected shape, ignore everything else — the foreign document
+   grows members freely, and what absence means stays with each caller. *)
+let member name = function
+  | Jsont.Object (mems, _) -> Option.map snd (Jsont.Json.find_mem name mems)
+  | _ -> None
 
 let string_member json name =
-  Option.bind (Mentat_json.Lenient.mem name json) Mentat_json.Lenient.string
+  match member name json with Some (Jsont.String (s, _)) -> Some s | _ -> None
 
 let int_member json name =
-  Option.bind (Mentat_json.Lenient.mem name json) Mentat_json.Lenient.int
+  match member name json with
+  | Some (Jsont.Number (v, _)) when Float.is_integer v -> Some (int_of_float v)
+  | _ -> None
 
 module Conversion = struct
   type t = {
@@ -203,7 +203,7 @@ module Conversion = struct
       Error "malformed conversion code"
     else
       match
-        Github_api.post api
+        Api.post api
           ~path:(Printf.sprintf "/app-manifests/%s/conversions" code)
           ~body:(Jsont.Json.object' [])
       with
@@ -215,49 +215,43 @@ end
 module Mint = struct
   let installation_id api ~repo =
     match
-      Github_api.get api ~path:(Printf.sprintf "/repos/%s/installation" repo)
+      Api.get api ~path:(Printf.sprintf "/repos/%s/installation" repo)
     with
     | Error e -> (
-        match Github_api.Error.kind e with
-        | Github_api.Error.Response { status = 404; _ } -> Error `No_installation
-        | Github_api.Error.Response _ | Github_api.Error.Transport _ ->
+        match Api.Error.kind e with
+        | Api.Error.Response { status = 404; _ } -> Error `No_installation
+        | Api.Error.Response _ | Api.Error.Transport _ ->
             Error (`Error (api_error e)))
     | Ok json -> (
         match int_member json "id" with
         | Some id -> Ok id
         | None -> Error (`Error "installation answered without an id member"))
 
-  type scope = Read | Write
-
-  (* The watched repository's name half: the mint's [repositories] member
-     takes bare names, the installation already scoping the owner. *)
+  (* The repository's name half: the mint's [repositories] member takes bare
+     names, the installation already scoping the owner. *)
   let repo_name repo =
     match String.index_opt repo '/' with
     | Some slash when slash + 1 < String.length repo ->
         String.sub repo (slash + 1) (String.length repo - slash - 1)
     | Some _ | None -> repo
 
-  let access_token api ~installation_id ~repo ~scope =
+  let access_token api ~installation_id ~repo ~permissions =
     let mem name value = Jsont.Json.mem (Jsont.Json.name name) value in
-    let permissions =
-      match scope with
-      | Read ->
-          [
-            mem "contents" (Jsont.Json.string "read");
-            mem "pull_requests" (Jsont.Json.string "read");
-          ]
-      | Write -> [ mem "pull_requests" (Jsont.Json.string "write") ]
-    in
     let body =
       Jsont.Json.object'
         [
           mem "repositories"
             (Jsont.Json.list [ Jsont.Json.string (repo_name repo) ]);
-          mem "permissions" (Jsont.Json.object' permissions);
+          mem "permissions"
+            (Jsont.Json.object'
+               (List.map
+                  (fun (permission, access) ->
+                    mem permission (Jsont.Json.string access))
+                  permissions));
         ]
     in
     match
-      Github_api.post api
+      Api.post api
         ~path:
           (Printf.sprintf "/app/installations/%d/access_tokens" installation_id)
         ~body
@@ -281,12 +275,12 @@ module Hook = struct
           mem "secret" (Jsont.Json.string secret);
         ]
     in
-    match Github_api.patch api ~path:"/app/hook/config" ~body with
+    match Api.patch api ~path:"/app/hook/config" ~body with
     | Error e -> Error (api_error e)
     | Ok _ -> Ok ()
 
   let current_url api =
-    match Github_api.get api ~path:"/app/hook/config" with
+    match Api.get api ~path:"/app/hook/config" with
     | Error e -> Error (api_error e)
     | Ok json -> (
         match string_member json "url" with
@@ -294,38 +288,34 @@ module Hook = struct
         | None -> Error "hook config answered without a url member")
 end
 
-module Doctor = struct
-  let app_identity api =
-    match Github_api.get api ~path:"/app" with
-    | Error e -> Error (api_error e)
-    | Ok json -> (
-        match (string_member json "slug", string_member json "name") with
-        | Some slug, Some name -> Ok (slug, name)
-        | _ -> Error "/app answered without slug and name members")
+let identity api =
+  match Api.get api ~path:"/app" with
+  | Error e -> Error (api_error e)
+  | Ok json -> (
+      match (string_member json "slug", string_member json "name") with
+      | Some slug, Some name -> Ok (slug, name)
+      | _ -> Error "/app answered without slug and name members")
 
-  let installations api =
-    match
-      Github_api.get_paginated api ~path:"/app/installations?per_page=100"
-        ~max_pages:10
-    with
-    | Error e -> Error (api_error e)
-    | Ok pages ->
-        Ok
-          (List.concat_map
-             (fun page ->
-               match page with
-               | Jsont.Array (items, _) ->
-                   List.filter_map
-                     (fun item ->
-                       match
-                         ( int_member item "id",
-                           Option.bind
-                             (Mentat_json.Lenient.mem "account" item)
-                             (fun account -> string_member account "login") )
-                       with
-                       | Some id, Some login -> Some (id, login)
-                       | _ -> None)
-                     items
-               | _ -> [])
-             pages)
-end
+let installations api =
+  match
+    Api.get_paginated api ~path:"/app/installations?per_page=100" ~max_pages:10
+  with
+  | Error e -> Error (api_error e)
+  | Ok pages ->
+      Ok
+        (List.concat_map
+           (fun page ->
+             match page with
+             | Jsont.Array (items, _) ->
+                 List.filter_map
+                   (fun item ->
+                     match
+                       ( int_member item "id",
+                         Option.bind (member "account" item) (fun account ->
+                             string_member account "login") )
+                     with
+                     | Some id, Some login -> Some (id, login)
+                     | _ -> None)
+                   items
+             | _ -> [])
+           pages)

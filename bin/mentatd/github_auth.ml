@@ -3,41 +3,49 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-open Mentat_github
-
 let ( let* ) = Result.bind
 let store_error e = Routine_store.Error.message e
 let app_error e = Github_app_store.Error.message e
 
+(* The narrowed permission sets the two mints request (A3): the read mint
+   covers the git fetch and the three API reads, the write mint the poster
+   child alone. *)
+let read_permissions = [ ("contents", "read"); ("pull_requests", "read") ]
+let write_permissions = [ ("pull_requests", "write") ]
+
 (* The three reads, snapped onto the pipeline's injected record over one
    client; the posting identity comes from the caller's arm — [/user] for a
-   PAT, the stored bot login for the App. *)
+   PAT, the stored bot login for the App. A posted comment is ours iff the
+   connector's marker grammar recognizes its body. *)
 let reads api ~watched ~posted_login =
   {
     Routine_fire.Github.current_head =
-      (fun ~number -> Github_reads.current_head api ~repo:watched ~number);
+      (fun ~number -> Github.Reads.current_head api ~repo:watched ~number);
     open_prs =
       (fun () ->
         Result.map
-          (List.map (fun (pr : Github_reads.Open_pr.t) ->
+          (List.map (fun (pr : Github.Reads.Open_pr.t) ->
                {
-                 Routine_fire.Github.number = pr.Github_reads.Open_pr.number;
-                 head_sha = pr.Github_reads.Open_pr.head_sha;
-                 base_ref = pr.Github_reads.Open_pr.base_ref;
-                 draft = pr.Github_reads.Open_pr.draft;
-                 author_association = pr.Github_reads.Open_pr.author_association;
+                 Routine_fire.Github.number = pr.Github.Reads.Open_pr.number;
+                 head_sha = pr.Github.Reads.Open_pr.head_sha;
+                 base_ref = pr.Github.Reads.Open_pr.base_ref;
+                 draft = pr.Github.Reads.Open_pr.draft;
+                 author_association =
+                   pr.Github.Reads.Open_pr.author_association;
                }))
-          (Github_reads.open_prs api ~repo:watched));
+          (Github.Reads.open_prs api ~repo:watched));
     posted =
       (fun ~number ->
         let* login = posted_login () in
-        Github_reads.posted api ~login ~repo:watched ~number);
+        Github.Reads.posted api ~login
+          ~marked:Mentat_connector.Publication.Marker.marks ~repo:watched
+          ~number);
   }
 
 let make_api ~net ~base_url ~token =
-  match Github_api.make ?base_url ~token net with
+  match Github_transport.make ?base_url ~token net with
   | Ok api -> Ok api
-  | Error e -> Error (Github_api.Error.message e)
+  | Error e -> Error (Github.Api.Error.message e)
 
 let pat_repo ~net ~base_url ~git_url ~watched (loaded : Routine_store.Loaded.t) =
   let* token =
@@ -57,7 +65,7 @@ let pat_repo ~net ~base_url ~git_url ~watched (loaded : Routine_store.Loaded.t) 
   in
   let* api = make_api ~net ~base_url ~token in
   let github =
-    reads api ~watched ~posted_login:(fun () -> Github_reads.viewer_login api)
+    reads api ~watched ~posted_login:(fun () -> Github.Reads.viewer_login api)
   in
   Ok
     {
@@ -104,13 +112,13 @@ let app_repo ~net ~base_url ~git_url ~watched (app : Github_app_store.t) =
     in
     Result.map_error
       (fun e -> Printf.sprintf "github app: %s" e)
-      (Github_app.Jwt.make ~issuer:app.Github_app_store.client_id ~key_pem
+      (Github.App.Jwt.make ~issuer:app.Github_app_store.client_id ~key_pem
          ~now:(Unix.gettimeofday ()))
   in
   let* jwt = mint_jwt () in
   let* jwt_api = make_api ~net ~base_url ~token:jwt in
   let* installation_id =
-    match Github_app.Mint.installation_id jwt_api ~repo:watched with
+    match Github.App.Mint.installation_id jwt_api ~repo:watched with
     | Ok id -> Ok id
     | Error `No_installation ->
         Error
@@ -124,8 +132,8 @@ let app_repo ~net ~base_url ~git_url ~watched (app : Github_app_store.t) =
   let* read_token =
     Result.map_error
       (fun e -> Printf.sprintf "github app: read token mint: %s" e)
-      (Github_app.Mint.access_token jwt_api ~installation_id ~repo:watched
-         ~scope:Github_app.Mint.Read)
+      (Github.App.Mint.access_token jwt_api ~installation_id ~repo:watched
+         ~permissions:read_permissions)
   in
   let* api = make_api ~net ~base_url ~token:read_token in
   let github =
@@ -141,8 +149,8 @@ let app_repo ~net ~base_url ~git_url ~watched (app : Github_app_store.t) =
     let* token =
       Result.map_error
         (fun e -> Printf.sprintf "github app: write token mint: %s" e)
-        (Github_app.Mint.access_token jwt_api ~installation_id ~repo:watched
-           ~scope:Github_app.Mint.Write)
+        (Github.App.Mint.access_token jwt_api ~installation_id ~repo:watched
+           ~permissions:write_permissions)
     in
     Ok (Some token)
   in

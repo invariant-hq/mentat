@@ -5,18 +5,18 @@
 
 (** Bounded GitHub REST client.
 
-    A thin, retry-free wrapper over the in-tree HTTPS stack: every request
-    carries the caller's token as a [Bearer] authorization, the GitHub JSON
-    accept header, and the pinned {!api_version}; every response body is read
-    under {!max_body_bytes} and refused past it. Non-[2xx] answers and
-    failures to obtain a reply are the two error classes
-    ({!Error.type-kind}); there is no retry policy — a caller that wants
-    convergence re-observes and re-issues.
+    A thin, retry-free JSON client: every request carries the caller's token
+    as a [Bearer] authorization, the GitHub JSON accept header, and the
+    pinned {!api_version}; every response body is read under
+    {!max_body_bytes} and refused past it. Non-[2xx] answers and failures to
+    obtain a reply are the two error classes ({!Error.type-kind}); there is
+    no retry policy — a caller that wants convergence re-observes and
+    re-issues.
 
-    The HTTP effect is one injected closure ({!type-http}): {!make} builds
-    the production requester over the system trust store with per-request
-    endpoint verification, and {!of_http} is the lower-level seam for tests
-    and alternative transports. The token reaches exactly one place — the
+    The HTTP effect is one injected closure ({!type-http}), so this module
+    performs no I/O of its own: {!of_http} snaps a client over whatever
+    requester the caller supplies — a real transport, a test script, an
+    alternative HTTP stack. The token reaches exactly one place — the
     authorization header of each request — and no error message or excerpt
     minted here carries it. *)
 
@@ -79,32 +79,26 @@ type http =
 (** An HTTP requester. It sends one request and returns the raw reply for
     whatever status the server answered; only a failure to obtain a reply is
     an error, reported through {!Error.transport}. Status interpretation,
-    the body bound, and pagination all sit above the closure. *)
+    the body bound, and pagination all sit above the closure. A requester
+    should not follow redirects: the authorization header must go only
+    where the client itself asked, and a [3xx] answer classifies as a
+    {!Error.Response} like any other non-[2xx]. *)
 
 type t
 (** The type for GitHub clients. A client holds its requester, token, and API
     base; it owns no connections. *)
 
-val of_http : ?base_url:string -> ?token:string -> http -> t
+val of_http :
+  ?base_url:string -> ?user_agent:string -> ?token:string -> http -> t
 (** [of_http ~token http] is a client over the caller-owned requester [http].
     [base_url] (default [https://api.github.com], trailing slashes dropped)
-    prefixes every request path. An absent [token] sends no authorization
-    header at all — the app-manifest conversion is the one endpoint called
-    unauthenticated by design, and a garbage bearer would be refused where
-    no header is accepted. Production callers construct with {!make};
-    [of_http] is the seam for tests and alternative transports. *)
-
-val make :
-  ?base_url:string -> ?token:string -> _ Eio.Net.t -> (t, Error.t) result
-(** [make ~token net] is a client whose requester opens one connection per
-    request over [net], with TLS from the system CA bundle and endpoint
-    identity verified against each request's host. Redirects are not
-    followed — a [3xx] answer is a {!Error.Response} like any other
-    non-[2xx] — so the authorization header goes only where the client
-    itself asked. [base_url] as in {!of_http}; it exists for GitHub
-    Enterprise hosts and local test servers, and an [http://] base is served
-    unencrypted. Errors with {!Error.Transport} when the system trust store
-    yields no TLS configuration. *)
+    prefixes every request path; it exists for GitHub Enterprise hosts and
+    local test servers. [user_agent] is sent as the [User-Agent] header of
+    every request — GitHub requires one, and asks that it name the calling
+    application; the default is ["github"]. An absent [token] sends no
+    authorization header at all — the app-manifest conversion is the one
+    endpoint called unauthenticated by design, and a garbage bearer would be
+    refused where no header is accepted. *)
 
 (** {1:requests Requests} *)
 

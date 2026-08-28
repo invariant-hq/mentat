@@ -4,7 +4,6 @@
  ---------------------------------------------------------------------------*)
 
 open! Cmdliner
-open Mentat_github
 
 let ( let* ) = Result.bind
 
@@ -12,6 +11,41 @@ let ( let* ) = Result.bind
 let homepage = "https://github.com/invariant-hq/mentat"
 let default_port = 8917
 let default_api_base = "https://api.github.com"
+
+(* The generated App name the create page is pre-filled with — App names are
+   global, so the suffix is fresh randomness; the owner can edit the name in
+   place on GitHub's page, and the conversion returns whatever was chosen. *)
+let app_name ~suffix = "mentat-review-" ^ suffix
+
+(* The manifest's subscription and permission set: the pull_request event and
+   the three permissions a review routine needs — contents read,
+   pull requests write, metadata read. *)
+let manifest_events = [ "pull_request" ]
+
+let manifest_permissions =
+  [ ("contents", "read"); ("pull_requests", "write"); ("metadata", "read") ]
+
+let strip_slashes url =
+  let rec strip url =
+    if String.length url > 0 && url.[String.length url - 1] = '/' then
+      strip (String.sub url 0 (String.length url - 1))
+    else url
+  in
+  strip url
+
+(* The webhook target the manifest (and every later hook-config upsert)
+   carries: the daemon's ingress route under the owner's public URL, or the
+   RFC 2606 placeholder [https://unrouted.invalid] when none is routed yet —
+   the hook is born active with an unroutable target, because the hook-config
+   PATCH can re-point a URL but cannot flip [active], and an inactive-at-birth
+   hook would need a by-hand GitHub settings visit. *)
+let hook_url ~public_url ~ingress_id =
+  let base =
+    match public_url with
+    | Some url -> strip_slashes url
+    | None -> "https://unrouted.invalid"
+  in
+  Printf.sprintf "%s/ingress/github/%s" base ingress_id
 
 let resolve_dirs () =
   match User_dirs.resolve ~getenv:Sys.getenv_opt with
@@ -75,11 +109,12 @@ let jwt_api ~net (app : Github_app_store.t) =
       (Github_app_store.read_key_pem app)
   in
   let* jwt =
-    Github_app.Jwt.make ~issuer:app.Github_app_store.client_id ~key_pem
+    Github.App.Jwt.make ~issuer:app.Github_app_store.client_id ~key_pem
       ~now:(Unix.gettimeofday ())
   in
-  Result.map_error Github_api.Error.message
-    (Github_api.make ~base_url:app.Github_app_store.api_base ~token:jwt net)
+  Result.map_error Github.Api.Error.message
+    (Github_transport.make ~base_url:app.Github_app_store.api_base ~token:jwt
+       net)
 
 (* The derived hook target — GitHub's hook config is a projection of the
    credential home's files (A8), so every writer derives the complete
@@ -93,7 +128,7 @@ let derived_hook_url (app : Github_app_store.t) =
     Result.map_error Github_app_store.Error.message
       (Github_app_store.public_url app)
   in
-  Ok (Github_app.Manifest.hook_url ~public_url ~ingress_id)
+  Ok (hook_url ~public_url ~ingress_id)
 
 let upsert_hook ~net (app : Github_app_store.t) =
   let* api = jwt_api ~net app in
@@ -102,7 +137,7 @@ let upsert_hook ~net (app : Github_app_store.t) =
     Result.map_error Github_app_store.Error.message
       (Github_app_store.webhook_secret app)
   in
-  let* () = Github_app.Hook.upsert api ~url ~secret in
+  let* () = Github.App.Hook.upsert api ~url ~secret in
   Ok url
 
 (* setup *)
@@ -121,20 +156,20 @@ let setup port org public_url github_base_url =
    let state = Github_app_store.fresh_token () in
    let ingress_id = Github_app_store.fresh_token () in
    let name =
-     Github_app.Manifest.app_name
-       ~suffix:(String.sub (Github_app_store.fresh_token ()) 0 4)
+     app_name ~suffix:(String.sub (Github_app_store.fresh_token ()) 0 4)
    in
    let redirect_url = Printf.sprintf "http://127.0.0.1:%d/callback" port in
-   let hook_url = Github_app.Manifest.hook_url ~public_url ~ingress_id in
+   let hook_url = hook_url ~public_url ~ingress_id in
    let manifest =
-     Github_app.Manifest.json ~name ~homepage ~redirect_url ~hook_url
+     Github.App.Manifest.json ~name ~homepage ~redirect_url ~hook_url
+       ~events:manifest_events ~permissions:manifest_permissions
    in
    let create_url =
-     Github_app.Manifest.create_url
-       ~web_base:(Github_app.Manifest.web_base ~api_base)
+     Github.App.Manifest.create_url
+       ~web_base:(Github.App.Manifest.web_base ~api_base)
        ~org ~state
    in
-   let entry_page = Github_app.Manifest.entry_page ~create_url ~manifest in
+   let entry_page = Github.App.Manifest.entry_page ~create_url ~manifest in
    let entry_url = Printf.sprintf "http://127.0.0.1:%d/" port in
    Eio_main.run @@ fun stdenv ->
    let accept callback =
@@ -165,16 +200,17 @@ let setup port org public_url github_base_url =
        let code = Option.value (Uri.get_query_param callback "code") ~default:"" in
        let exchanged =
          let* api =
-           Result.map_error Github_api.Error.message
-             (Github_api.make ~base_url:api_base (Eio.Stdenv.net stdenv))
+           Result.map_error Github.Api.Error.message
+             (Github_transport.make ~base_url:api_base
+                (Eio.Stdenv.net stdenv))
          in
-         Github_app.Conversion.exchange api ~code
+         Github.App.Conversion.exchange api ~code
        in
        match exchanged with
        | Error message ->
            Ok (Exit_status.runtime (Printf.sprintf "conversion: %s" message))
        | Ok conversion -> (
-           match conversion.Github_app.Conversion.webhook_secret with
+           match conversion.Github.App.Conversion.webhook_secret with
            | None ->
                (* Checked live: whether GitHub ever omits the secret when
                   the hook target is a placeholder. Refusing keeps A6 whole
@@ -190,18 +226,18 @@ let setup port org public_url github_base_url =
                let app =
                  {
                    Github_app_store.dir = "";
-                   app_id = conversion.Github_app.Conversion.app_id;
-                   slug = conversion.Github_app.Conversion.slug;
-                   name = conversion.Github_app.Conversion.name;
-                   client_id = conversion.Github_app.Conversion.client_id;
-                   html_url = conversion.Github_app.Conversion.html_url;
+                   app_id = conversion.Github.App.Conversion.app_id;
+                   slug = conversion.Github.App.Conversion.slug;
+                   name = conversion.Github.App.Conversion.name;
+                   client_id = conversion.Github.App.Conversion.client_id;
+                   html_url = conversion.Github.App.Conversion.html_url;
                    api_base;
                    created_at = now_rfc3339 ();
                  }
                in
                match
                  Github_app_store.write dirs ~app
-                   ~key_pem:conversion.Github_app.Conversion.pem
+                   ~key_pem:conversion.Github.App.Conversion.pem
                    ~webhook_secret ~ingress_id ~public_url
                with
                | Error e -> Ok (store_error e)
@@ -220,8 +256,7 @@ let setup port org public_url github_base_url =
                      (Github_app_store.install_url app);
                    (match public_url with
                    | Some _ ->
-                       Output.stdout_printf "Webhook: %s\n"
-                         (Github_app.Manifest.hook_url ~public_url ~ingress_id)
+                       Output.stdout_printf "Webhook: %s\n" hook_url
                    | None ->
                        Output.stdout_printf
                          "Webhook: not routed yet — deliveries start after\n\
@@ -288,7 +323,7 @@ let status () =
                     app.Github_app_store.name app.Github_app_store.app_id
                     message)
            | Ok api -> (
-               (match Github_app.Doctor.app_identity api with
+               (match Github.App.identity api with
                | Ok (slug, name) ->
                    Output.stdout_printf
                      "app: %s (id %d) reachable; posts as %s[bot]\n" name
@@ -298,7 +333,7 @@ let status () =
                      (Printf.sprintf "app: %s (id %d) unreachable: %s"
                         app.Github_app_store.name app.Github_app_store.app_id
                         message));
-               (match (Github_app.Hook.current_url api, derived_hook_url app) with
+               (match (Github.App.Hook.current_url api, derived_hook_url app) with
                | Ok live, Ok derived when String.equal live derived ->
                    if
                      String.starts_with ~prefix:"https://unrouted.invalid/"
@@ -317,7 +352,7 @@ let status () =
                         live derived)
                | Error message, _ | _, Error message ->
                    flag (Printf.sprintf "webhook: %s" message));
-               (match Github_app.Doctor.installations api with
+               (match Github.App.installations api with
                | Ok rows ->
                    Output.stdout_printf "installations: %d\n" (List.length rows)
                | Error message ->
@@ -334,7 +369,7 @@ let status () =
                    if Routine_store.pat_files_present loaded then
                      Output.stdout_printf "%s  %s  pat\n" name repo
                    else
-                     match Github_app.Mint.installation_id api ~repo with
+                     match Github.App.Mint.installation_id api ~repo with
                      | Ok id ->
                          Output.stdout_printf
                            "%s  %s  app  installation %d ok\n" name repo id

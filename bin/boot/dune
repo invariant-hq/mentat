@@ -17,6 +17,15 @@
   lpath
   mentat_edit
   fswatch
+  ; the GitHub client's production transport (github_transport.ml): the
+  ; injected requester over Cohttp/TLS and its display-safe exception
+  ; classification
+  github
+  cohttp
+  cohttp-eio
+  oauth2_eio
+  uri
+  mentat_llm_http
   mentat_llm
   mentat_ocaml
   mentat_ocaml_dune_rpc

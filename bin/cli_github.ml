@@ -5,7 +5,6 @@
 
 open! Cmdliner
 open Mentat_connector
-open Mentat_github
 
 let docs = Cli_common.s_run
 let ( let* ) = Result.bind
@@ -209,23 +208,23 @@ let execute api (request : Publication.Request.t) =
   in
   let result =
     match request.Publication.Request.method_ with
-    | `POST -> Github_api.post api ~path ~body
-    | `PATCH -> Github_api.patch api ~path ~body
+    | `POST -> Github.Api.post api ~path ~body
+    | `PATCH -> Github.Api.patch api ~path ~body
   in
   match result with
   | Ok (status, _) ->
       line status;
       Ok true
   | Error e -> (
-      match Github_api.Error.kind e with
-      | Github_api.Error.Response { status; body } ->
+      match Github.Api.Error.kind e with
+      | Github.Api.Error.Response { status; body } ->
           line ~error:body status;
           Ok false
-      | Github_api.Error.Transport _ ->
+      | Github.Api.Error.Transport _ ->
           Error
             (Exit_status.runtime
                (Printf.sprintf "publish %s: %s" (request_name request)
-                  (Github_api.Error.message e))))
+                  (Github.Api.Error.message e))))
 
 let publish pr =
   (let* pr_raw = require "--pr" pr in
@@ -265,8 +264,8 @@ let publish pr =
    in
    Eio_main.run @@ fun env ->
    let base_url = Sys.getenv_opt "MENTAT_GITHUB_BASE_URL" in
-   match Github_api.make ?base_url ~token (Eio.Stdenv.net env) with
-   | Error e -> Error (Exit_status.runtime (Github_api.Error.message e))
+   match Github_transport.make ?base_url ~token (Eio.Stdenv.net env) with
+   | Error e -> Error (Exit_status.runtime (Github.Api.Error.message e))
    | Ok api ->
        let* all_ok =
          List.fold_left

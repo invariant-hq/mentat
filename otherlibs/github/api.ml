@@ -6,6 +6,7 @@
 let ( let* ) = Result.bind
 let api_version = "2022-11-28"
 let max_body_bytes = 8 * 1024 * 1024
+let default_user_agent = "github"
 
 (* The stored excerpt of a non-2xx body: short and byte-wise printable ASCII,
    so a server-controlled body can neither spread an error over the terminal
@@ -49,18 +50,20 @@ type http =
 type t = {
   http : http;
   token : string option;
+  user_agent : string;
   base_url : string;
   base : Uri.t;
 }
 
-let of_http ?(base_url = "https://api.github.com") ?token http =
+let of_http ?(base_url = "https://api.github.com")
+    ?(user_agent = default_user_agent) ?token http =
   let rec strip url =
     if String.length url > 0 && url.[String.length url - 1] = '/' then
       strip (String.sub url 0 (String.length url - 1))
     else url
   in
   let base_url = strip base_url in
-  { http; token; base_url; base = Uri.of_string base_url }
+  { http; token; user_agent; base_url; base = Uri.of_string base_url }
 
 let request_headers t ~write =
   (match t.token with
@@ -68,7 +71,7 @@ let request_headers t ~write =
   | None -> [])
   @ ("accept", "application/vnd.github+json")
     :: ("x-github-api-version", api_version)
-    :: ("user-agent", "mentat")
+    :: ("user-agent", t.user_agent)
     ::
     (if write then [ ("content-type", "application/json") ] else [])
 
@@ -104,21 +107,97 @@ let get t ~path =
   let* reply = request t ~meth:`GET ~url ~write:false ~body:None in
   decode_json ~url reply.body
 
+(* A hand-rolled reading of the Link header's [rel="next"] target. The full
+   RFC 8288 grammar is not needed: only the value splitting has to be exact,
+   because both quoted parameter values and the bracketed URI target may
+   contain commas and semicolons that must not split a link. Parameters other
+   than [rel] — [rev] included — are ignored, so a link related only in
+   reverse never matches. *)
+module Link = struct
+  (* Split [value] on top-level [separator]: commas and semicolons inside
+     ["…"] (with backslash escapes) or [<…>] separate nothing. *)
+  let split_outside separator value =
+    let length = String.length value in
+    let segments = ref [] in
+    let start = ref 0 in
+    let in_quote = ref false in
+    let in_target = ref false in
+    let i = ref 0 in
+    while !i < length do
+      (match value.[!i] with
+      | '\\' when !in_quote -> incr i
+      | '"' -> if !in_target then () else in_quote := not !in_quote
+      | '<' when not !in_quote -> in_target := true
+      | '>' when not !in_quote -> in_target := false
+      | c when Char.equal c separator && (not !in_quote) && not !in_target ->
+          segments := String.sub value !start (!i - !start) :: !segments;
+          start := !i + 1
+      | _ -> ());
+      incr i
+    done;
+    List.rev (String.sub value !start (length - !start) :: !segments)
+
+  let unquote value =
+    let length = String.length value in
+    if
+      length >= 2
+      && Char.equal value.[0] '"'
+      && Char.equal value.[length - 1] '"'
+    then (
+      let buffer = Buffer.create (length - 2) in
+      let i = ref 1 in
+      while !i < length - 1 do
+        (match value.[!i] with
+        | '\\' when !i + 1 < length - 1 ->
+            incr i;
+            Buffer.add_char buffer value.[!i]
+        | c -> Buffer.add_char buffer c);
+        incr i
+      done;
+      Buffer.contents buffer)
+    else value
+
+  (* One [<target>; param; …] segment's target, when its [rel] parameter
+     names [next] among its space-separated relation types. *)
+  let next_of_segment segment =
+    match split_outside ';' segment with
+    | [] -> None
+    | target :: params ->
+        let target = String.trim target in
+        let bracketed =
+          String.length target >= 2
+          && Char.equal target.[0] '<'
+          && Char.equal target.[String.length target - 1] '>'
+        in
+        if not bracketed then None
+        else
+          let rel_names_next param =
+            match String.index_opt param '=' with
+            | None -> false
+            | Some eq ->
+                let name =
+                  String.lowercase_ascii (String.trim (String.sub param 0 eq))
+                in
+                String.equal name "rel"
+                && String.sub param (eq + 1) (String.length param - eq - 1)
+                   |> String.trim |> unquote |> String.split_on_char ' '
+                   |> List.exists (fun rel ->
+                       String.equal (String.lowercase_ascii rel) "next")
+          in
+          if List.exists rel_names_next params then
+            Some (String.sub target 1 (String.length target - 2))
+          else None
+
+  let next value = List.find_map next_of_segment (split_outside ',' value)
+end
+
 (* The reply's [rel="next"] target, if any. GitHub sends one Link header;
    every occurrence is scanned regardless. *)
 let next_target reply =
   reply.headers
-  |> List.concat_map (fun (name, value) ->
+  |> List.find_map (fun (name, value) ->
       if String.equal (String.lowercase_ascii name) "link" then
-        Cohttp.Link.of_string value
-      else [])
-  |> List.find_map (fun { Cohttp.Link.arc; target; _ } ->
-      if
-        (not arc.Cohttp.Link.Arc.reverse)
-        && List.exists
-             (fun rel -> rel = Cohttp.Link.Rel.next)
-             arc.Cohttp.Link.Arc.relation
-      then Some target
+        Option.map Uri.of_string (Link.next value)
       else None)
 
 let same_origin t uri =
@@ -172,52 +251,3 @@ let send t ~meth ~path ~body =
 
 let post t ~path ~body = send t ~meth:`POST ~path ~body
 let patch t ~path ~body = send t ~meth:`PATCH ~path ~body
-
-(* The production requester: one connection per request under its own switch,
-   the response read whole under the body bound before the switch closes.
-   Non-cancellation exceptions classify through [Mentat_llm_http], whose
-   messages are display-safe and never carry request headers. *)
-let requester client : http =
- fun ~meth ~url ~headers ~body ->
-  let meth =
-    match meth with `GET -> `GET | `PATCH -> `PATCH | `POST -> `POST
-  in
-  try
-    Eio.Switch.run ~name:"github-api" @@ fun sw ->
-    let headers = Cohttp.Header.of_list headers in
-    let body = Option.map Cohttp_eio.Body.of_string body in
-    let response, body_flow =
-      Cohttp_eio.Client.call client ~sw ~headers ?body meth
-        (Uri.of_string url)
-    in
-    let status = Cohttp.Code.code_of_status (Cohttp.Response.status response) in
-    let response_headers =
-      Cohttp.Header.to_list (Cohttp.Response.headers response)
-    in
-    match
-      Eio.Buf_read.(parse take_all) ~max_size:(max_body_bytes + 1) body_flow
-    with
-    | Ok body -> Ok { status; headers = response_headers; body }
-    | Error (`Msg reason) ->
-        Error
-          (Error.transport
-             (Printf.sprintf "%s: response body read failed: %s" url reason))
-  with
-  | Eio.Cancel.Cancelled _ as exn -> raise exn
-  | exn -> (
-      match Mentat_llm_http.error_of_exn exn with
-      | Mentat_llm_http.Unresolved_host reason
-      | Mentat_llm_http.Transport reason ->
-          Error (Error.transport reason)
-      (* [error_of_exn] never mints [Response]; the arm keeps the match
-         total. *)
-      | Mentat_llm_http.Response _ ->
-          Error (Error.transport (Mentat_llm_http.transport_message exn)))
-
-let make ?base_url ?token net =
-  match Oauth2_eio.make_tls_client net with
-  | Error `System_ca_unavailable ->
-      Error (Error.transport "system CA bundle unavailable")
-  | Error `Tls_configuration_failed ->
-      Error (Error.transport "TLS client configuration failed")
-  | Ok client -> Ok (of_http ?base_url ?token (requester client))

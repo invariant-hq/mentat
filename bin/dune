@@ -60,7 +60,7 @@
   mentat_broker
   mentat_client
   mentat_connector
-  mentat_github
+  github
   ; mentat_server: consumed by cli_serve's per-session child server —
   ; the one serve boot in this binary; the daemon's serve boot lives in mentatd.
   mentat_server

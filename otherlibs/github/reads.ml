@@ -14,17 +14,28 @@ module Open_pr = struct
 end
 
 let ( let* ) = Result.bind
-let api_error e = Github_api.Error.message e
+let api_error e = Api.Error.message e
+
+(* Narrow reads over GitHub's response documents: take the named member when
+   it has the expected shape, ignore everything else — the foreign document
+   grows members freely, and what absence means stays with each caller. *)
+let member name = function
+  | Jsont.Object (mems, _) -> Option.map snd (Jsont.Json.find_mem name mems)
+  | _ -> None
+
+let string_value = function Jsont.String (s, _) -> Some s | _ -> None
+let bool_value = function Jsont.Bool (b, _) -> Some b | _ -> None
+
+let int_value = function
+  | Jsont.Number (v, _) when Float.is_integer v -> Some (int_of_float v)
+  | _ -> None
 
 let head_sha_of item =
-  Option.bind
-    (Option.bind (Mentat_json.Lenient.mem "head" item)
-       (Mentat_json.Lenient.mem "sha"))
-    Mentat_json.Lenient.string
+  Option.bind (Option.bind (member "head" item) (member "sha")) string_value
 
 let current_head api ~repo ~number =
   match
-    Github_api.get api ~path:(Printf.sprintf "/repos/%s/pulls/%d" repo number)
+    Api.get api ~path:(Printf.sprintf "/repos/%s/pulls/%d" repo number)
   with
   | Error e -> Error (api_error e)
   | Ok json -> (
@@ -32,12 +43,12 @@ let current_head api ~repo ~number =
       | Some sha -> Ok sha
       | None -> Error "pull request answered without head.sha")
 
-(* The listing's page items, mapped to typed rows. Members the pipeline does
+(* The listing's page items, mapped to typed rows. Members the caller does
    not gate on are ignored, the narrow-read posture every foreign payload
    gets. *)
 let open_prs api ~repo =
   match
-    Github_api.get_paginated api
+    Api.get_paginated api
       ~path:(Printf.sprintf "/repos/%s/pulls?state=open&per_page=100" repo)
       ~max_pages:10
   with
@@ -52,27 +63,20 @@ let open_prs api ~repo =
                    (fun item ->
                      let ( let* ) = Option.bind in
                      let* number =
-                       Option.bind
-                         (Mentat_json.Lenient.mem "number" item)
-                         Mentat_json.Lenient.int
+                       Option.bind (member "number" item) int_value
                      in
                      let* head_sha = head_sha_of item in
                      let* base_ref =
                        Option.bind
-                         (Option.bind
-                            (Mentat_json.Lenient.mem "base" item)
-                            (Mentat_json.Lenient.mem "ref"))
-                         Mentat_json.Lenient.string
+                         (Option.bind (member "base" item) (member "ref"))
+                         string_value
                      in
                      let* draft =
-                       Option.bind
-                         (Mentat_json.Lenient.mem "draft" item)
-                         Mentat_json.Lenient.bool
+                       Option.bind (member "draft" item) bool_value
                      in
                      let* author_association =
-                       Option.bind
-                         (Mentat_json.Lenient.mem "author_association" item)
-                         Mentat_json.Lenient.string
+                       Option.bind (member "author_association" item)
+                         string_value
                      in
                      Some
                        {
@@ -87,19 +91,16 @@ let open_prs api ~repo =
            pages)
 
 let viewer_login api =
-  match Github_api.get api ~path:"/user" with
+  match Api.get api ~path:"/user" with
   | Error e -> Error (api_error e)
   | Ok json -> (
-      match
-        Option.bind (Mentat_json.Lenient.mem "login" json)
-          Mentat_json.Lenient.string
-      with
+      match Option.bind (member "login" json) string_value with
       | Some login -> Ok login
       | None -> Error "/user answered without a login member")
 
-let posted api ~login ~repo ~number =
+let posted api ~login ~marked ~repo ~number =
   let listing path =
-    match Github_api.get_paginated api ~path ~max_pages:10 with
+    match Api.get_paginated api ~path ~max_pages:10 with
     | Error e -> Error (api_error e)
     | Ok pages ->
         Ok
@@ -114,27 +115,22 @@ let posted api ~login ~repo ~number =
   let* issue_comments =
     listing (Printf.sprintf "/repos/%s/issues/%d/comments?per_page=100" repo number)
   in
-  (* Both comment families the publisher writes into, filtered to the
-     credential's own login and the connector's marker grammar — marker
-     presence alone is forgeable, so the author predicate is what makes a
-     comment ours. *)
+  (* Both comment families, filtered to the posting identity's own login and
+     the caller's body predicate — a recognizable body alone is forgeable,
+     so the author predicate is what makes a comment the caller's. *)
   let ours item =
     let by_us =
       Option.bind
-        (Option.bind (Mentat_json.Lenient.mem "user" item)
-           (Mentat_json.Lenient.mem "login"))
-        Mentat_json.Lenient.string
+        (Option.bind (member "user" item) (member "login"))
+        string_value
       = Some login
     in
-    let marked =
-      match
-        Option.bind (Mentat_json.Lenient.mem "body" item)
-          Mentat_json.Lenient.string
-      with
-      | Some body -> Mentat_connector.Publication.Marker.marks body
+    let is_marked =
+      match Option.bind (member "body" item) string_value with
+      | Some body -> marked body
       | None -> false
     in
-    by_us && marked
+    by_us && is_marked
   in
   let rows =
     List.filter_map
@@ -142,10 +138,8 @@ let posted api ~login ~repo ~number =
         if not (ours item) then None
         else
           match
-            ( Option.bind (Mentat_json.Lenient.mem "id" item)
-                Mentat_json.Lenient.int,
-              Option.bind (Mentat_json.Lenient.mem "body" item)
-                Mentat_json.Lenient.string )
+            ( Option.bind (member "id" item) int_value,
+              Option.bind (member "body" item) string_value )
           with
           | Some id, Some body ->
               Some

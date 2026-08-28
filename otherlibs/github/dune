@@ -1,0 +1,11 @@
+(library
+ (name github)
+ (libraries
+  base64
+  digestif
+  eqaf
+  jsont
+  jsont.bytesrw
+  mirage-crypto-pk
+  uri
+  x509))

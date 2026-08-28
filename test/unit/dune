@@ -434,16 +434,6 @@
   mentat_store))
 
 (test
- (name test_github_api)
- (modules test_github_api)
- (libraries windtrap mentat_github jsont jsont.bytesrw))
-
-(test
- (name test_github_app)
- (modules test_github_app)
- (libraries windtrap mentat_github jsont jsont.bytesrw))
-
-(test
  (name test_github_app_store)
  (modules test_github_app_store)
  (flags
@@ -765,7 +755,8 @@
   mentat_boot
   mentat_broker
   mentat_routine
-  mentat_github
+  mentat_connector
+  github
   mentat_provider_runtime
   mentat_server
   eio

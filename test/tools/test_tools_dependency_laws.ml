@@ -913,6 +913,7 @@ let%test
       [
         "frontmatter";
         "fswatch";
+        "github";
         "jsonschema";
         "lpath";
         "nofollow";

@@ -659,47 +659,13 @@ let ingress_route path =
   | [ ""; "ingress"; "github"; id ] when not (String.equal id "") -> Some id
   | _ -> None
 
-(* Hand-rolled on purpose: Digestif's [consistent_of_hex] accepts whitespace
-   separators inside and after the hex, and this authentication surface wants
-   the byte-strict grammar — exactly 2n hex digits, nothing else. *)
-let hex_digit = function
-  | '0' .. '9' as c -> Some (Char.code c - Char.code '0')
-  | 'a' .. 'f' as c -> Some (Char.code c - Char.code 'a' + 10)
-  | 'A' .. 'F' as c -> Some (Char.code c - Char.code 'A' + 10)
-  | _ -> None
-
-let hex_decode s =
-  let len = String.length s in
-  if len = 0 || len mod 2 <> 0 then None
-  else
-    let buffer = Bytes.create (len / 2) in
-    let rec go i =
-      if i >= len then Some (Bytes.to_string buffer)
-      else
-        match (hex_digit s.[i], hex_digit s.[i + 1]) with
-        | Some hi, Some lo ->
-            Bytes.set buffer (i / 2) (Char.chr ((hi lsl 4) lor lo));
-            go (i + 2)
-        | _, _ -> None
-    in
-    go 0
-
-(* The MAC a delivery presents: [X-Hub-Signature-256: sha256=<hex>], decoded to
-   raw digest bytes. [None] — an absent header, a wrong prefix, undecodable or
-   odd-length hex — lands in the same content-free 401 as a clean mismatch, so
-   a probe learns nothing from the refusal shape. The SHA-1 [X-Hub-Signature]
-   is never consulted. *)
+(* The MAC a delivery presents: the [X-Hub-Signature-256] header, verified by
+   the github library's strict-grammar, constant-time check. [None] — an
+   absent header — and every malformed or mismatched value land in the same
+   content-free 401, so a probe learns nothing from the refusal shape. The
+   SHA-1 [X-Hub-Signature] is never consulted. *)
 let ingress_presented_mac headers =
-  match Cohttp.Header.get headers "x-hub-signature-256" with
-  | None -> None
-  | Some value ->
-      let prefix = "sha256=" in
-      let plen = String.length prefix in
-      if
-        String.length value > plen
-        && String.equal (String.sub value 0 plen) prefix
-      then hex_decode (String.sub value plen (String.length value - plen))
-      else None
+  Cohttp.Header.get headers "x-hub-signature-256"
 
 (* Read the delivery body under the cap without ever buffering the excess: the
    reader's buffer is allowed exactly one byte past the cap, so an oversized
@@ -762,10 +728,8 @@ let handle_ingress ~(ingress : Ingress.t) meth path request body =
               let verifies ~secret =
                 match presented with
                 | None -> false
-                | Some presented ->
-                    Eqaf.equal presented
-                      (Digestif.SHA256.to_raw_string
-                         (Digestif.SHA256.hmac_string ~key:secret raw))
+                | Some signature ->
+                    Github.Webhook.verify ~secret ~signature ~body:raw
               in
               if not (verifies ~secret) then refuse_unverified ~ingress_id
               else

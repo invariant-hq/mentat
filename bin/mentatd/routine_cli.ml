@@ -294,7 +294,7 @@ let remove name =
   |> Exit_status.of_result
 
 (* fire — the pipeline, run in this process. The pipeline itself lives in
-   [Routine_fire] and the GitHub read conventions in [Github_reads]; this
+   [Routine_fire] and the GitHub read conventions in [Github.Reads]; this
    verb reads the event bytes, requires the read credential, snaps the
    reads onto the pipeline's injected record, and wires the owner's SIGINT
    onto the pipeline's stop seam. *)

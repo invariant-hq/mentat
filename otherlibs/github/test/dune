@@ -1,0 +1,4 @@
+(test
+ (name test_github)
+ (modules test_github)
+ (libraries windtrap github jsont jsont.bytesrw))
