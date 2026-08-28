@@ -1,10 +1,11 @@
 # Daemon and web
 
-Mentat runs its engine in the invoking process by default. The daemon is an
-opt-in local transport for sharing one store, provider runtime, and engine host
-across clients. The browser frontend is a second opt-in on that daemon; it is not
-a hosted service. The daemon also serves as the resident node for standing
-review grants — see [Routines](routines.md).
+Every session is driven by its own agent — a `mentat` process the CLI and TUI
+start and dial directly, with nothing to install or keep running. The daemon,
+`mentatd`, is an opt-in resident process for the standing surfaces around
+those agents: the browser frontend, and the resident node for standing review
+grants — see [Routines](routines.md). It holds no engine and serves no
+commands; nothing in `mentat` starts or requires one.
 
 ## Daemon lifecycle
 
@@ -15,86 +16,38 @@ release. Run it in the foreground:
 mentatd
 ```
 
-In another terminal, add `--attach` to a command that advertises the flag:
-
-```sh
-mentat --attach
-mentat run --attach "Inspect the failing build"
-mentat session list --attach
-```
-
-If no daemon is running, `--attach` starts `mentatd` detached, inheriting the
-attaching process's current directory and environment, then connects to it. The
-daemon binary is resolved next to the running `mentat`; set `MENTATD_BIN` to
-name one elsewhere.
-Without `--attach`, commands keep using their in-process client even while a
-daemon exists.
-
-Stop the daemon gracefully with:
+Stop it gracefully with:
 
 ```sh
 mentatd stop
 ```
 
 Stopping when none is running is a successful no-op. A first SIGINT or SIGTERM
-also performs a graceful stop; a second signal forces immediate exit if teardown
-is stuck.
+also performs a graceful stop; a second signal forces immediate exit if
+teardown is stuck. Agents the daemon started — a browser action's session, a
+routine's run — keep running across a daemon stop or crash and wind down on
+their own.
 
-Only one daemon claims a data store. Its discovery files live under
-`<data-home>/daemon` (`~/.local/share/mentat/daemon` by default):
+To keep the daemon resident across logins, install it as a user service with
+`mentatd install` (`mentatd install --print` renders the unit without touching
+anything).
+
+Only one daemon claims a data store. Its files live under `<data-home>/daemon`
+(`~/.local/share/mentat/daemon` by default):
 
 | Entry | Purpose |
 | --- | --- |
-| `daemon.json` | Socket path, pid, protocol and binary identity, config home, start time, and current web URL when enabled. Written mode `0600`. |
+| `daemon.json` | Pid, protocol and binary identity, config home, start time, the current web URL when `--web` is enabled, and the bound ingress address when an ingress listens. Written mode `0600`. |
 | `daemon.lock` | Whole-life advisory claim; the lock, not the recorded pid, is the liveness authority. |
-| `daemon.log` | Appended stdout/stderr for a daemon started automatically by `--attach`. |
+| `daemon.log` | Appended stdout/stderr for a service-managed daemon. |
 
-The default socket is
-`/tmp/mentat-<uid>-<store-key>/mentat.sock`. Mentat creates the directory as
-owner-only `0700` and the socket as `0600`. Use an absolute private directory
-when the default is unsuitable:
+## Captured configuration
 
-```sh
-mentatd --socket /short/private/path
-```
-
-The override directory must be owned by the current user and mode `0700` and
-cannot sit under a world-writable non-sticky parent. The selected socket is
-recorded in `daemon.json`, so normal attachers follow it.
-
-`MENTAT_DAEMON_SOCKET=/path/to/mentat.sock` is a lower-level client override. It
-bypasses discovery and spawning and connects directly to that socket. If the
-socket does not answer, attachment fails; Mentat does not fall back to another
-daemon. The normal workspace handshake still applies, but the discovery-file
-binary and config-home identity check does not.
-
-## Captured configuration and limitations
-
-The daemon process makes provider calls with the environment it captured when it
-started. Environment changes made only in a later attaching shell do not alter
-an already-running daemon. Restart it after changing environment-provided
-credentials or `MENTAT_*` settings that the daemon must consume. Credentials
-saved to the shared auth store are loaded again when a provider client is built.
-Per-run options carried by an attached command remain explicit turn inputs.
-
-Config and trust staging and custom-command discovery/expansion occur in the
-attaching client as well; the engine and session fence live in the daemon. A
-binary or config-home mismatch is refused rather than silently replacing a live
-daemon; stop it explicitly before attaching with a different installation or
-config home.
-
-Current attached-mode limits include:
-
-- `--ephemeral` cannot be combined with `--attach`, because the daemon owns the
-  durable per-user store;
-- image attachment is not transported to a remote daemon, so use an in-process
-  [headless run](headless.md) for `--image`;
-- session export over `--attach` supports JSON only; text, Markdown, and HTML
-  exports run offline;
-- attached revert requires an explicit `--latest` or `--change` scope and does
-  not support `--path`.
-
-Use each command's `--help` as the authority for whether `--attach` is accepted.
+The agents the daemon starts boot against the environment the daemon captured
+when it started. Environment changes made only in a later shell do not alter
+an already-running daemon; restart it after changing environment-provided
+credentials or `MENTAT_*` settings its agents must consume. Credentials saved
+to the shared auth store are read live by each agent.
 
 ## Browser frontend
 
@@ -109,20 +62,27 @@ mentatd --web
 such as `http://127.0.0.1:PORT/?t=TOKEN`; under a service manager — where
 standard output is the daemon log — the URL is recorded in `daemon.json`
 (mode 0600) instead, so the access token never lands in a log file. It uses
-an ephemeral port by default; choose one with `--web-port PORT`. The option has no effect without `--web`. The web
-workspace is the daemon process's startup working directory; there is no web
-`--cwd` flag.
+an ephemeral port by default; choose one with `--web-port PORT`. The option
+has no effect without `--web`. The web workspace is the daemon process's
+startup working directory; there is no web `--cwd` flag.
+
+The daemon is the browser's frontend exactly as the CLI is a terminal's: a
+browser action against a dormant session starts the session's agent and dials
+it, and the live feed rides that held connection. Sessions recorded in another
+workspace still appear in the list, but driving one is refused — its agent
+serves its own workspace — the same refusal `mentat run` gives a
+cross-workspace resume.
 
 Web startup does not show the TUI trust preflight. An unknown or explicitly
 untrusted startup workspace remains restricted, with project config,
 instructions, skills, commands, and project processes inactive. Record a
-deliberate decision with `mentat trust /path/to/project` before starting the web
-daemon when those repository-controlled inputs are required.
+deliberate decision with `mentat trust /path/to/project` before starting the
+web daemon when those repository-controlled inputs are required.
 
-Starting and opening the UI does not itself require a model credential or make a
-model request. A turn uses the currently configured model normally, so a hosted
-model must be configured and authenticated before that turn can succeed. Model
-selection and login remain CLI/TUI workflows.
+Starting and opening the UI does not itself require a model credential or make
+a model request. A turn uses the currently configured model normally, so a
+hosted model must be configured and authenticated before that turn can
+succeed. Model selection and login remain CLI/TUI workflows.
 
 The current browser surface can:
 
@@ -153,9 +113,9 @@ carries a strict Content-Security-Policy, and Host/Origin checks reject requests
 outside the exact `127.0.0.1` and `localhost` origins for the bound port.
 
 Treat the URL, `daemon.json`, and browser cookie as credentials to the running
-agent. The local Unix socket similarly trusts processes running as the same OS
-user; it has filesystem permissions, not per-client tokens. The web edge does
-not replace Mentat's other controls: workspace activation, permission review,
-and command sandboxing still apply to operations requested through the browser.
-Model and web-tool network activity remains governed by
+agent. An agent's per-session Unix socket similarly trusts processes running
+as the same OS user; it has filesystem permissions, not per-client tokens. The
+web edge does not replace Mentat's other controls: workspace activation,
+permission review, and command sandboxing still apply to operations requested
+through the browser. Model and web-tool network activity remains governed by
 [Data leaving your machine](security.md#data-leaving-your-machine).

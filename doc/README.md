@@ -36,8 +36,8 @@ overview when changing how the libraries compose.
   reverts.
 - [Headless runs](manual/headless.md) — restricted unknown workspaces,
   scripting, images, output schemas, JSONL events, exit codes, and continuation.
-- [Daemon and web](manual/daemon-and-web.md) — opt-in `--attach`, daemon
-  lifecycle and local socket trust, plus the loopback browser frontend.
+- [Daemon and web](manual/daemon-and-web.md) — the opt-in resident daemon's
+  lifecycle, plus the loopback browser frontend.
 - [Shell completions](manual/completions.md) — zsh, bash, and PowerShell setup.
 - [Troubleshooting](manual/troubleshooting.md) — where logs, crash reports, and
   state live, what they contain, and what to send when reporting a problem.

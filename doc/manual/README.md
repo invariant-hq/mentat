@@ -36,8 +36,8 @@ internal notes, see the rest of [`doc/`](../).
 - [Routines](routines.md) — standing, unattended pull-request review: the
   routine directory, credentials, crontab or resident deployment, budgets,
   and the durable record.
-- [Daemon and web](daemon-and-web.md) — opt-in `--attach`, daemon lifecycle and
-  local socket trust, plus the authenticated loopback browser frontend.
+- [Daemon and web](daemon-and-web.md) — the opt-in resident daemon's
+  lifecycle, plus the authenticated loopback browser frontend.
 - [Shell completions](completions.md) — installing cmdliner completion
   for zsh, bash, and PowerShell.
 - [Troubleshooting](troubleshooting.md) — where logs, crash reports, and state
