@@ -1125,6 +1125,26 @@ let attach_images t ~client ~session ~images =
           in
           loop [] images)
 
+(* Gate credential readiness before create, so a run that cannot authenticate
+   never leaves an empty idle session behind. *)
+let credential_gate t =
+  match Composition.default_model t with
+  | Error message -> Error (Exit_status.runtime message)
+  | Ok model -> (
+      let provider = Mentat_llm.Model.provider model in
+      match Composition.provider_auth_satisfied t provider with
+      | Error error ->
+          Error
+            (Exit_status.runtime (Mentat_provider_runtime.Error.message error))
+      | Ok true -> Ok ()
+      | Ok false ->
+          Error
+            (Exit_status.runtime
+               (Printf.sprintf
+                  "no credential for provider %s; run `mentat auth login %s`"
+                  (Mentat_llm.Provider.id provider)
+                  (Mentat_llm.Provider.id provider))))
+
 let drive t ~environment_overrides ~json ~session ~create ~mode ~review
     ~title ~skill_texts ~images ~model_selection ~max_steps
     ~output_schema ~thinking ~prompt =
@@ -1143,30 +1163,7 @@ let drive t ~environment_overrides ~json ~session ~create ~mode ~review
       match run_client t ~environment_overrides with
       | Error status -> status
       | Ok client -> (
-          (* Gate credential readiness before create, so a run that cannot
-         authenticate never leaves an empty idle session behind. *)
-          let cred_gate =
-            if not create then Ok ()
-            else
-              match Composition.default_model t with
-              | Error message -> Error (Exit_status.runtime message)
-              | Ok model -> (
-                  let provider = Mentat_llm.Model.provider model in
-                  match Composition.provider_auth_satisfied t provider with
-                  | Error error ->
-                      Error
-                        (Exit_status.runtime
-                           (Mentat_provider_runtime.Error.message error))
-                  | Ok true -> Ok ()
-                  | Ok false ->
-                      Error
-                        (Exit_status.runtime
-                           (Printf.sprintf
-                              "no credential for provider %s; run `mentat auth \
-                               login %s`"
-                              (Mentat_llm.Provider.id provider)
-                              (Mentat_llm.Provider.id provider))))
-          in
+          let cred_gate = if not create then Ok () else credential_gate t in
           match cred_gate with
           | Error status -> status
           | Ok () -> (
@@ -1276,6 +1273,283 @@ let drive t ~environment_overrides ~json ~session ~create ~mode ~review
                                       in
                                       Client.Feed.close feed;
                                       status))))))))
+
+(* The promptless drive: nothing is submitted — the agent's own boot attach
+   consumes mail already durable in the journal — so the run only starts the
+   agent, follows, and settles on the durable head's conclusion. A session
+   with nothing to run — concluded, or virgin with an empty queue — is a
+   clean no-op that starts nothing; one parked on a decision prints the
+   waiting block and exits blocked, exactly as a prompted run would. *)
+let inbox_work t ~session =
+  match Mentat_store.Session.load (Composition.store t) session with
+  | Error _ -> `Runnable
+  | Ok doc ->
+      let state = Session.state (Document.session doc) in
+      if
+        Session.State.finished state
+        || Session.State.turns state = []
+           && Session.State.pending_queue state = []
+      then `Nothing
+      else `Runnable
+
+let drive_inbox t ~environment_overrides ~thinking ~session =
+  Log_setup.set_session ~event:Log_setup.Resumed (Some (Id.to_string session));
+  let settled_line () =
+    Output.stderr_printf "mentat: session %s is settled with nothing queued\n"
+      (Id.to_string session);
+    Exit_status.Success
+  in
+  let waiting_block request =
+    render_human_waiting ~session request;
+    Exit_status.Blocked
+      (Printf.sprintf
+         "session blocked on a %s decision (%s); resolve with `mentat run \
+          reply`"
+         (Mentat_session.Decision.Requested.tag request)
+         (Session.Decision.Id.to_string
+            (Session.Decision.Requested.id request)))
+  in
+  match spawn_scoped_gate t ~session ~environment_overrides with
+  | Error status -> status
+  | Ok () -> (
+      match inbox_work t ~session with
+      | `Nothing -> settled_line ()
+      | `Runnable -> (
+          match run_client t ~environment_overrides with
+          | Error status -> status
+          | Ok client -> (
+              (* A decision already parked would never cross a from-Now
+                 follow; answer it the way a prompted run answers one that
+                 arrives live — the waiting block and exit 3. *)
+              match Client.pending_decision client session with
+              | Error e -> Exit_status.of_protocol_error e
+              | Ok (Some request) -> waiting_block request
+              | Ok None -> (
+                  match
+                    Client.follow_session ~sw:(Composition.sw t) client session
+                      ~from:`Now
+                  with
+                  | Error e -> Exit_status.of_protocol_error e
+                  | Ok feed ->
+                      let close_and status =
+                        Client.Feed.close feed;
+                        status
+                      in
+                      (* The agent's boot attach consumes the mail before its
+                         listener binds, so the turn can settle — or park —
+                         before this follow attached, and a from-Now feed
+                         would never speak of it while the open connection
+                         pins the agent alive. With the follow attached,
+                         re-read the durable truth once; anything settling
+                         after this read crosses the feed. *)
+                      if session_concluded t ~session then
+                        close_and (settled_line ())
+                      else (
+                        match Client.pending_decision client session with
+                        | Ok (Some request) ->
+                            close_and (waiting_block request)
+                        | Error _ | Ok None ->
+                            let interrupted = ref false in
+                            close_and
+                              (with_sigint_guard t ~client ~session
+                                 ~interrupted (fun () ->
+                                   render_feed t ~client ~json:false ~session
+                                     ~output_schema:false ~thinking
+                                     ~terminal:Inbox ~interrupted feed)))))))
+
+(* --goal. — the headless steward (RFC 0027): record the intent in the
+   session document, then continue-at-finished until the model declares the
+   goal done or a recorded bound stops the loop. The loop lives here, never
+   in the engine: each continuation is an ordinary framed turn sealed under
+   the goal_status schema through the generic output-schema channel
+   ([Command.prompt ?output_schema]), so the engine stays goal-blind and a
+   claimless turn is never a schema failure — the render treats the turn as
+   plain, and an absent claim reads as continue. *)
+
+type goal_flags = {
+  objective : string option;
+  goal_max_turns : int option;
+  goal_budget : float option;
+}
+
+let resolve_goal flags =
+  match flags.objective with
+  | None ->
+      if Option.is_some flags.goal_max_turns || Option.is_some flags.goal_budget
+      then Error (Exit_status.usage "--max-turns and --budget require --goal")
+      else Ok None
+  | Some objective ->
+      let objective = String.trim objective in
+      let* () =
+        if String.length objective = 0 then
+          Error (Exit_status.usage "--goal must not be empty")
+        else Ok ()
+      in
+      let* () =
+        match flags.goal_max_turns with
+        | Some n when n <= 0 ->
+            Error
+              (Exit_status.usage
+                 (Printf.sprintf "--max-turns must be positive, got %d" n))
+        | Some _ | None -> Ok ()
+      in
+      let* () =
+        match flags.goal_budget with
+        | Some b when not (b > 0.) ->
+            Error (Exit_status.usage "--budget must be positive")
+        | Some _ | None -> Ok ()
+      in
+      Ok
+        (Some
+           (Session.Metadata.Goal.make ~objective
+              ?max_turns:flags.goal_max_turns ?budget:flags.goal_budget ()))
+
+(* The journal's whole cost fold, priced through the catalog — the same
+   derivation that stamps routine receipts. An unpriced model folds to
+   [None], which trips no budget. *)
+let goal_spend t view =
+  match Session.Session_view.active_model view with
+  | None -> None
+  | Some model -> (
+      match
+        Catalog.find (Composition.catalog t)
+          (Mentat_provider.Selector.of_model model)
+      with
+      | Error _ -> None
+      | Ok priced ->
+          Mentat_provider.Model.cost priced
+            (Session.Session_view.metrics view).Session.Metrics.usage)
+
+(* One continuation turn, rendered exactly as any headless turn. A submit
+   losing an admission race (mail landed between the finished read and this
+   prompt) is [`Race]: the loop re-reads and lets the pending work run. *)
+let goal_turn t ~client ~session ~max_steps ~text =
+  let turn = Turn.Id.of_string (Session_meta.fresh_id ~prefix:"t" ()) in
+  match
+    Command.prompt ~session ~turn
+      ~input:[ Mentat_llm.Content.text text ]
+      ?max_steps ~output_schema:Goal_steward.Claim.schema ()
+  with
+  | Error _ -> `Status (Exit_status.usage "prompt must not be empty")
+  | Ok cmd -> (
+      match
+        Client.follow_session ~sw:(Composition.sw t) client session ~from:`Now
+      with
+      | Error e -> `Status (Exit_status.of_protocol_error e)
+      | Ok feed -> (
+          let close_and answer =
+            Client.Feed.close feed;
+            answer
+          in
+          match Client.submit client cmd with
+          | Error (Protocol.Error.Active_turn_exists _) -> close_and `Race
+          | Error e -> close_and (`Status (Exit_status.of_protocol_error e))
+          | Ok () ->
+              let interrupted = ref false in
+              let status =
+                with_sigint_guard t ~client ~session ~interrupted (fun () ->
+                    render_feed t ~client ~json:false ~session
+                      ~output_schema:false ~thinking:false
+                      ~terminal:(Same_turn turn) ~interrupted feed)
+              in
+              close_and (`Status status)))
+
+(* The loop: read the document, decide, act. Outstanding work always runs
+   first (the not-finished arm), so a re-armed goal never stomps queued mail
+   or an unfinished head; a step-limited continuation is unfinished work by
+   the same journal read, never a loop fault. A head turn that settled
+   [Failed] ends the loop loudly: nothing was claimed because nothing ran,
+   and continuing would re-spend on broken machinery — the table's
+   opt-out semantics govern the model's declarations, not faults. *)
+let drive_goal t ~client ~max_steps ~session goal =
+  let objective = Session.Metadata.Goal.objective goal in
+  let head_outcome doc =
+    Session.Session_view.last_outcome
+      (Session.Session_view.of_session (Document.session doc))
+  in
+  let rec loop () =
+    match Mentat_store.Session.load (Composition.store t) session with
+    | Error e ->
+        Exit_status.runtime (Mentat_store.Session.Error.message e)
+    | Ok doc -> (
+        let s = Document.session doc in
+        let view = Session.Session_view.of_session s in
+        let state = Session.state s in
+        (* The steward's finished reading: the shared judgment, plus the
+           virgin session the start form just created — no turn ever ran and
+           nothing is queued, which is idle by the same "nothing of yours
+           pending" measure, and exactly where the first continuation
+           belongs. *)
+        let finished =
+          Session.State.finished state
+          || Session.State.turns state = []
+             && Session.State.pending_queue state = []
+        in
+        match
+          Goal_steward.decide ~goal ~finished
+            ~claim:(Mentat_agent.Catalog.claim s)
+            ~continuations:(Goal_steward.continuations ~objective s)
+            ~spent:(goal_spend t view)
+        with
+        | None -> (
+            (* Outstanding work precedes the loop's own next move. *)
+            match
+              drive_inbox t ~environment_overrides:[] ~thinking:false ~session
+            with
+            | Exit_status.Success -> loop ()
+            | status -> status)
+        | Some (Goal_steward.Verdict.Done note) ->
+            Output.stderr_printf "mentat: goal declared done%s\n"
+              (match note with None -> "" | Some note -> ": " ^ note);
+            Exit_status.Success
+        | Some Goal_steward.Verdict.Bound_reached ->
+            Exit_status.runtime
+              (Printf.sprintf
+                 "the goal's turn bound (%d) is spent without a done \
+                  declaration; raise --max-turns and re-arm with `mentat run \
+                  resume %s`"
+                 (Option.value ~default:0
+                    (Session.Metadata.Goal.max_turns goal))
+                 (shell_quote (Id.to_string session)))
+        | Some Goal_steward.Verdict.Budget_spent ->
+            Exit_status.runtime
+              (Printf.sprintf
+                 "the goal's budget ($%.2f) is spent without a done \
+                  declaration; raise --budget and re-arm with `mentat run \
+                  resume %s`"
+                 (Option.value ~default:0.
+                    (Session.Metadata.Goal.budget goal))
+                 (shell_quote (Id.to_string session)))
+        | Some Goal_steward.Verdict.Continue -> (
+            Output.stderr_printf "mentat: continuing toward the goal%s\n"
+              (match Session.Metadata.Goal.max_turns goal with
+              | Some bound ->
+                  Printf.sprintf " (turn %d of %d)"
+                    (Goal_steward.continuations ~objective s + 1)
+                    bound
+              | None ->
+                  Printf.sprintf " (turn %d)"
+                    (Goal_steward.continuations ~objective s + 1));
+            match
+              goal_turn t ~client ~session ~max_steps
+                ~text:(Goal_steward.continuation ~objective)
+            with
+            | `Race -> loop ()
+            | `Status Exit_status.Success -> loop ()
+            | `Status (Exit_status.Runtime_error _ as status) -> (
+                (* The render maps a step-limited turn and a failed turn to
+                   the same status; the journal separates them. *)
+                match
+                  Mentat_store.Session.load (Composition.store t) session
+                with
+                | Ok doc -> (
+                    match head_outcome doc with
+                    | Some Turn.Outcome.Step_limit -> loop ()
+                    | Some _ | None -> status)
+                | Error _ -> status)
+            | `Status status -> status))
+  in
+  loop ()
 
 let read_prompt raw =
   if String.equal raw "-" then
@@ -1542,9 +1816,81 @@ let model_selection_of_options t options =
 
 (* start. *)
 
-let start json id_opt title_opt options ephemeral skills images prompt_raw
-    cwd =
+(* The wire half both start shapes share: the session-scoped model selection
+   and review posture, set on the session's agent before its first turn. *)
+let set_selection ~client ~session ~model_selection ~review =
+  let* () =
+    match model_selection with
+    | None -> Ok ()
+    | Some (selector, reasoning_effort) ->
+        Client.set_model client ~session ?reasoning_effort selector
+  in
+  match review with
+  | None -> Ok ()
+  | Some behavior -> Client.set_permission_review client ~session behavior
+
+(* The goal-start shape: record the intent at creation — before any agent
+   exists, so the write needs no fence dance — then hand the loop the
+   session. The goal session persists by definition (the intent must survive
+   the terminal), and the loop owns the output schema and the stream, so the
+   flags that contradict either refuse up front. *)
+let start_goal ~id_opt ~title ~options ~overrides ~review
+    ~environment_overrides ~cwd goal =
+  Ok
+    (Composition.with_base ~cwd ~overrides (fun t ->
+         match check_explicit_model t options.model with
+         | Error status -> status
+         | Ok () -> (
+             match model_selection_of_options t options with
+             | Error status -> status
+             | Ok model_selection -> (
+                 match credential_gate t with
+                 | Error status -> status
+                 | Ok () -> (
+                     let session =
+                       match id_opt with
+                       | Some id -> id
+                       | None ->
+                           Id.of_string (Session_meta.fresh_id ~prefix:"s" ())
+                     in
+                     let objective = Session.Metadata.Goal.objective goal in
+                     let title =
+                       match title with
+                       | Some title -> title
+                       | None -> "goal: " ^ objective
+                     in
+                     let created =
+                       Session.create ~id:session ~title ~goal
+                         ~cwd:(Composition.root t)
+                         ~created_at:(Composition.now_time t) ()
+                     in
+                     match
+                       Mentat_store.Session.create (Composition.store t)
+                         created
+                     with
+                     | Error e ->
+                         Exit_status.runtime
+                           (Mentat_store.Session.Error.message e)
+                     | Ok (_ : Document.t) -> (
+                         Log_setup.set_session ~event:Log_setup.Opened
+                           (Some (Id.to_string session));
+                         run_start_notices t ~json:false;
+                         match run_client t ~environment_overrides with
+                         | Error status -> status
+                         | Ok client -> (
+                             match
+                               set_selection ~client ~session ~model_selection
+                                 ~review
+                             with
+                             | Error e -> Exit_status.of_protocol_error e
+                             | Ok () ->
+                                 drive_goal t ~client
+                                   ~max_steps:options.max_steps ~session goal)))))))
+
+let start json id_opt title_opt options goal_flags ephemeral skills images
+    prompt_opt cwd =
   (let* id_opt = validate_id_opt id_opt in
+   let* goal = resolve_goal goal_flags in
    let* () =
      (* An ephemeral run is discarded with its store, so naming it for a later
         resume is contradictory. *)
@@ -1560,41 +1906,108 @@ let start json id_opt title_opt options ephemeral skills images prompt_raw
    let* output_schema = resolve_output_schema options.output_schema in
    let* overrides = overrides_of_options options in
    let environment_overrides = environment_overrides_of_options options in
-   Ok
-     (with_run_base ~cwd ~overrides ~ephemeral (fun t ->
-          match check_explicit_model t options.model with
-          | Error status -> status
-          | Ok () -> (
-              match model_selection_of_options t options with
+   match goal with
+   | Some goal ->
+       let* () =
+         match
+           List.find_opt
+             (fun (given, _) -> given)
+             [
+               (Option.is_some prompt_opt, "PROMPT (the objective is the prompt)");
+               (json, "--json");
+               (ephemeral, "--ephemeral (the intent must survive the run)");
+               (Option.is_some mode, "--mode (continuations run Build turns)");
+               (Option.is_some output_schema, "--output-schema (the loop owns it)");
+               (skills <> [], "--skill");
+               (images <> [], "--image");
+             ]
+         with
+         | Some (_, what) ->
+             Error
+               (Exit_status.usage
+                  (Printf.sprintf "--goal cannot be combined with %s" what))
+         | None -> Ok ()
+       in
+       start_goal ~id_opt ~title ~options ~overrides ~review
+         ~environment_overrides ~cwd goal
+   | None ->
+       let* prompt_raw =
+         match prompt_opt with
+         | Some prompt -> Ok prompt
+         | None ->
+             Error
+               (Exit_status.usage "run requires a PROMPT (or --goal OBJECTIVE)")
+       in
+       Ok
+         (with_run_base ~cwd ~overrides ~ephemeral (fun t ->
+              match check_explicit_model t options.model with
               | Error status -> status
-              | Ok model_selection -> (
-                  match skill_injections t ~names:skills with
+              | Ok () -> (
+                  match model_selection_of_options t options with
                   | Error status -> status
-                  | Ok skill_texts ->
-                      let prompt = read_prompt prompt_raw in
-                      if String.length prompt = 0 then
-                        Exit_status.usage "prompt must not be empty"
-                      else
-                        let session =
-                          match id_opt with
-                          | Some id -> id
-                          | None ->
-                              Id.of_string
-                                (Session_meta.fresh_id ~prefix:"s" ())
-                        in
-                        run_start_notices t ~json;
-                        drive t ~environment_overrides ~json ~session
-                          ~create:true ~mode ~review ~title ~skill_texts
-                          ~images ~model_selection
-                          ~max_steps:options.max_steps ~output_schema
-                          ~thinking:options.thinking ~prompt)))))
+                  | Ok model_selection -> (
+                      match skill_injections t ~names:skills with
+                      | Error status -> status
+                      | Ok skill_texts ->
+                          let prompt = read_prompt prompt_raw in
+                          if String.length prompt = 0 then
+                            Exit_status.usage "prompt must not be empty"
+                          else
+                            let session =
+                              match id_opt with
+                              | Some id -> id
+                              | None ->
+                                  Id.of_string
+                                    (Session_meta.fresh_id ~prefix:"s" ())
+                            in
+                            run_start_notices t ~json;
+                            drive t ~environment_overrides ~json ~session
+                              ~create:true ~mode ~review ~title ~skill_texts
+                              ~images ~model_selection
+                              ~max_steps:options.max_steps ~output_schema
+                              ~thinking:options.thinking ~prompt)))))
   |> Exit_status.of_result
 
-let prompt_req =
+let prompt_pos =
   Arg.(
-    required
+    value
     & pos 0 (some string) None
     & info [] ~docv:"PROMPT" ~doc:"The prompt; - reads stdin.")
+
+let goal_opt =
+  Arg.(
+    value
+    & opt (some string) None
+    & info [ "goal" ] ~docv:"OBJECTIVE"
+        ~doc:
+          "Keep working toward OBJECTIVE: each time the session settles with \
+           nothing queued, send a framed continuation turn, until the model \
+           declares the goal done (a goal_status claim), the turn bound or \
+           budget is spent, or you stop it. OBJECTIVE is the prompt; pass no \
+           PROMPT. `mentat run resume SESSION` re-arms a recorded goal.")
+
+let goal_max_turns_opt =
+  Arg.(
+    value
+    & opt (some int) None
+    & info [ "max-turns" ] ~docv:"N"
+        ~doc:"Stop the goal after N continuation turns (requires --goal).")
+
+let goal_budget_opt =
+  Arg.value
+    (Arg.opt
+       (Arg.some Arg.float)
+       None
+       (Arg.info [ "budget" ] ~docv:"USD"
+          ~doc:
+            "Stop the goal once the session's total spend reaches USD \
+             dollars (requires --goal)."))
+
+let goal_flags_term =
+  Term.(
+    const (fun objective goal_max_turns goal_budget ->
+        { objective; goal_max_turns; goal_budget })
+    $ goal_opt $ goal_max_turns_opt $ goal_budget_opt)
 
 let id_opt =
   Arg.(
@@ -1633,7 +2046,8 @@ let ephemeral_flag =
 let start_term =
   Term.(
     const start $ Cli_common.json $ id_opt $ title_opt $ run_options_term
-    $ ephemeral_flag $ skill_opt $ image_opt $ prompt_req $ Cli_common.cwd)
+    $ goal_flags_term $ ephemeral_flag $ skill_opt $ image_opt $ prompt_pos
+    $ Cli_common.cwd)
 
 let start_cmd =
   let doc = "Run a headless turn on a new session." in
@@ -1658,93 +2072,61 @@ let resolve_resume_args ~last pos0 pos1 =
   | false, Some session, None -> Ok (Some session, false, None)
   | false, None, _ -> Error "resume requires SESSION or --last"
 
-(* The promptless drive: nothing is submitted — the agent's own boot attach
-   consumes mail already durable in the journal — so the run only starts the
-   agent, follows, and settles on the durable head's conclusion. A session
-   with nothing to run — concluded, or virgin with an empty queue — is a
-   clean no-op that starts nothing; one parked on a decision prints the
-   waiting block and exits blocked, exactly as a prompted run would. *)
-let inbox_work t ~session =
-  match Mentat_store.Session.load (Composition.store t) session with
-  | Error _ -> `Runnable
-  | Ok doc ->
-      let state = Session.state (Document.session doc) in
-      if
-        Session.State.finished state
-        || Session.State.turns state = []
-           && Session.State.pending_queue state = []
-      then `Nothing
-      else `Runnable
-
-let drive_inbox t ~environment_overrides ~thinking ~session =
-  Log_setup.set_session ~event:Log_setup.Resumed (Some (Id.to_string session));
-  let settled_line () =
-    Output.stderr_printf "mentat: session %s is settled with nothing queued\n"
-      (Id.to_string session);
-    Exit_status.Success
+(* The goal arms of a promptless resume: a fresh [--goal] is recorded through
+   the offline metadata twin — which needs the run fence, so the write
+   refuses while the session's agent is serving, the spawn-scoped posture —
+   and a standing recorded goal re-arms without asking: invoking resume is
+   the ask (the RFC's rule). Either way the loop then reads only the
+   document. *)
+let resume_goal t ~doc ~session ~options ~review ~environment_overrides goal =
+  let arm goal =
+    Log_setup.set_session ~event:Log_setup.Resumed
+      (Some (Id.to_string session));
+    run_start_notices t ~json:false;
+    match model_selection_of_options t options with
+    | Error status -> status
+    | Ok model_selection -> (
+        match run_client t ~environment_overrides with
+        | Error status -> status
+        | Ok client -> (
+            match set_selection ~client ~session ~model_selection ~review with
+            | Error e -> Exit_status.of_protocol_error e
+            | Ok () ->
+                drive_goal t ~client ~max_steps:options.max_steps ~session goal))
   in
-  let waiting_block request =
-    render_human_waiting ~session request;
-    Exit_status.Blocked
-      (Printf.sprintf
-         "session blocked on a %s decision (%s); resolve with `mentat run \
-          reply`"
-         (Mentat_session.Decision.Requested.tag request)
-         (Session.Decision.Id.to_string
-            (Session.Decision.Requested.id request)))
-  in
-  match spawn_scoped_gate t ~session ~environment_overrides with
-  | Error status -> status
-  | Ok () -> (
-      match inbox_work t ~session with
-      | `Nothing -> settled_line ()
-      | `Runnable -> (
-          match run_client t ~environment_overrides with
-          | Error status -> status
-          | Ok client -> (
-              (* A decision already parked would never cross a from-Now
-                 follow; answer it the way a prompted run answers one that
-                 arrives live — the waiting block and exit 3. *)
-              match Client.pending_decision client session with
-              | Error e -> Exit_status.of_protocol_error e
-              | Ok (Some request) -> waiting_block request
-              | Ok None -> (
-                  match
-                    Client.follow_session ~sw:(Composition.sw t) client session
-                      ~from:`Now
-                  with
-                  | Error e -> Exit_status.of_protocol_error e
-                  | Ok feed ->
-                      let close_and status =
-                        Client.Feed.close feed;
-                        status
-                      in
-                      (* The agent's boot attach consumes the mail before its
-                         listener binds, so the turn can settle — or park —
-                         before this follow attached, and a from-Now feed
-                         would never speak of it while the open connection
-                         pins the agent alive. With the follow attached,
-                         re-read the durable truth once; anything settling
-                         after this read crosses the feed. *)
-                      if session_concluded t ~session then
-                        close_and (settled_line ())
-                      else (
-                        match Client.pending_decision client session with
-                        | Ok (Some request) ->
-                            close_and (waiting_block request)
-                        | Error _ | Ok None ->
-                            let interrupted = ref false in
-                            close_and
-                              (with_sigint_guard t ~client ~session
-                                 ~interrupted (fun () ->
-                                   render_feed t ~client ~json:false ~session
-                                     ~output_schema:false ~thinking
-                                     ~terminal:Inbox ~interrupted feed)))))))
+  match goal with
+  | `Standing goal ->
+      Output.stderr_printf "mentat: re-arming the goal: %s\n"
+        (Session.Metadata.Goal.objective goal);
+      arm goal
+  | `Fresh goal ->
+      let metadata = Session.metadata (Document.session doc) in
+      if Option.is_some (Session.Metadata.delegated_from metadata) then
+        Exit_status.usage "a delegated session cannot carry a goal"
+      else if Option.is_some (Session.Metadata.triggered_from metadata) then
+        Exit_status.usage "a trigger-born session cannot carry a goal"
+      else if Agent_client.serving t session then
+        Exit_status.usage
+          (Printf.sprintf
+             "session %s's agent is already running; a goal is recorded \
+              between runs — let it idle out (or interrupt it) and re-run"
+             (Id.to_string session))
+      else (
+        match
+          Session_meta.commit_transform ~store:(Composition.store t)
+            ~sw:(Composition.sw t)
+            ~clock:(Eio.Stdenv.clock (Composition.stdenv t))
+            ~owner:(Composition.owner t) ~now:(Composition.now_time t) session
+            ~transform:(fun s -> Ok (Session.set_goal (Some goal) s))
+        with
+        | Error e -> Exit_status.of_protocol_error e
+        | Ok () -> arm goal)
 
-let resume json options images last pos0 pos1 cwd =
+let resume json options goal_flags images last pos0 pos1 cwd =
   (let* mode = resolve_mode options.mode in
    let* review = resolve_review options.permission in
    let* output_schema = resolve_output_schema options.output_schema in
+   let* goal = resolve_goal goal_flags in
    let* overrides = overrides_of_options options in
    let environment_overrides = environment_overrides_of_options options in
    Ok
@@ -1780,54 +2162,91 @@ let resume json options images last pos0 pos1 cwd =
                              (Lpath.Abs.to_string (Composition.root t)))
                       else
                         match prompt_raw with
-                        | None ->
-                            (* The promptless form submits nothing, so the
-                               per-turn flags have nothing to ride; the
-                               spawn-scoped selection rides the agent's
-                               environment instead. *)
-                            if
-                              json
-                              || Option.is_some mode
-                              || Option.is_some review
-                              || Option.is_some output_schema
-                              || Option.is_some options.max_steps
-                              || images <> []
-                            then
-                              Exit_status.usage
-                                "a promptless resume submits nothing; --json, \
-                                 --mode, --permission, --max-steps, \
-                                 --output-schema, and --image need a PROMPT"
-                            else
-                              let environment_overrides =
-                                environment_overrides
-                                @ List.filter_map Fun.id
-                                    [
-                                      Option.map
-                                        (fun v -> ("MENTAT_MODEL", v))
-                                        options.model;
-                                      Option.map
-                                        (fun v -> ("MENTAT_REASONING", v))
-                                        options.reasoning;
-                                    ]
-                              in
-                              drive_inbox t ~environment_overrides
-                                ~thinking:options.thinking ~session
-                        | Some prompt_raw -> (
-                            match model_selection_of_options t options with
-                            | Error status -> status
-                            | Ok model_selection ->
-                                let prompt = read_prompt prompt_raw in
-                                if String.length prompt = 0 then
+                        | None -> (
+                            let standing =
+                              Session.Metadata.goal
+                                (Session.metadata (Document.session doc))
+                            in
+                            match (goal, standing) with
+                            | None, None ->
+                                (* The promptless form submits nothing, so the
+                                   per-turn flags have nothing to ride; the
+                                   spawn-scoped selection rides the agent's
+                                   environment instead. *)
+                                if
+                                  json
+                                  || Option.is_some mode
+                                  || Option.is_some review
+                                  || Option.is_some output_schema
+                                  || Option.is_some options.max_steps
+                                  || images <> []
+                                then
                                   Exit_status.usage
-                                    "resume requires a PROMPT to start a new \
-                                     turn"
+                                    "a promptless resume submits nothing; \
+                                     --json, --mode, --permission, \
+                                     --max-steps, --output-schema, and \
+                                     --image need a PROMPT"
+                                else
+                                  let environment_overrides =
+                                    environment_overrides
+                                    @ List.filter_map Fun.id
+                                        [
+                                          Option.map
+                                            (fun v -> ("MENTAT_MODEL", v))
+                                            options.model;
+                                          Option.map
+                                            (fun v -> ("MENTAT_REASONING", v))
+                                            options.reasoning;
+                                        ]
+                                  in
+                                  drive_inbox t ~environment_overrides
+                                    ~thinking:options.thinking ~session
+                            | goal, standing ->
+                                if
+                                  json
+                                  || Option.is_some mode
+                                  || Option.is_some output_schema
+                                  || images <> []
+                                then
+                                  Exit_status.usage
+                                    "a goal resume drives its own \
+                                     continuations; --json, --mode, \
+                                     --output-schema, and --image cannot \
+                                     ride it"
                                 else (
-                                  run_start_notices t ~json;
-                                  drive t ~environment_overrides ~json ~session
-                                    ~create:false ~mode ~review ~title:None
-                                    ~skill_texts:[] ~images ~model_selection
-                                    ~max_steps:options.max_steps ~output_schema
-                                    ~thinking:options.thinking ~prompt))))))))
+                                  match (goal, standing) with
+                                  | Some fresh, _ ->
+                                      resume_goal t ~doc ~session ~options
+                                        ~review ~environment_overrides
+                                        (`Fresh fresh)
+                                  | None, Some standing ->
+                                      resume_goal t ~doc ~session ~options
+                                        ~review ~environment_overrides
+                                        (`Standing standing)
+                                  | None, None -> assert false))
+                        | Some prompt_raw -> (
+                            if Option.is_some goal then
+                              Exit_status.usage
+                                "--goal takes no PROMPT; the objective is \
+                                 the prompt"
+                            else
+                              match model_selection_of_options t options with
+                              | Error status -> status
+                              | Ok model_selection ->
+                                  let prompt = read_prompt prompt_raw in
+                                  if String.length prompt = 0 then
+                                    Exit_status.usage
+                                      "resume requires a PROMPT to start a \
+                                       new turn"
+                                  else (
+                                    run_start_notices t ~json;
+                                    drive t ~environment_overrides ~json
+                                      ~session ~create:false ~mode ~review
+                                      ~title:None ~skill_texts:[] ~images
+                                      ~model_selection
+                                      ~max_steps:options.max_steps
+                                      ~output_schema
+                                      ~thinking:options.thinking ~prompt))))))))
   |> Exit_status.of_result
 
 let resume_pos0 =
@@ -1849,8 +2268,9 @@ let resume_cmd =
     (Cmd.info "resume" ~doc ~docs ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
-         const resume $ Cli_common.json $ run_options_term $ image_opt
-         $ Cli_common.last $ resume_pos0 $ resume_pos1 $ Cli_common.cwd))
+         const resume $ Cli_common.json $ run_options_term $ goal_flags_term
+         $ image_opt $ Cli_common.last $ resume_pos0 $ resume_pos1
+         $ Cli_common.cwd))
 
 (* reply. — submit one typed answer to the exact pending decision. *)
 

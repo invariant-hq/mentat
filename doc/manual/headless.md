@@ -88,6 +88,53 @@ exits 1 when the structured-answer failure settles the turn. A step limit or
 interruption still uses its normal `turn.finished`; provider failures remain
 `session.failed`.
 
+## Goals
+
+A goal is standing intent recorded on a session: keep working toward this,
+within these bounds, until you declare it done. `mentat run --goal` is the
+headless spelling:
+
+```sh
+mentat run --goal "get the test suite green" --max-turns 20 --budget 5.00
+```
+
+The command creates a session, records the goal in its document, and then
+stewards it: each time the session settles with nothing queued, it sends a
+framed continuation turn, so the transcript always shows who continued the
+work and why. Each continuation instructs the model to end with a
+`goal_status` claim — `done` or `continuing`, with an optional note —
+delivered through the same structured-output channel `--output-schema` uses.
+The loop stops when:
+
+- the model declares `done` — the settled line carries its note; exit 0;
+- `--max-turns N` continuation turns are spent — exit 1, naming the bound;
+- the session's total spend reaches `--budget USD` — exit 1. The budget
+  meters the whole session's cost, derived from the journal's recorded
+  usage and the model's catalog pricing; a model without pricing trips no
+  budget, leaving the turn bound and you as the fences;
+- you stop it: Ctrl-C interrupts the running turn (exit 130), and a turn
+  parked on a permission review or question exits 3 exactly as any other
+  headless run.
+
+An absent claim means continue: ending a goal takes the declaration, a
+bound, or you — never the model forgetting.
+
+The intent survives in the session document, so nothing is lost between
+processes. `mentat run resume SESSION` on a goal session re-arms the loop
+without asking — invoking it is the ask. To change the bounds after a stop,
+re-declare with the same objective and higher bounds:
+`mentat run resume SESSION --goal "the same objective" --max-turns 40`.
+Re-declaring the identical objective continues the same turn ledger — the
+count is derived from the framed turns in the journal, never stored
+separately. A goal is recorded between runs: declaring one on a session
+whose agent is currently serving refuses; let it idle out (or interrupt it)
+first.
+
+Goals are owner intent on ordinary sessions: a delegated (subagent) or
+trigger-born (routine) session cannot carry one, and `--goal` cannot be
+combined with `PROMPT` (the objective is the prompt), `--json`, `--mode`,
+`--output-schema`, `--ephemeral`, `--skill`, or `--image`.
+
 ## Reviewing a diff
 
 `mentat run review` runs one review turn over an explicit git diff target and

@@ -86,6 +86,17 @@ session. From another directory, pass that directory with `--cwd`; a different
 cwd is rejected before the turn starts. An explicit session id remains globally
 addressable for non-running lifecycle commands.
 
+## Goals
+
+A goal is standing intent recorded on a session: keep working toward this,
+within these bounds, until you declare it done. The process driving the
+session — the steward — reads the recorded goal each time the session
+settles with nothing queued and sends the next continuation; the model ends
+each continuation turn with a `goal_status` claim, and an absent claim means
+continue. Done-ness is never written back: the journal's last claim is the
+truth. `mentat run --goal` is the headless steward — see
+[Headless runs](headless.md#goals).
+
 ## Lifecycle commands
 
 ```sh
