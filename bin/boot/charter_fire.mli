@@ -21,10 +21,13 @@
       gates the event, probes the run-claim, checks the current head,
       folds the budget fences, commits the run-claim, refuses a layout
       that would put secrets under the run's read roots, mints the derived
-      session id, provisions the checkout, spawns the sealed review run,
-      reaps it, stamps usage and derived cost into the disposition
-      receipt, publishes through the connector, records the egress, and
-      alerts once per transition.
+      session id, provisions the checkout, creates the run session with
+      the charter's recorded contract, mails it the trigger prompt,
+      supervises it through the process broker to its conclusion, stamps
+      usage and derived cost into the disposition receipt, publishes
+      through the connector, records the egress, and alerts once per
+      transition. The run is an ordinary served session — attachable and
+      mailable while it works, resumable after.
 
     {!fire_event} is their composition, and a sweep drives {!dispose}
     directly on synthesized events — the sweep observes open heads, it
@@ -44,8 +47,9 @@
 
     Every decision becomes a receipt line before the pipeline returns — a
     fire that spends money always leaves a disposition, on a stop request
-    included: a forced stop kills the child and still writes the reaped
-    disposition, with whatever cost the journal holds, before returning.
+    included: a cancelled run's supervision still concludes, and the reaped
+    disposition is written, with whatever cost the journal holds, before
+    returning.
 
     GitHub reads are injected as closures ({!Github.t}) inside a per-fire
     {!Repo.t}, so this module takes no HTTP dependency: the caller
@@ -130,19 +134,22 @@ type env = {
           or [GH_TOKEN] from it, and git invocations additionally shed every
           [GIT_*] variable. *)
   mentat_bin : string;
-      (** The [mentat] binary the run and publication children exec — the
-          sibling of the invoking executable for both the CLI fire and the
-          node, [MENTAT_BIN] overriding. *)
+      (** The [mentat] binary the publication children exec — the sibling of
+          the invoking executable for both the CLI fire and the node,
+          [MENTAT_BIN] overriding. The run itself is not a child of this
+          binary's choosing: the broker spawns its activation. *)
+  broker : Mentat_broker.t;
+      (** The process broker the fire mails and supervises run sessions
+          through — the invoking process's one broker: the node passes the
+          daemon's, the CLI fire builds its own spawn-capable one. *)
   stop : unit -> [ `None | `Stop | `Force ];
-      (** The stop seam, polled while a run child is being reaped. [`Stop]
-          asks the pipeline to stop the run: the child is sent SIGINT once
-          (after a short courtesy grace, in case the requester's own signal
-          already reached it through a shared process group) and the reap
-          continues to a normal disposition. [`Force] kills the child
-          immediately; the reaped disposition is still written before the
-          pipeline returns. The CLI wires its SIGINT count to this at the
-          verb boundary; a node wires its drain. Answers never regress:
-          once [`Stop], never [`None]; once [`Force], always [`Force]. *)
+      (** The stop seam, polled while a supervised run is awaited. A stop
+          request maps onto the broker's cancel ladder — the wire interrupt
+          first, then the bounded signals — and the supervision concludes
+          through its ordinary sinks, so the reaped disposition is written
+          on every stop path before the pipeline returns. Answers never
+          regress: once [`Stop], never [`None]; once [`Force], always
+          [`Force]. *)
   say : string -> unit;
       (** The narration line sink. The CLI prints to standard output; a
           node routes to its log. Lines carry no trailing newline. *)
@@ -165,8 +172,8 @@ type outcome =
           [Disposed]: its failure is receipted and alerted, and the record,
           not this exit, is the outcome surface. *)
   | Interrupted
-      (** A stop request reached the pipeline mid-run; the run child was
-          reaped and its disposition receipted before returning. *)
+      (** A stop request reached the pipeline mid-run; the run was
+          cancelled and its disposition receipted before returning. *)
 
 val max_event_bytes : int
 (** The inclusive delivery-body byte cap, 1 MiB. Every intake — [--event]
@@ -200,23 +207,23 @@ val dispose :
     the fixed step order. [check_head] is [true] for a delivered event (the
     current-head read refuses a stale delivery before it can claim) and
     [false] for a sweep-synthesized one, whose listing was the head read.
-    [on_reap], when given, is called once, immediately after a run child's
+    [on_reap], when given, is called once, immediately after a run's
     reaped disposition receipt is durable and before publication — the
     signal a resident caller turns into a prompt reconcile re-entry, since
     everything after the reap (the findings read, the publication, the
     egress) can fail while the money is already spent. An event disposed
     without a run never calls it. The reaped append re-checks the record
-    under the charter's fire lock — the child's fence frees at its exit,
-    before the append, so a concurrent reconcile pass may settle the
+    under the charter's fire lock — the run's fence frees before its
+    supervision concludes, so a concurrent reconcile pass may settle the
     record recovered first; exactly one reaped line lands per digest and
     identity, and the loser narrates, still signals [on_reap], and leaves
     the record's owed publication or alert to the sweep. A settled run
-    whose log carries no findings document closes with a failed alert and
-    a none-needed egress line. [Error message] is a machinery failure:
+    whose journal carries no findings document closes with a failed alert
+    and a none-needed egress line. [Error message] is a machinery failure:
     the pipeline itself could not do its job (an unwritable receipt, an
-    unreachable remote, a failed spawn) — receipted as [refused] wherever
-    an identity exists to receipt against, and distinct from every run
-    outcome, which is [Disposed]. *)
+    unreachable remote, an undeliverable trigger mail) — receipted as
+    [refused] wherever an identity exists to receipt against, and distinct
+    from every run outcome, which is [Disposed]. *)
 
 val fire_event :
   env ->
@@ -241,8 +248,9 @@ val fire_sweep :
     identity that ran to a publishable settle and holds no egress receipt
     re-enters the {e publisher} only — the upsert is idempotent, so
     finishing an interrupted publication spends nothing and mints no run —
-    and a settled head whose log carries no findings document closes with
-    an alert and a none-needed egress line instead of re-entering forever.
+    and a settled head whose journal carries no findings document closes
+    with an alert and a none-needed egress line instead of re-entering
+    forever.
     Heads a gate skipped or a fence refused hold no claim and re-enter on
     every pass, so a draft that goes ready is reviewed and a fenced head
     runs when its window frees. Events are driven in listing order; the
@@ -319,9 +327,10 @@ val sweep_events :
     admitted action names the moment the charter subscribed to. An arm
     admitting no review-class action synthesizes nothing. *)
 
-val findings_of_log : string -> string option
-(** [findings_of_log bytes] is the findings document carried by the run
-    log [bytes] — the [output] member of the last [turn.finished] line,
-    re-encoded minified — or [None] when no line carries one. Lines that do
-    not parse are passed over: the log is a stream tail, and the settled
-    line is the one that matters. *)
+val findings_of_session : Mentat_session.t -> string option
+(** [findings_of_session session] is the findings document [session]'s
+    journal carries — the input of the last structured-output claim in the
+    head turn, re-encoded minified — or [None] when the head turn did not
+    complete or terminated without one. Completion is required because it is
+    what proves the claim was the schema-conforming terminating answer, not
+    a rejected attempt an unfinished or failed turn left behind. *)

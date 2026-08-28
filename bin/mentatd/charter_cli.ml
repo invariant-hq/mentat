@@ -325,6 +325,13 @@ let fire_env t ~stop (loaded : Charter_store.Loaded.t) =
       (Daemon.resolve_sibling ~env:"MENTAT_BIN" ~name:"mentat"
          ~beside:"mentatd")
   in
+  (* Armed before any mail-only use could cache the refusing resolver: the
+     fire supervises run sessions, so its broker must spawn activations. *)
+  let broker =
+    Composition.process_broker t ~resolve_bin:(fun () ->
+        Daemon.resolve_sibling ~env:"MENTAT_BIN" ~name:"mentat"
+          ~beside:"mentatd")
+  in
   Ok
     ( {
         Charter_fire.dirs = Composition.dirs t;
@@ -333,6 +340,7 @@ let fire_env t ~stop (loaded : Charter_store.Loaded.t) =
         stdenv = Composition.stdenv t;
         environment = Composition.environment t;
         mentat_bin;
+        broker;
         stop;
         say = (fun line -> Output.stdout_printf "%s\n" line);
       },

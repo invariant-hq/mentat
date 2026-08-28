@@ -10,9 +10,12 @@
 
     One charter's pass owes its record four things, judged in order: every
     pending run — a spawned disposition with no reaped line
-    ({!Mentat_charter.Receipt.pending_runs}) — is settled honestly when its
-    fence reads free ([Charter_fire.settle_recovered]) and narrated when
-    held past budget or unprobeable; every reaped disposition still owed
+    ({!Mentat_charter.Receipt.pending_runs}) — gains one broker watch
+    ({!Mentat_broker.watch}, deduplicated across passes), whose terminal
+    observation drives the honest settle
+    ([Charter_fire.settle_recovered]) — a run observed settled while its
+    activation still lingers holding the fence is left to the next pass,
+    which re-watches; every reaped disposition still owed
     its alert re-fires it — the reap and the alert are two appends with an
     external hook between them, so a crash window between them is repaired
     here, idempotently, off the receipt-log dedup; every delivery receipt
@@ -67,11 +70,12 @@ val pass :
 
 val pass_settle : Charter_fire.env -> unit
 (** [pass_settle env] is the settle-only half of {!pass}: every installed
-    charter's pending runs are judged and settled, and nothing else — no
+    charter's pending runs gain their watches, and nothing else — no
     repository connection, no network, no re-drive, no sweep. This is the
-    boot fold's synchronous step: it preserves settle-before-first-delivery
-    without gating the daemon's serve surfaces on GitHub, and the loop's
-    own immediate first {!pass} is the boot sweep. *)
+    boot fold's first step: an already-dead orphan's watch observes its
+    terminal state on its first poll, so the settle lands moments after the
+    boot without gating the daemon's serve surfaces on GitHub, and the
+    loop's own immediate first {!pass} is the boot sweep. *)
 
 val loop :
   Charter_fire.env ->

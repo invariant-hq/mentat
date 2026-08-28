@@ -44,18 +44,21 @@ type t
 
 val create :
   Composition.shared ->
+  broker:Mentat_broker.t ->
   stop:Stop_signal.t ->
   ?github_base_url:string ->
   ?git_base:string ->
   unit ->
   (t, string) result
-(** [create shared ~stop ?github_base_url ?git_base ()] assembles the node
-    over the daemon's shared composition. [stop] is the daemon's stop flag,
-    threaded onto the pipeline's stop seam: a requested stop reads as a
-    stop request in a reaping fire, and the seam's force arm never fires
-    here — a second signal exits the process at the handler, and the boot
-    reconcile settles whatever that leaves. Pipeline narration goes to the
-    trace log, each line prefixed with the charter it concerns.
+(** [create shared ~broker ~stop ?github_base_url ?git_base ()] assembles
+    the node over the daemon's shared composition. [broker] is the daemon's
+    one process broker, through which every fire mails and supervises its
+    run session. [stop] is the daemon's stop flag, threaded onto the
+    pipeline's stop seam: a requested stop reads as a stop request in a
+    supervising fire, and the seam's force arm never fires here — a second
+    signal exits the process at the handler, and the boot reconcile settles
+    whatever that leaves. Pipeline narration goes to the trace log, each
+    line prefixed with the charter it concerns.
 
     [github_base_url] is the API base for every GitHub read and for the
     publication child — validated configuration from the daemon's own

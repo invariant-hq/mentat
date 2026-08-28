@@ -80,18 +80,27 @@ in the shared store.
   $TS spawned github:acme/widgets#7@$DIGEST1:head: session c-$DIGEST2
   $TS reaped github:acme/widgets#7@$DIGEST1:head: session c-$DIGEST2, exit 0, head settled, cause exited, $0.0110
 
-The run child carried the sealed contract and the trigger provenance: the
+The run carried the sealed contract and the trigger provenance: the
 provider request carried the findings schema through the structured_output
 tool, the reviewed tree in the run root is the fixture head itself, and the
-run log records a triggered origin.
+run's journal — an ordinary session in the shared store — records the
+charter's provenance and contract in its metadata, the trigger prompt as a
+mailed queue entry, and the turn that consumed it as a triggered turn.
 
   $ grep -c '"name":"structured_output"' capture-run/request-1.json
   1
   $ RUN_ROOT=$(ls -d "$HOME"/.cache/mentat/charters/pr-review/runs/*)
   $ test "$(git -C "$RUN_ROOT" rev-parse HEAD)" = "$HEAD_SHA" && echo head-pinned
   head-pinned
-  $ grep -q '"origin":"triggered"' "$RUN_ROOT"/.mentat-run-*.jsonl && echo triggered-origin
-  triggered-origin
+  $ DOC="$XDG_DATA_HOME/mentat/sessions/$(basename "$RUN_ROOT")/session.json"
+  $ grep -c '"triggered_from"' "$DOC"
+  1
+  $ grep -c '"run_policy"' "$DOC"
+  1
+  $ grep -c '"type":"trigger"' "$DOC"
+  1
+  $ grep -c '"type":"triggered"' "$DOC"
+  1
 
 Firing the identical delivery again is one receipt line reading dup: the
 run-claim marker alone carries dup authority, so a redelivery is refused

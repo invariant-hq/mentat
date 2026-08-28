@@ -131,6 +131,13 @@ let with_estate name fn =
     | Error e -> failf "open store: %s" (Mentat_store.Error.message e)
   in
   let said = ref [] in
+  let broker =
+    Mentat_broker.create ~sw ~stdenv ~store
+      ~resolve_bin:(fun () -> Error "unit tests spawn nothing")
+      ~socket_base:(temp_dir ("mentat-reconcile-sock-" ^ name))
+      ~log_dir:(temp_dir ("mentat-reconcile-log-" ^ name))
+      ~now:(fun () -> Mentat_session.Time.of_unix_ms 0L)
+  in
   let env =
     {
       Charter_fire.dirs;
@@ -139,11 +146,28 @@ let with_estate name fn =
       stdenv;
       environment = [];
       mentat_bin = "/nonexistent/mentat";
+      broker;
       stop = (fun () -> `None);
       say = (fun line -> said := line :: !said);
     }
   in
-  fn ~env ~dirs ~said
+  (* The pending-run settle rides a broker watch, so its receipts land on a
+     watch fiber shortly after a pass returns; [await] bounds the wait. *)
+  let await ~msg pred =
+    let clock = Eio.Stdenv.clock stdenv in
+    let rec go n =
+      if pred () then ()
+      else if n = 0 then failf "%s: not observed in time" msg
+      else begin
+        Eio.Time.sleep clock 0.05;
+        go (n - 1)
+      end
+    in
+    go 100
+  in
+  let result = fn ~env ~dirs ~said ~await in
+  Mentat_broker.stop broker;
+  result
 
 let loaded_of dirs ~name ~enabled =
   {
@@ -209,13 +233,15 @@ let is_skipped reason (r : Receipt.t) =
    honestly (recovered, head missing, exit 255), alerts once, and a second
    pass finds nothing owed. *)
 let orphan_settles () =
-  with_estate "orphan" @@ fun ~env ~dirs ~said ->
+  with_estate "orphan" @@ fun ~env ~dirs ~said ~await ->
   let name = "pr-review" in
   let identity = "github:acme/widgets#1@abc1234:opened" in
   let loaded = loaded_of dirs ~name ~enabled:false in
   append dirs ~name (spawned ~at:1. ~identity ~digest:"d1" "run-orphan");
   let repo_for _ = fail "a disabled charter must not build a repo" in
   Charter_reconcile.reconcile env ~repo_for loaded;
+  await ~msg:"the watched orphan settles" (fun () ->
+      List.length (read_back dirs ~name) >= 3);
   (match read_back dirs ~name with
   | [ _spawned; recovered; alert ] ->
       (match recovered.Receipt.kind with
@@ -252,23 +278,25 @@ let orphan_settles () =
     (List.length (read_back dirs ~name))
 
 let sweep_failure_is_narrated () =
-  with_estate "sweep" @@ fun ~env ~dirs ~said ->
+  with_estate "sweep" @@ fun ~env ~dirs ~said ~await ->
   let name = "pr-review" in
   let identity = "github:acme/widgets#2@def5678:opened" in
   let loaded = loaded_of dirs ~name ~enabled:true in
   append dirs ~name (spawned ~at:1. ~identity ~digest:"d1" "run-open");
   Charter_reconcile.reconcile env ~repo_for:(fun _ -> Error "no read token")
     loaded;
-  equal bool
-    ~msg:"the pending run settles before the repo is even built" true
-    (List.exists
-       (fun (r : Receipt.t) ->
-         match r.Receipt.kind with
-         | Receipt.Kind.Disposition (Receipt.Disposition.Reaped { cause; _ })
-           ->
-             Receipt.Cause.equal cause Receipt.Cause.Recovered
-         | _ -> false)
-       (read_back dirs ~name));
+  let recovered () =
+    List.exists
+      (fun (r : Receipt.t) ->
+        match r.Receipt.kind with
+        | Receipt.Kind.Disposition (Receipt.Disposition.Reaped { cause; _ }) ->
+            Receipt.Cause.equal cause Receipt.Cause.Recovered
+        | _ -> false)
+      (read_back dirs ~name)
+  in
+  await ~msg:"the watched pending run settles" recovered;
+  equal bool ~msg:"the pending run settles despite the repo failure" true
+    (recovered ());
   equal bool ~msg:"the repo failure is narrated, never raised" true
     (List.exists
        (fun line ->
@@ -284,7 +312,7 @@ let sweep_failure_is_narrated () =
    pass, once — the receipt-log dedup makes the repair idempotent — while
    settled clean exits and the stop path's interrupted heads stay silent. *)
 let lost_alert_is_repaired () =
-  with_estate "repair" @@ fun ~env ~dirs ~said:_ ->
+  with_estate "repair" @@ fun ~env ~dirs ~said:_ ~await:_ ->
   let name = "pr-review" in
   let failed = "github:acme/widgets#3@abc9999:head" in
   let stopped = "github:acme/widgets#4@abcaaaa:head" in
@@ -314,7 +342,7 @@ let lost_alert_is_repaired () =
    to a superseded close off the injected current-head read — while records
    the pipeline cannot re-enter close as skipped. *)
 let open_delivery_redrives () =
-  with_estate "redrive" @@ fun ~env ~dirs ~said:_ ->
+  with_estate "redrive" @@ fun ~env ~dirs ~said:_ ~await:_ ->
   let name = "pr-review" in
   let ev = event () in
   let identity = Event.Identity.to_string (Event.Identity.of_pull_request ev) in
@@ -339,7 +367,7 @@ let open_delivery_redrives () =
     (List.length (read_back dirs ~name))
 
 let unreconstructable_deliveries_close () =
-  with_estate "close" @@ fun ~env ~dirs ~said:_ ->
+  with_estate "close" @@ fun ~env ~dirs ~said:_ ~await:_ ->
   let name = "pr-review" in
   let ev = event () in
   let identity = Event.Identity.to_string (Event.Identity.of_pull_request ev) in
@@ -364,7 +392,7 @@ let unreconstructable_deliveries_close () =
     (List.length (read_back dirs ~name))
 
 let disabled_deliveries_close () =
-  with_estate "disabled" @@ fun ~env ~dirs ~said:_ ->
+  with_estate "disabled" @@ fun ~env ~dirs ~said:_ ~await:_ ->
   let name = "pr-review" in
   let ev = event () in
   let identity = Event.Identity.to_string (Event.Identity.of_pull_request ev) in
@@ -381,7 +409,7 @@ let disabled_deliveries_close () =
    republish row alerts (the recovered path never had) and stamps a
    none-needed egress, and the next pass finds the record complete. *)
 let settled_without_findings_closes () =
-  with_estate "no-findings" @@ fun ~env ~dirs ~said:_ ->
+  with_estate "no-findings" @@ fun ~env ~dirs ~said:_ ~await:_ ->
   let name = "pr-review" in
   let ev = event () in
   let id = Event.Identity.of_pull_request ev in
@@ -421,7 +449,7 @@ let settled_without_findings_closes () =
    a pass in flight instead of parking its caller; a freed gate admits the
    next re-entry. *)
 let reentry_yields_to_a_pass () =
-  with_estate "gate" @@ fun ~env ~dirs ~said:_ ->
+  with_estate "gate" @@ fun ~env ~dirs ~said:_ ~await:_ ->
   let loaded = loaded_of dirs ~name:"pr-review" ~enabled:true in
   let order = ref [] in
   let note tag = order := tag :: !order in

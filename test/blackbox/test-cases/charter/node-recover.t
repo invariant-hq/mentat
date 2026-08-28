@@ -48,6 +48,14 @@ notice on the harness's own stderr.
   $ FIRE_PID=$(mentatd charter fire pr-review --event event.json >fire.out 2>&1 & echo $!)
   $ mentat_cram wait-line '"disposition":"spawned"' "$RECEIPTS"
   $ mentat_cram wait-file capture-run/request-1.json
+
+The run is an ordinary served session: while the review holds the provider
+connection, its activation serves the session's derived socket — the door
+an owner attaches or mails through mid-flight.
+
+  $ SES=$(grep '"disposition":"spawned"' "$RECEIPTS" | tail -1 | mentat_cram json .session)
+  $ test -d "$(ls -d /tmp/mentat-*/s/"$SES" 2>/dev/null | head -1)" && echo run-socket-served
+  run-socket-served
   $ kill -9 "$FIRE_PID"
   $ wait "$GH1_PID"
   $ wait "$RUN_PID"

@@ -3227,12 +3227,16 @@ let expand_command_responder t ~name ~arguments =
 (* The process's send path. A daemon hands every instance its one node
    broker; an instance without one (the CLI's single-runtime shape, the
    per-session server) gets its own, able to send — the fence-held append,
-   the socket dial — but refusing to spawn: nothing hands this process a
-   child to materialize, and a consulted resolver would mean a wiring bug.
-   One construction, shared by engine assembly and the engine-free senders
-   ([mentat session send]); an owned broker is stopped by {!shutdown}, its
-   fibers living under the instance switch. *)
-let mail_broker t =
+   the socket dial — and to spawn only what its caller armed it for:
+   {!process_broker} takes the resolver, and the mail-only shape refuses it,
+   because nothing hands a pure sender a child to materialize and a
+   consulted resolver there would mean a wiring bug. One construction,
+   shared by engine assembly, the engine-free senders ([mentat session
+   send]), and the charter fire; the first construction wins, so a caller
+   that spawns must arm the broker before any mail-only use builds it. An
+   owned broker is stopped by {!shutdown}, its fibers living under the
+   instance switch. *)
+let process_broker t ~resolve_bin =
   match t.broker with
   | Some broker -> broker
   | None -> (
@@ -3241,15 +3245,17 @@ let mail_broker t =
       | None ->
           let broker =
             Mentat_broker.create ~sw:t.switch ~stdenv:t.shared.stdenv
-              ~store:t.shared.store
-              ~resolve_bin:(fun () ->
-                Error "this process materializes no per-session servers")
+              ~store:t.shared.store ~resolve_bin
               ~socket_base:(User_dirs.daemon_socket_dir t.shared.dirs)
               ~log_dir:(User_dirs.daemon_dir t.shared.dirs)
               ~now:(fun () -> now_time t)
           in
           t.owned_broker <- Some broker;
           broker)
+
+let mail_broker t =
+  process_broker t ~resolve_bin:(fun () ->
+      Error "this process materializes no per-session servers")
 
 (* The raw multi-source driver record and the two execution-layer handles the
    TUI needs alongside it, built once and cached in [t.assembled]. It assembles

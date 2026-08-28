@@ -460,7 +460,19 @@
  (modules test_charter_fire)
  (flags
   (:standard -open Mentat_boot))
- (libraries windtrap mentat_boot mentat_charter jsont jsont.bytesrw))
+ (libraries
+  windtrap
+  mentat_boot
+  mentat_charter
+  mentat_digest
+  mentat_llm
+  mentat_permission
+  mentat_sandbox
+  mentat_session
+  mentat_tool
+  lpath
+  jsont
+  jsont.bytesrw))
 
 ; The charter store is a boot-library module too, so its suite links the
 ; library exactly as test_charter_fire does — no flat-directory copies.
@@ -687,6 +699,7 @@
  (libraries
   windtrap
   mentat_boot
+  mentat_broker
   mentat_charter
   mentat_github
   mentat_provider_runtime
@@ -712,6 +725,7 @@
  (libraries
   windtrap
   mentat_boot
+  mentat_broker
   mentat_charter
   mentat_provider
   mentat_session

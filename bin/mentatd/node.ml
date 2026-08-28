@@ -67,7 +67,8 @@ let checkout_url ~git_base ~repo =
   in
   Printf.sprintf "%s/%s.git" base repo
 
-let create (shared : Composition.shared) ~stop ?github_base_url ?git_base () =
+let create (shared : Composition.shared) ~broker ~stop ?github_base_url
+    ?git_base () =
   match
     Daemon.resolve_sibling ~env:"MENTAT_BIN" ~name:"mentat" ~beside:"mentatd"
   with
@@ -82,6 +83,7 @@ let create (shared : Composition.shared) ~stop ?github_base_url ?git_base () =
           environment =
             child_environment shared.Composition.environment ~github_base_url;
           mentat_bin;
+          broker;
           stop =
             (fun () -> if Stop_signal.requested stop then `Stop else `None);
           say = (fun line -> Eio.traceln "mentatd: %s" line);

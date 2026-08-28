@@ -1270,37 +1270,8 @@ let ping_recognizer () =
   is_false ~msg:"garbage is not a ping" (Event.ping "not json");
   is_false ~msg:"a bare array is not a ping" (Event.ping "[]")
 
-(* The reconcile fold's decision tables, driven arm by arm over thunk
+(* The reconcile fold's decision table, driven arm by arm over thunk
    probes — including which probes each arm may spend. *)
-
-let run_decision =
-  Testable.make
-    ~pp:(fun ppf -> function
-      | `Settle -> Format.pp_print_string ppf "Settle"
-      | `Leave -> Format.pp_print_string ppf "Leave"
-      | `Overdue -> Format.pp_print_string ppf "Overdue"
-      | `Skip reason -> Format.fprintf ppf "Skip %S" reason)
-    ~equal:(fun (a : Record.run) (b : Record.run) ->
-      match (a, b) with
-      | `Settle, `Settle | `Leave, `Leave | `Overdue, `Overdue -> true
-      | `Skip _, `Skip _ -> true
-      | _ -> false)
-
-let never_overdue () : bool = fail "overdue must not be read on this arm"
-
-let run_action ?(overdue = never_overdue) fence =
-  Record.run_action ~fence:(fun () -> fence) ~overdue
-
-let run_table () =
-  equal run_decision ~msg:"a free fence settles the orphaned record honestly"
-    `Settle (run_action `Free);
-  equal run_decision ~msg:"an unprobeable fence is never settled over"
-    (`Skip "") (run_action (`Io "boom"));
-  equal run_decision ~msg:"a live holder within budget is left alone" `Leave
-    (run_action ~overdue:(fun () -> false) `Held);
-  equal run_decision ~msg:"a live holder past budget is narrated, not killed"
-    `Overdue
-    (run_action ~overdue:(fun () -> true) `Held)
 
 let sweep_decision =
   Testable.make
@@ -1589,7 +1560,6 @@ let () =
       test "a delivery receipt rebuilds its admitted event" event_of_delivery;
       test "the ping recognizer reads the body, never a header"
         ping_recognizer;
-      test "the pending-run table" run_table;
       test "the sweep table" sweep_table;
       test "the pending fold" pending_fold;
       test "the open-deliveries fold" open_deliveries_fold;

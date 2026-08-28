@@ -281,15 +281,23 @@ val driver : t -> (Mentat_client.Driver.t, Exit_status.t) result
     the daemon serves it over the wire, so a frontend only ever receives a
     {!Mentat_client.t}. [Error] exactly as {!client}'s prefix. *)
 
-val mail_broker : t -> Mentat_broker.t
-(** [mail_broker t] is the broker this process sends mail through — the
+val process_broker :
+  t -> resolve_bin:(unit -> (string, string) result) -> Mentat_broker.t
+(** [process_broker t ~resolve_bin] is this process's one broker — the
     daemon-passed node broker when the instance was staged with one, else an
-    instance-owned broker built (and cached) on first use: able to send — the
-    fence-held append, the socket dial — while refusing to spawn. It is the
-    same broker engine assembly links, and it never assembles the engine:
-    an engine-free command ([mentat session send]) reaches
-    {!Mentat_broker.send} through it directly. An owned broker's fibers live
-    under the instance switch and are stopped by {!shutdown}. *)
+    instance-owned broker built (and cached) on first use, whose spawns
+    resolve their activation binary through [resolve_bin]. The first
+    construction wins: a caller that supervises sessions (the charter fire)
+    must build the broker with a real resolver before any mail-only use
+    caches the refusing one. An owned broker's fibers live under the
+    instance switch and are stopped by {!shutdown}. *)
+
+val mail_broker : t -> Mentat_broker.t
+(** [mail_broker t] is {!process_broker} with the mail-only resolver: able
+    to send — the fence-held append, the socket dial — while refusing to
+    spawn. It is the same broker engine assembly links, and it never
+    assembles the engine: an engine-free command ([mentat session send])
+    reaches {!Mentat_broker.send} through it directly. *)
 
 (** {2:broker The child broker's engine reach}
 

@@ -149,22 +149,15 @@ let alert_items ~name ~digest receipts =
           None)
     receipts
 
-(* Open runs, judged by the reconcile fold's own pending-run table — the
-   page narrates exactly what a pass would: an overdue holder is left to
+(* Open runs, narrated off the probed fence: an overdue holder is left to
    finish, an unprobeable fence is never settled over. A run within budget
    or one owed only the node's honest settle needs no owner. *)
 let run_items ~name ~now ~budget runs =
   List.concat_map
     (fun { Observed.pending; fence } ->
       let { Receipt.Pending.session; spawned_at; _ } = pending in
-      match
-        Record.run_action
-          ~fence:(fun () -> fence)
-          ~overdue:(fun () ->
-            now -. spawned_at > budget.Charter.Budget.wall_clock)
-      with
-      | `Settle | `Leave -> []
-      | `Overdue ->
+      match fence with
+      | `Held when now -. spawned_at > budget.Charter.Budget.wall_clock ->
           [
             ( rank_overdue,
               item ~kind:"overdue" ~name
@@ -176,7 +169,7 @@ let run_items ~name ~now ~budget runs =
                   stamp spawned_at;
                 ] );
           ]
-      | `Skip message ->
+      | `Io message ->
           [
             ( rank_unprobeable,
               item ~kind:"unprobeable" ~name
@@ -184,7 +177,8 @@ let run_items ~name ~now ~budget runs =
                   detail ("run fence unprobeable: " ^ message);
                   session_link session;
                 ] );
-          ])
+          ]
+      | `Held | `Free -> [])
     runs
 
 (* The tripped-fence item, derived from the same fold admission runs at the

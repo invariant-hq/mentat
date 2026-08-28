@@ -4,12 +4,16 @@
  ---------------------------------------------------------------------------*)
 
 (* Unit suite for [Charter_fire]'s pure pieces: the sweep's delivery
-   synthesis and the findings extraction from a run log. The pipeline's
-   effectful spine — claim, receipts, spawn, reap, publish — is exercised
-   end to end by the charter cram family, and the publish-outcome folds live
-   with their emitter in [Publication.Outcome]. *)
+   synthesis and the findings extraction from a run session's journal. The
+   pipeline's effectful spine — claim, receipts, the mailed trigger, the
+   supervised run, publish — is exercised end to end by the charter cram
+   family, and the publish-outcome folds live with their emitter in
+   [Publication.Outcome]. *)
 
 open Windtrap
+module Session = Mentat_session
+module Llm = Mentat_llm
+module Json = Jsont.Json
 
 let arm events =
   {
@@ -62,37 +66,135 @@ let sweep_synthesis () =
           (arm [ "pull_request.closed" ])
           ~repo:"acme/widgets" [ pr 7 ]))
 
-let findings_extraction () =
-  let log =
-    String.concat "\n"
-      [
-        {|{"schema_version":1,"type":"run.started"}|};
-        "not json at all";
-        {|{"schema_version":1,"type":"turn.finished","outcome":"completed","output":{"summary":"s","findings":[]}}|};
-      ]
+(* A run session's journal, replayed from the exact events the engine's
+   structured-output settlement writes: the provider answers with the
+   terminating [structured_output] call, the claim carries the validated
+   answer, and the turn finishes completed. *)
+
+let output_tool =
+  Llm.Tool.make ~name:"structured_output"
+    ~input_schema:(Json.object' [ (Json.name "type", Json.string "object") ])
+    ()
+
+let contract =
+  Session.Contract.make ~mode:Session.Contract.Mode.Review
+    ~model:
+      (Llm.Model.make
+         ~provider:(Llm.Provider.make "openai")
+         ~api:(Llm.Model.Api.make "responses")
+         ~id:"gpt-5")
+    ~declarations:[] ~output_tool ~policy:Mentat_permission.Policy.default
+    ~review:Mentat_permission.Review_behavior.Enforce
+    ~sandbox:Mentat_sandbox.Identity.not_requested ()
+
+let answer_json summary =
+  Json.object' [ (Json.name "summary", Json.string summary) ]
+
+let run_turn ~id =
+  Session.Turn.make
+    ~id:(Session.Turn.Id.of_string id)
+    ~origin:Session.Turn.Origin.User
+    ~input:(Session.Turn.Input.user [ Llm.Content.text "Review the diff." ])
+    ~max_steps:32 ~contract ()
+
+(* One completed turn whose provider response carries [calls] and whose
+   terminating structured-output claim, when [answer] is given, records it —
+   the event shape [dispatch_structured_output] commits. *)
+let completed_turn ~id ?answer () =
+  let turn = run_turn ~id in
+  let turn_id = Session.Turn.id turn in
+  let claim =
+    Session.Provider_request.Started.make ~turn:turn_id
+      ~request_digest:(Mentat_digest.string ("req-" ^ id))
   in
-  equal (option string) ~msg:"the output member, minified"
-    (Some {|{"summary":"s","findings":[]}|})
-    (Charter_fire.findings_of_log log);
-  equal (option string) ~msg:"no finished line, no findings" None
-    (Charter_fire.findings_of_log {|{"type":"run.started"}|});
-  equal (option string) ~msg:"a null output is not a document" None
-    (Charter_fire.findings_of_log
-       {|{"type":"turn.finished","outcome":"completed","output":null}|});
-  equal (option string) ~msg:"the last finished line wins"
-    (Some {|{"summary":"late","findings":[]}|})
-    (Charter_fire.findings_of_log
-       (String.concat "\n"
-          [
-            {|{"type":"turn.finished","output":{"summary":"early","findings":[]}}|};
-            {|{"type":"turn.finished","output":{"summary":"late","findings":[]}}|};
-          ]))
+  let calls, claims =
+    match answer with
+    | None -> ([], [])
+    | Some answer ->
+        let call =
+          Llm.Tool.Call.make ~id:("call-" ^ id) ~name:"structured_output"
+            ~input:answer ()
+        in
+        let started =
+          Session.Tool_claim.Started.make ~turn:turn_id
+            ~stage:Mentat_tool.Stage.Direct ~call ~input:answer ~requests:[]
+        in
+        let settled =
+          Session.Tool_claim.Settled.returned
+            ~id:(Session.Tool_claim.Started.id started)
+            (Mentat_tool.Result.completed
+               ~output:
+                 (Mentat_tool.Output.make ~text:"Structured answer recorded."
+                    ~json:answer ())
+               ())
+        in
+        ( [ call ],
+          [ Session.Event.tool_claimed started; Session.Event.tool_settled settled ] )
+  in
+  let assistant =
+    match calls with
+    | [] -> Llm.Message.Assistant.text "no answer"
+    | calls ->
+        Llm.Message.Assistant.make
+          (List.map Llm.Message.Assistant.tool_call calls)
+  in
+  [
+    Session.Event.turn_started turn;
+    Session.Event.provider_requested claim;
+    Session.Event.provider_settled
+      (Session.Provider_request.Settled.responded
+         ~id:(Session.Provider_request.Started.id claim)
+         (Llm.Response.make
+            ~model:
+              (Llm.Model.make
+                 ~provider:(Llm.Provider.make "openai")
+                 ~api:(Llm.Model.Api.make "responses")
+                 ~id:"gpt-5")
+            assistant));
+  ]
+  @ claims
+  @ [
+      Session.Event.turn_finished ~turn:turn_id
+        Session.Turn.Outcome.completed;
+    ]
+
+let session_of events =
+  let metadata =
+    Session.Metadata.make
+      ~cwd:(Lpath.Abs.of_string_exn "/workspace")
+      ~created_at:(Session.Time.of_unix_ms 0L)
+      ~updated_at:(Session.Time.of_unix_ms 0L)
+      ()
+  in
+  match
+    Session.make ~id:(Session.Id.of_string "run-fixture") ~metadata ~events
+  with
+  | Ok session -> session
+  | Error e -> failf "replay: %s" (Session.Error.message e)
+
+let findings_extraction () =
+  equal (option string) ~msg:"the completed head's answer, minified"
+    (Some {|{"summary":"s"}|})
+    (Charter_fire.findings_of_session
+       (session_of (completed_turn ~id:"t1" ~answer:(answer_json "s") ())));
+  equal (option string) ~msg:"a completed head without the claim has none"
+    None
+    (Charter_fire.findings_of_session
+       (session_of (completed_turn ~id:"t1" ())));
+  equal (option string) ~msg:"an unstarted session has none" None
+    (Charter_fire.findings_of_session (session_of []));
+  equal (option string) ~msg:"the head turn's answer wins"
+    (Some {|{"summary":"late"}|})
+    (Charter_fire.findings_of_session
+       (session_of
+          (completed_turn ~id:"t1" ~answer:(answer_json "early") ()
+          @ completed_turn ~id:"t2" ~answer:(answer_json "late") ())))
 
 let () =
   run "mentat.charter_fire"
     [
       test "the sweep synthesizes admitted review-class deliveries"
         sweep_synthesis;
-      test "the findings document is the last finished line's output"
+      test "the findings document is the head turn's structured answer"
         findings_extraction;
     ]

@@ -13,27 +13,39 @@ open Mentat_charter
 
 let say env fmt = Printf.ksprintf env.Charter_fire.say fmt
 
+(* The pending-run watch. Each open record — a spawned disposition with no
+   reaped line — is observed through one [Mentat_broker.watch]: the fence
+   and the journal head on the broker's poll, holding nothing, signalling
+   nothing. The terminal observation, whichever arm, funnels into the one
+   honest settle ([Charter_fire.settle_recovered]), whose own re-checks
+   under the fire lock keep it exactly-once and refuse to settle over a
+   holder — a run observed settled while its activation still lingers
+   holding the fence is left to the next pass, which re-watches. The
+   watched set dedups across passes: the beat is the backstop that starts
+   a watch for any pending run none is observing — after a daemon restart,
+   or after a settle that had to leave the record. *)
+let watched : (string, unit) Hashtbl.t = Hashtbl.create 8
+
 let settle env (loaded : Charter_store.Loaded.t) (pending : Receipt.Pending.t)
     =
-  let { Receipt.Pending.identity; digest; session; spawned_at } = pending in
-  let fence () = Charter_fire.probe_fence env.Charter_fire.store ~session in
-  let overdue () =
-    let budget = loaded.Charter_store.Loaded.charter.Charter.budget in
-    Unix.gettimeofday () -. spawned_at > budget.Charter.Budget.wall_clock
+  let { Receipt.Pending.identity; digest; session; spawned_at = _ } =
+    pending
   in
-  match Record.run_action ~fence ~overdue with
-  | `Leave -> ()
-  | `Overdue ->
-      say env
-        "run %s outlives its wall clock; its fence holder is left to finish"
-        session
-  | `Skip message -> say env "run %s fence unprobeable: %s" session message
-  | `Settle -> (
-      match
-        Charter_fire.settle_recovered env loaded ~identity ~digest ~session
-      with
-      | Ok () -> ()
-      | Error e -> say env "recover %s: %s" session e)
+  if not (Hashtbl.mem watched session) then begin
+    Hashtbl.replace watched session ();
+    Mentat_broker.watch env.Charter_fire.broker
+      ~session:(Mentat_session.Id.of_string session)
+      ~on_terminal:(fun observation ->
+        (match observation with
+        | `Settled | `Holder_died -> ()
+        | `Gone -> say env "run %s: its session document is gone" session);
+        (match
+           Charter_fire.settle_recovered env loaded ~identity ~digest ~session
+         with
+        | Ok () -> ()
+        | Error e -> say env "recover %s: %s" session e);
+        Hashtbl.remove watched session)
+  end
 
 (* The owed-alert re-derivation. A reap and its alert are two appends with
    an external hook between them, so no transaction can make them one; a

@@ -724,9 +724,11 @@ let idle_watchdog clock ~max_idle ~resident registry stop =
    [mentat] sibling serves without the node — loudly, since installed
    charters will not run — unless the webhook ingress was explicitly
    requested, which it could never honor. *)
-let stage_node shared ~stop ~github_base_url ~charter_git_base ~ingress_port =
+let stage_node shared ~broker ~stop ~github_base_url ~charter_git_base
+    ~ingress_port =
   match
-    Node.create shared ~stop ?github_base_url ?git_base:charter_git_base ()
+    Node.create shared ~broker ~stop ?github_base_url
+      ?git_base:charter_git_base ()
   with
   | Ok node -> Ok (Some node)
   | Error message when Option.is_some ingress_port ->
@@ -896,8 +898,8 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                  races. *)
               let stop = Stop_signal.create () in
               match
-                stage_node shared ~stop ~github_base_url ~charter_git_base
-                  ~ingress_port
+                stage_node shared ~broker ~stop ~github_base_url
+                  ~charter_git_base ~ingress_port
               with
               | Error message -> Exit_status.runtime message
               | Ok node ->
