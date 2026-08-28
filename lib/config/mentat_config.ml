@@ -255,6 +255,20 @@ let sandbox_network_of_string =
     ~to_string:Mentat_sandbox.Policy.Network.to_string
     Mentat_sandbox.Policy.Network.of_string
 
+(* The boolean environment settings ([MENTAT_INSTRUCTIONS],
+   [MENTAT_PROJECT_INSTRUCTIONS], [MENTAT_SKILLS]) — the env spellings of the
+   context toggles, so a spawned agent can be configured by the process that
+   rendered its environment exactly as the run flags configure a local
+   composition. *)
+let bool_env_of_string ~what value =
+  match String.lowercase_ascii value with
+  | "true" | "1" | "on" | "yes" -> Ok true
+  | "false" | "0" | "off" | "no" -> Ok false
+  | _ ->
+      error
+        ~hints:[ "expected one of: true, false, 1, 0, on, off, yes, no" ]
+        ("invalid boolean for " ^ what ^ ": " ^ value)
+
 let reasoning_effort_of_string =
   decode_enum ~what:"reasoning effort"
     ~all:Mentat_llm.Request.Options.Reasoning_effort.all
@@ -1463,14 +1477,24 @@ module Field = struct
         defaulted workspace_tooling_codec ~shared:true
           ~default:(builtin field Tooling.Auto)
           ~env:("MENTAT_WORKSPACE_TOOLING", workspace_tooling_of_string)
-    | Instructions_global -> defaulted bool_codec ~default:(builtin field true)
-    | Instructions_project -> defaulted bool_codec ~default:(builtin field true)
+    | Instructions_global ->
+        defaulted bool_codec ~default:(builtin field true)
+          ~env:
+            ( "MENTAT_INSTRUCTIONS",
+              bool_env_of_string ~what:"MENTAT_INSTRUCTIONS" )
+    | Instructions_project ->
+        defaulted bool_codec ~default:(builtin field true)
+          ~env:
+            ( "MENTAT_PROJECT_INSTRUCTIONS",
+              bool_env_of_string ~what:"MENTAT_PROJECT_INSTRUCTIONS" )
     | Instructions_claude_md ->
         defaulted bool_codec ~default:(builtin field true)
     | Instructions_project_max_bytes ->
         defaulted int_codec
           ~default:(builtin field default_instructions_project_max_bytes)
-    | Skills_enabled -> defaulted bool_codec ~default:(builtin field true)
+    | Skills_enabled ->
+        defaulted bool_codec ~default:(builtin field true)
+          ~env:("MENTAT_SKILLS", bool_env_of_string ~what:"MENTAT_SKILLS")
     | Skills_builtin -> defaulted bool_codec ~default:(builtin field true)
     | Skills_project -> defaulted bool_codec ~default:(builtin field true)
     | Skills_compat -> defaulted bool_codec ~default:(builtin field true)
