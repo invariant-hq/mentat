@@ -174,8 +174,10 @@ val create :
     session's mail admission and serving boot re-derive their shape from the
     document alone.
 
-    Raises [Invalid_argument] if [title] is empty or both [delegated_from]
-    and [triggered_from] are supplied. *)
+    Raises [Invalid_argument] if [title] is empty, both [delegated_from]
+    and [triggered_from] are supplied, or [run_policy] is supplied together
+    with [delegated_from] — a delegated child's contract is its parent
+    edge's, never a recorded policy. *)
 
 val make :
   id:Id.t -> metadata:Metadata.t -> events:Event.t list -> (t, Error.t) result

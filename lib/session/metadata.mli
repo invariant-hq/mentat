@@ -118,9 +118,11 @@ module Triggered_from : sig
       trigger's identity here: [source] names the trigger as the scheduling
       host defines it, [digest] seals the policy content it fired under, and
       [key] names the event it fired on — the same three members an
-      {!Origin.Trigger} queue entry carries, which is what lets mail
-      admission ({!Mentat_session.admits_mail}) prove "this session's own
-      trigger" from the session's recorded facts alone. Provenance is
+      {!Origin.Trigger} queue entry carries. [source] and [digest] are the
+      admission proof: mail admission ({!Mentat_session.admits_mail}) proves
+      "this session's own trigger" by matching both against the session's
+      recorded facts alone. [key] is provenance for the reader — which event
+      created this run — and no admission reads it. Provenance is
       attribution, never authority. *)
 
   type t = private { source : string; digest : string; key : string }
@@ -298,8 +300,10 @@ val make :
     non-empty display title; no trimming or normalization is performed.
 
     Raises [Invalid_argument] if [title] is empty, [updated_at] is before
-    [created_at], or more than one of [forked_from], [delegated_from], and
-    [triggered_from] is supplied. *)
+    [created_at], more than one of [forked_from], [delegated_from], and
+    [triggered_from] is supplied, or [run_policy] is supplied together with
+    [delegated_from] — a delegated child's contract is its parent edge's,
+    never a recorded policy. *)
 
 val title : t -> string option
 (** [title t] is [t]'s optional user-facing title. *)

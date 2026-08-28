@@ -234,6 +234,13 @@ let make ?title ?(status = Status.Active) ?forked_from ?delegated_from
       invalid "make"
         "fork, delegation, and trigger lineage are mutually exclusive"
   | _ -> ());
+  (match (run_policy, delegated_from) with
+  | Some _, Some _ ->
+      (* A delegated child's contract is its parent edge's; a recorded run
+         policy beside the backlink would silently override what the edge
+         granted. *)
+      invalid "make" "a delegated session cannot carry a run policy"
+  | _ -> ());
   let root = Mentat_workspace.Root.of_dir cwd in
   {
     title;

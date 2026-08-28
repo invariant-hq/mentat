@@ -1584,7 +1584,32 @@ let turn_replay_group =
             (Event.turn_started
                (turn ~id:"turn-q2"
                   ~origin:(Session.Turn.Origin.Queued (queue_id "q-9"))
-                  ())));
+                  ()));
+          (* The triggered twin: a Triggered origin naming its entry
+             consumes it exactly as a Queued turn does, and an unknown
+             entry errors identically. *)
+          let trig entry =
+            Session.Turn.Origin.triggered ~entry ~source:"pr-review"
+              ~digest:"0f9a4c1d2e3b4a5f" ~key:"delivery-42" ()
+          in
+          let st =
+            state
+              (base
+              @ [
+                  Event.turn_started
+                    (turn ~id:"turn-t" ~origin:(trig (queue_id "q-2")) ());
+                ])
+          in
+          equal (list queue_entry_value)
+            ~msg:"the triggered entry is consumed"
+            [ queue_entry ~id:"q-1" "one" ]
+            (State.pending_queue st);
+          expect_step_error ~msg:"unknown triggered entry"
+            (State.Error.Turn
+               (State.Error.Turn.Unknown_queue_entry (queue_id "q-9")))
+            base
+            (Event.turn_started
+               (turn ~id:"turn-t2" ~origin:(trig (queue_id "q-9")) ())));
       test "a triggered turn pairs with prompt input like a user turn"
         (fun () ->
           let origin =
@@ -4428,6 +4453,52 @@ let mail_group =
           in
           is_true ~msg:"consumption frees the sender's slot"
             (admitted (Session.admits_mail ~origin:(origin "child-1") consumed)));
+      test "a trigger-born session admits only its own trigger" (fun () ->
+          let provenance =
+            Session.Metadata.Triggered_from.make ~source:"pr-review"
+              ~digest:"d1" ~key:"k1"
+          in
+          let trig ?(source = "pr-review") ?(digest = "d1") key =
+            Some (Session.Origin.trigger ~source ~digest ~key)
+          in
+          let born events =
+            ok_or "run session"
+              (Session.make ~id:(session_id "run-1")
+                 ~metadata:
+                   (Session.Metadata.make ~triggered_from:provenance ~cwd
+                      ~created_at:(time 1) ~updated_at:(time 2) ())
+                 ~events)
+          in
+          let run = born [] in
+          is_true ~msg:"the recorded trigger is admitted, whatever the key"
+            (admitted (Session.admits_mail ~origin:(trig "k2") run));
+          is_true ~msg:"a moved digest strands no stale mail on the new run"
+            (Session.admits_mail ~origin:(trig ~digest:"d2" "k1") run
+            = `Refused_sender);
+          is_true ~msg:"a foreign source is refused"
+            (Session.admits_mail ~origin:(trig ~source:"other" "k1") run
+            = `Refused_sender);
+          is_true ~msg:"an agent origin is refused on a trigger-born session"
+            (Session.admits_mail
+               ~origin:(Some (Session.Origin.agent (session_id "x")))
+               run
+            = `Refused_sender);
+          (* The backlog is per trigger, counted across event keys. *)
+          let entry i =
+            Event.queue_updated
+              (Session.Queue.Update.enqueued
+                 (Session.Queue.Entry.make
+                    ?origin:(trig (Printf.sprintf "k-%d" i))
+                    ~id:(queue_id (Printf.sprintf "q-%d" i))
+                    ~input:[ Llm.Content.text "ping" ]
+                    ()))
+          in
+          let full = born (List.init Session.mail_backlog_cap entry) in
+          is_true ~msg:"the unconsumed pile across event keys refuses"
+            (Session.admits_mail ~origin:(trig "k-next") full
+            = `Refused_backlog);
+          is_true ~msg:"the owner is never capped on a trigger-born session"
+            (admitted (Session.admits_mail ~origin:None full)));
     ]
 
 let replay_group =
@@ -4811,6 +4882,64 @@ let document_group =
                (decode Session.Metadata.jsont json));
           is_true ~msg:"the cwd accessor still projects the creation directory"
             (Lpath.Abs.equal cwd (Session.Metadata.cwd saved_metadata)));
+      test "trigger provenance and the run policy round-trip and validate"
+        (fun () ->
+          let provenance =
+            Session.Metadata.Triggered_from.make ~source:"pr-review"
+              ~digest:"0f9a4c1d2e3b4a5f" ~key:"github:acme/widgets#7:head"
+          in
+          let policy =
+            Session.Metadata.Run_policy.make
+              ~mode:Session.Contract.Mode.Review
+              ~output_schema:(json_object [ ("type", Json.string "object") ])
+              ~max_steps:32 ~sandbox:"read-only" ~require_sandbox:true
+              ~model:"openai/gpt-5" ~reasoning:"high" ~unattended:"plan"
+              ~project_instructions:false ()
+          in
+          let metadata =
+            Session.Metadata.make ~triggered_from:provenance
+              ~run_policy:policy ~cwd ~created_at:(time 10)
+              ~updated_at:(time 20) ()
+          in
+          let json = encode Session.Metadata.jsont metadata in
+          is_true ~msg:"both members round-trip, schema compared as JSON"
+            (Session.Metadata.equal metadata
+               (decode Session.Metadata.jsont json));
+          expect_invalid_arg "empty provenance member" (fun () ->
+              Session.Metadata.Triggered_from.make ~source:"" ~digest:"d"
+                ~key:"k");
+          expect_invalid_arg "non-positive step cap" (fun () ->
+              Session.Metadata.Run_policy.make ~max_steps:0 ());
+          expect_invalid_arg "empty textual member" (fun () ->
+              Session.Metadata.Run_policy.make ~sandbox:"" ());
+          let delegated =
+            Session.Metadata.Delegated_from.make ~parent:(session_id "p")
+              ~delegation:(Session.Delegation.Id.of_string "d-1")
+          in
+          expect_invalid_arg "trigger and delegation lineage" (fun () ->
+              Session.Metadata.make ~triggered_from:provenance
+                ~delegated_from:delegated ~cwd ~created_at:(time 10)
+                ~updated_at:(time 10) ());
+          expect_invalid_arg "trigger and fork lineage" (fun () ->
+              Session.Metadata.make ~triggered_from:provenance
+                ~forked_from:
+                  (Session.Metadata.Forked_from.make ~parent:(session_id "p")
+                     ~copied_events:0)
+                ~cwd ~created_at:(time 10) ~updated_at:(time 10) ());
+          expect_invalid_arg "a run policy on a delegated session" (fun () ->
+              Session.Metadata.make ~delegated_from:delegated
+                ~run_policy:policy ~cwd ~created_at:(time 10)
+                ~updated_at:(time 10) ());
+          (* Decoding validates the same invariants as make. *)
+          assert_decode_error "empty source on decode" Session.Metadata.jsont
+            (set_member "triggered_from"
+               (json_object
+                  [
+                    ("source", Json.string "");
+                    ("digest", Json.string "d");
+                    ("key", Json.string "k");
+                  ])
+               json));
       test "jsont rejects unsupported versions and unknown members" (fun () ->
           let json = encode Session.jsont (saved (journal ()).events) in
           (* Versions 2 (structured-output), 3 (durable workspace notices), 4
