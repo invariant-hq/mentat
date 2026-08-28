@@ -159,6 +159,7 @@ type broker = {
   log_dir : string;
   now : unit -> Mentat_session.Time.t;
   entries : (string, entry) Hashtbl.t;
+  orphan_pids : (int, unit) Hashtbl.t;
   stop_signal : unit Eio.Promise.t;
   stop_resolver : unit Eio.Promise.u;
   send_locks : (string, Eio.Mutex.t) Hashtbl.t;
@@ -332,11 +333,8 @@ let endpoint_reachable t entry () =
    listener accepts; the follow that comes next performs the real handshake.
    A stale socket file a killed predecessor left refuses the connect, so it
    never answers ready. *)
-let endpoint_connectable entry () =
-  let socket =
-    Mentat_server.Bind.socket_path
-      ~dir:(Lpath.Abs.of_string_exn entry.socket_dir)
-  in
+let dir_connectable dir () =
+  let socket = Mentat_server.Bind.socket_path ~dir:(Lpath.Abs.of_string_exn dir) in
   let fd = Unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
   Fun.protect
     ~finally:(fun () -> try Unix.close fd with Unix.Unix_error _ -> ())
@@ -344,6 +342,8 @@ let endpoint_connectable entry () =
       match Unix.connect fd (Unix.ADDR_UNIX socket) with
       | () -> true
       | exception Unix.Unix_error _ -> false)
+
+let endpoint_connectable entry () = dir_connectable entry.socket_dir ()
 
 let remove_endpoint entry =
   Mentat_server.Bind.remove_endpoint
@@ -708,6 +708,17 @@ and ensure_reaper t =
   end
 
 and reap_sweep t =
+  (* Frontend-started activations first: their lifecycle is the session's own
+     — no observation, no respawn — only the zombie is this broker's to
+     reap. *)
+  Hashtbl.iter
+    (fun pid () ->
+      match Unix.waitpid [ Unix.WNOHANG ] pid with
+      | 0, _ -> ()
+      | _, _ -> Hashtbl.remove t.orphan_pids pid
+      | exception Unix.Unix_error (Unix.EINTR, _, _) -> ()
+      | exception Unix.Unix_error _ -> Hashtbl.remove t.orphan_pids pid)
+    (Hashtbl.copy t.orphan_pids);
   let exited =
     Hashtbl.fold
       (fun _ entry acc ->
@@ -1088,6 +1099,94 @@ let supervise t ~session ~environment ?deadline_s ?(respawns = max_respawns)
     `Supervising
   end
 
+(* The frontend's activation verb: make an agent serve the session so the
+   caller can dial its socket, owning nothing beyond the spawned pid's
+   zombie. Unlike supervision it spawns for a {e settled} session too — a
+   resume needs a socket regardless of the head — and it observes nothing:
+   the caller's own connection is the lease, and the agent idles out on its
+   own. The refusal is not authoritative under concurrent starts: a loser of
+   the boot-attach race may be reported exited while the winner is still
+   binding, and the caller's next probe finds the winner. *)
+let serve t ~session ~environment () =
+  if t.stopped then `Refused "the broker is stopped"
+  else
+    let dir = socket_dir ~base:t.socket_base ~session:(key session) in
+    let recorded_cwd () =
+      match Mentat_store.Session.load t.store session with
+      | Error e ->
+          Error
+            (Printf.sprintf "the session document could not be read: %s"
+               (Mentat_store.Session.Error.message e))
+      | Ok document ->
+          Ok
+            (Mentat_session.Metadata.cwd
+               (Mentat_session.metadata
+                  (Mentat_store.Session.Document.session document)))
+    in
+    (* WNOHANG doubles as the reap: an exited child observed here never
+       reaches the orphan set. *)
+    let child_exited pid =
+      match Unix.waitpid [ Unix.WNOHANG ] pid with
+      | 0, _ -> false
+      | _, _ -> true
+      | exception Unix.Unix_error (Unix.EINTR, _, _) -> false
+      | exception Unix.Unix_error _ -> true
+    in
+    let leaf = socket_leaf ~session:(key session) in
+    let rec loop ~pid ~held_other_s elapsed =
+      if dir_connectable dir () then begin
+        (match pid with
+        | Some pid ->
+            Hashtbl.replace t.orphan_pids pid ();
+            ensure_reaper t
+        | None -> ());
+        `Serving
+      end
+      else if elapsed >= boot_wait_s then
+        `Refused
+          (Printf.sprintf
+             "the session's agent did not bind its endpoint within %gs"
+             boot_wait_s)
+      else
+        let wait ~pid ~held_other_s =
+          sleep t 0.05;
+          loop ~pid ~held_other_s (elapsed +. 0.05)
+        in
+        match pid with
+        | Some p when child_exited p ->
+            `Refused
+              (Printf.sprintf "the agent exited during boot; see %s"
+                 (Spawn.log_path ~log_dir:t.log_dir ~leaf))
+        | _ -> (
+            match probe_root_fence t ~session () with
+            | `Free when pid = None -> (
+                match recorded_cwd () with
+                | Error message -> `Refused message
+                | Ok cwd -> (
+                    match
+                      Spawn.spawn ~resolve_bin:t.resolve_bin
+                        ~log_dir:t.log_dir ~leaf ~environment ~session
+                        ~interrupted:false ~cwd
+                    with
+                    | Error message -> `Refused message
+                    | Ok p -> loop ~pid:(Some p) ~held_other_s elapsed))
+            | `Free | `Custodial | `Held (Some _) ->
+                (* Our own child staging before its fence, a brief custodial
+                   hold, or a serving holder whose listener is not yet up. *)
+                wait ~pid ~held_other_s
+            | `Held_self | `Held None ->
+                (* A holder no start may reach — an interactive driver, an
+                   unreadable owner line, a foreign host. A brief patience
+                   covers the offline twins' sub-second fenced commits. *)
+                if held_other_s >= 2.0 then
+                  `Refused
+                    (Printf.sprintf "the session is driven by %s"
+                       (holder_name t ~session))
+                else wait ~pid ~held_other_s:(held_other_s +. 0.05)
+            | `Io message -> `Refused message)
+    in
+    loop ~pid:None ~held_other_s:0. 0.
+
 (* Observation without ownership: fence and head until the head is terminal,
    through the same loop the delegated foreign watch rides. The watch holds
    nothing — no table entry, no fence, no connection — so it collides with no
@@ -1352,6 +1451,7 @@ let create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir ~now =
     log_dir;
     now;
     entries = Hashtbl.create 8;
+    orphan_pids = Hashtbl.create 4;
     stop_signal;
     stop_resolver;
     send_locks = Hashtbl.create 8;
@@ -1577,6 +1677,11 @@ let supervise t ~session ~environment ?deadline_s ?respawns ~on_settled
       | `Settled -> on_settled ()
       | `Failed failure -> on_failure failure);
       `Supervising
+
+let serve t ~session ~environment () =
+  match t with
+  | Real b -> serve b ~session ~environment ()
+  | Stub _ -> no_processes "serve"
 
 let watch t ~session ~on_terminal =
   match t with

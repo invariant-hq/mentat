@@ -14,6 +14,11 @@
     directory, and its pid returned for the broker's reaper — it is never
     bound to an Eio switch, because a child must outlive its spawner. *)
 
+val log_path : log_dir:string -> leaf:string -> string
+(** [log_path ~log_dir ~leaf] is the per-session stdio log a spawned server
+    appends to — the path {!spawn} opens, exported so a boot-failure
+    diagnostic can name it. *)
+
 val spawn :
   resolve_bin:(unit -> (string, string) result) ->
   log_dir:string ->

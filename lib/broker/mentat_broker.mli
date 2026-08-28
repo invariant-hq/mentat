@@ -249,6 +249,32 @@ val supervise :
     at the firing settles instead). Without a deadline, a serving holder
     that never concludes is observed for as long as it holds the fence. *)
 
+val serve :
+  t ->
+  session:Mentat_session.Id.t ->
+  environment:(string * string) list ->
+  unit ->
+  [ `Serving | `Refused of string ]
+(** [serve t ~session ~environment ()] makes an agent serve [session] so the
+    caller can dial its derived socket — the frontend's activation verb.
+    [`Serving] means the endpoint accepts connections now: an agent already
+    serving is left alone, and a dormant session — settled or not, which is
+    what separates this verb from {!val-supervise} — gets one spawned
+    activation ([environment] rendered whole, the working directory the
+    session's recorded cwd), awaited until its endpoint binds. Blocking and
+    bounded by the boot wait.
+
+    The verb owns nothing beyond the spawned pid's zombie, reaped by the
+    broker's reaper: no table entry, no observation, no respawn — the
+    caller's own connection is the lease that keeps the agent alive, and a
+    settled agent nobody dials idles out on its own. [`Refused] names the
+    reason: an unreadable session document, a spawn or boot failure (the
+    per-session log is named), or a fence holder no start may reach — an
+    interactive driver or a foreign host, given a brief patience for the
+    offline twins' sub-second holds first. Under concurrent starts of one
+    session a loser of the boot-attach race may be refused while the winner
+    is still binding; the caller's next probe finds the winner. *)
+
 val watch :
   t ->
   session:Mentat_session.Id.t ->
@@ -405,8 +431,8 @@ val for_tests :
     idempotence and its forked, non-blocking observation are the script's
     to model — a script that drives the child forks its own fiber.
 
-    Every process-facing operation left unstubbed — {!val-watch},
-    {!cancel}, {!rediscover}, and {!val-materialize} or {!val-supervise}
-    without a script — raises [Invalid_argument]: the stub performs no
-    process work, and a test that reaches one of those has wired the wrong
-    seam. *)
+    Every process-facing operation left unstubbed — {!val-serve},
+    {!val-watch}, {!cancel}, {!rediscover}, and {!val-materialize} or
+    {!val-supervise} without a script — raises [Invalid_argument]: the stub
+    performs no process work, and a test that reaches one of those has wired
+    the wrong seam. *)
