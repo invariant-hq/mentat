@@ -110,15 +110,16 @@ the shape —
 
 - a delegation edge (`delegated_from`) → resolve the edge, mint the
   deterministic first turn from it, confine the socket's session cone
-  to the delegation subtree (today's behavior, byte-for-byte; the
+  to the served session alone (its own children are their own agents'
+  — narrowed at R4; the
   `--interrupted` carry stays with this shape);
 - a routine-born session → apply the routine's recorded run policy —
   mode, sandbox, step cap, output schema, and the model, reasoning,
   and permission spellings — from the store; the wall clock is not
   recorded: it is the supervising fire's deadline (§ the supervisor —
   one budget must not have two clocks);
-- a plain root session → serve plainly; confinement is "this session
-  and anything it delegates."
+- a plain root session → serve plainly; the same one-session
+  confinement (a delegated child is its own agent's to serve).
 
 **Every shape attaches its driver at boot.** Attach runs the driver's
 queue admission, so mail already in the journal starts the first turn —
@@ -264,20 +265,17 @@ consumption as queued input today. The entry gains one optional member,
 `origin`; the wire's `Queue_next` gains the same optional member. No
 new command, no new mailbox.
 
-Delivery is one bounded loop, decided by the fence's owner label:
+Delivery is one bounded loop, decided by the fence's owner label
+(the local arm that once short-circuited a sender's own driven
+target died with in-process drivers at the eviction rung):
 
-0. **A target the sending process itself drives** (its own driver
-   registry) is submitted locally. This arm is transitional: it exists
-   while in-process drivers exist and is deleted with them at the
-   eviction rung.
 1. **Try to acquire the target's fence under the custodial label
    `send`.** Acquired → the target is dormant: perform the driver's
    admission exactly — the dedup, the accept table, the cap — commit
    the enqueued fact through the store's ordinary path, release.
    `` `Delivered ``. (Acquisition *is* the liveness probe; there is no
    read-then-act race.)
-2. **Fence held by a serving label** (the child server's
-   `serve-session`, or the transitional serve-mount) → dial the
+2. **Fence held by the serving label** → dial the
    derived socket, submit `Queue_next` on a short-lived, grace-bounded
    connection. The driver's dedup makes redelivery idempotent.
 3. **Fence held by a custodial label** (`send`, the store's `remove`)
@@ -477,20 +475,16 @@ and orphaned look identical" — are structurally impossible: every
   widened from the engine to every interface). *Prevents:* registries,
   and every race a registry brings.
 - **L-B2 — Whoever holds a session's fence *to drive it* serves its
-  socket.** Serving holds carry a serving label — of which there are
-  two, split by preemptability: the child server's label, the one
-  holder the escalation ladder may signal, and the serve-mount label
-  a live interactive host wears, dialable but never signalled (a
-  broker must never ladder the owner's terminal). Brief custodial
-  holds (a send append, a store removal) carry a custodial label and
-  are bounded; the probe decides by label, never by bare heldness.
-  The law binds fully once the eviction rung lands; since R-mail,
-  interactive drivers and daemon-hosted engines hold under the
-  serve-mount label and are dialable — an unlabeled holder is now
-  only a host whose mount failed to bind, and the send's transitional
-  local arm survives on same-process preference, not unreachability. *Prevents:* the unreachable
-  driven session, and the misread of a millisecond hold as a foreign
-  driver.
+  socket.** A serving hold carries the one serving label — the
+  agent's, the holder the escalation ladder may signal within its
+  boot patience. Brief custodial holds (a send append, a store
+  removal) carry a custodial label and are bounded; an offline
+  command's short unlabeled hold is waited out and then named. The
+  probe decides by label, never by bare heldness. The law binds
+  fully since the eviction rung: every driven session is served by
+  its own agent, so nothing dialable exists that is not an agent.
+  *Prevents:* the unreachable driven session, and the misread of a
+  millisecond hold as a foreign driver.
 - **L-B3 — One boot, no modes.** The activation derives its shape from
   the session document, never from a flag that could disagree with it.
   *Prevents:* flag/document skew, and boot paths multiplying per shape.
@@ -709,7 +703,7 @@ this RFC implies nothing about priority or scheduling.
   replies and human-to-session mail — the messaging mandate's core
   (sibling mail needs granted contacts and arrives with R5) — the
   messaging mandate — before any process-model risk is taken. The
-  bridge is transitional and dies at R4. R-mail also owns the
+  bridge was transitional and died at R4 as planned. R-mail also owns the
   per-(target, origin) backlog cap — the first rung where non-kin
   mail can accumulate — and the sender-name prompt framing from the
   typed origin, which has no reader before foreign senders exist.
@@ -748,11 +742,31 @@ this RFC implies nothing about priority or scheduling.
   (maintainer accepted): activation spawn-to-socket ~40 ms,
   spawn-to-provider-request ~83 ms (medians of 12 warm runs, isolated
   store, scripted provider); the all-process subagent family runs in
-  4.1 s forced. Per-child cost is per lifecycle, not per turn. Then: engines materialize
-  children via their own broker; `In_process` and the send's local
-  arm deleted; mentatd sheds engines and routing; the TUI spawns and
-  dials its own activation; `find_or_spawn` deleted; the serve-mount
-  bridge deleted. The eviction campaign's waves C–E land here.
+  4.1 s forced. Per-child cost is per lifecycle, not per turn.
+  **LANDED 2026-08-28, five waves.** Engines materialize children via
+  their own broker; `In_process`, the child-backend choice, and the
+  send's local arm deleted (with `Driver.enqueue` whole — the arm was
+  its only caller); mentatd sheds engines, routing, and its wire
+  listener (ruled: deleted, not reshaped — web, webhooks, signals,
+  and the scheduler remain); the TUI and `run` spawn and dial through
+  the frontend bundle (engine-free cones + per-session ensure-dial),
+  with attach-or-start automatic and the `--attach` flag,
+  `find_or_spawn`, and client discovery deleted; the serve-mount
+  bridge, its label, and the prompt-carried `--triggered` path
+  deleted (decode arms and corpus goldens stay forever). Landed
+  adjudications beyond the plan: `Broker.serve` is the frontend's
+  activation verb — supervise settles a concluded dormant session
+  without spawning, the wrong shape for a caller that needs a socket
+  regardless, and the caller's connection is the lease; the one boot
+  verb is spelled `serve` and hidden from every advertised surface;
+  the broker probes the fence before every removal, respawn, and
+  preempt, with the serve verb's boot patience shared by all arms
+  (the lens passes' catch: an exit funnel without a re-probe severed
+  a race's live winner); the residue sweep claims a leaf by
+  existence, never decodability; the linger is the broker's one
+  exported constant, fast (3 s) everywhere — exiting a run leaves
+  nothing running; a promptless `run resume` runs a dormant inbox;
+  the discovery record dropped the socket member nothing binds.
 - **R5 — grants and the trigger.** Granted contacts, the
   `agent_message` trigger with the wake scan, the accept gate's grant
   arm.
