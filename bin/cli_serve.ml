@@ -135,7 +135,7 @@ let idle store cache served =
     if Hashtbl.mem seen id then true
     else begin
       Hashtbl.replace seen id ();
-      match Serve_mount.Heads.summary ~store cache session with
+      match Session_endpoint.Heads.summary ~store cache session with
       | None -> false
       | Some (settled, children) -> settled && List.for_all (go seen) children
     end
@@ -204,8 +204,7 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd =
       match
         (* The labeled owner is what lets the broker tell this server's fence
            hold apart from an interactive one it must never preempt. *)
-        Composition.instance shared ~sw ~cwd ~overrides
-          ~owner_label:Mentat_broker.serve_owner_label ()
+        Composition.instance shared ~sw ~cwd ~overrides ~owner:`Serve ()
       with
       | Error status -> status
       | Ok instance -> (
@@ -229,9 +228,9 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd =
                   (* One durable-head cache behind both consumers of the
                      subtree walk — the idle watchdog and the confinement's
                      membership — so each journal decodes once per stamp. *)
-                  let heads = Serve_mount.Heads.create () in
+                  let heads = Session_endpoint.Heads.create () in
                   let driver =
-                    Serve_mount.confined ~store ~cache:heads ~served driver
+                    Session_endpoint.confined ~store ~cache:heads ~served driver
                   in
                   let socket_dir =
                     match socket_dir_override with
@@ -241,7 +240,7 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd =
                           User_dirs.child_socket_dir shared.Composition.dirs
                             ~session
                         in
-                        Serve_mount.ensure_socket_parents dir;
+                        Session_endpoint.ensure_socket_parents dir;
                         dir
                   in
                   let net = Eio.Stdenv.net stdenv in
@@ -359,7 +358,7 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd =
                              severed through. *)
                           Eio.Switch.run (fun serve_sw ->
                               Eio.Switch.on_release serve_sw (fun () ->
-                                  Serve_mount.remove_socket socket_dir);
+                                  Session_endpoint.remove_socket socket_dir);
                               (* The listener binds only after the attach
                                  holds the fence: the bind unlinks whatever
                                  stale socket a killed predecessor left, so
@@ -393,7 +392,7 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd =
                                     Server.serve ~sw:serve_sw ~clock
                                       ~heartbeat_s:1.0
                                       ~driver_for:
-                                        (Serve_mount.driver_for
+                                        (Session_endpoint.driver_for
                                            ~root:
                                              (Lpath.Abs.to_string
                                                 (Composition.root instance))

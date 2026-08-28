@@ -42,14 +42,6 @@ let serve_owner_label = "serve-session"
    patience exists to kill. *)
 let serve_linger_s = 3.0
 
-(* Transitional (dies at the eviction rung, with the in-process drivers it
-   labels): the serving label an in-process driver host — an interactive
-   process or a daemon-hosted engine — holds its fences under while its
-   serve-mount bridge serves the derived socket beside the driver. Dialable
-   like the child-server label, but never preemptable: the holder is a live
-   host the escalation ladder must not signal. *)
-let serve_mount_owner_label = "serve-mount"
-
 (* The custodial label a send acquires the target's fence under while it
    appends mail to a dormant session's journal. A custodial hold is a brief
    labeled hold that releases on its own — never a driver — so every probe
@@ -64,12 +56,11 @@ let custodial_label label =
 
 (* The one fence-owner classification: a custodial label is a transient the
    observer re-probes; the serving label on a same-host owner is a dialable
-   per-session child server; the mount label on a same-host owner is a
-   dialable in-process host the ladder must never signal; anything else — an
-   unlabeled interactive driver, an unreadable label, a foreign host — is a
-   holder no loop here may reach. [probe_fence] maps it onto the decision
-   table's vocabulary and the send loop matches it directly, so the two can
-   never drift on the host conjunction. *)
+   per-session child server; anything else — an unlabeled interactive driver,
+   an unreadable label, a foreign host — is a holder no loop here may reach.
+   [probe_fence] maps it onto the decision table's vocabulary and the send
+   loop matches it directly, so the two can never drift on the host
+   conjunction. *)
 let classify_owner owner =
   let same_host () =
     String.equal (Mentat_store.Run_lock.Owner.host owner) (Unix.gethostname ())
@@ -78,9 +69,6 @@ let classify_owner owner =
   | Some label when custodial_label label -> `Custodial
   | Some label when String.equal label serve_owner_label && same_host () ->
       `Server (Mentat_store.Run_lock.Owner.pid owner)
-  | Some label when String.equal label serve_mount_owner_label && same_host ()
-    ->
-      `Mount
   | Some _ | None -> `Other
 
 (* The typed supervision failure: the arm is the contract a caller
@@ -218,7 +206,7 @@ let probe_fence t ~session () : Reconcile.fence =
         match classify_owner owner with
         | `Custodial -> `Custodial
         | `Server pid -> `Held (Some pid)
-        | `Mount | `Other -> `Held None)
+        | `Other -> `Held None)
 
 (* Supervision's fence view has no self arm — the send loop's posture:
    labels judge holders, whoever they are. The one exception is that this
@@ -233,7 +221,7 @@ let probe_root_fence t ~session () : Reconcile.fence =
       match classify_owner owner with
       | `Custodial -> `Custodial
       | `Server pid when pid <> Unix.getpid () -> `Held (Some pid)
-      | `Server _ | `Mount | `Other -> `Held None)
+      | `Server _ | `Other -> `Held None)
 
 (* The holder's owner line, re-read for a failure message: the table's fence
    vocabulary deliberately collapses identity, so naming the holder is its
@@ -1454,7 +1442,7 @@ let send t ?origin ?(budget_s = grace_s) ~target ~id ~input () =
               (* Another brief hold is in flight; never dial, never
                  preempt. *)
               retry (Some owner)
-          | `Server _ | `Mount -> (
+          | `Server _ -> (
               (* One dial may not outrun what remains of the budget. *)
               let timeout_s =
                 Float.min grace_s (Float.max 0. (budget_s -. elapsed ()))

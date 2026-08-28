@@ -40,15 +40,11 @@ let session_error_to_protocol session (e : Session.Error.t) : Protocol_error.t =
    head) is a real driver, refused immediately; one held open by a live
    connection past the patience is refused too, naming the holder. *)
 let transient_hold ~store session holder =
-  let serving_label label =
-    String.equal label Mentat_broker.serve_owner_label
-    || String.equal label Mentat_broker.serve_mount_owner_label
-  in
   match Option.bind holder Store.Run_lock.Owner.label with
   | None -> false
   | Some label ->
       Mentat_broker.custodial_label label
-      || serving_label label
+      || String.equal label Mentat_broker.serve_owner_label
          &&
          (match Store.Session.load store session with
          | Error _ -> false

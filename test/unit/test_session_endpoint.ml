@@ -3,7 +3,7 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(* Unit pins for [Serve_mount.confined]'s refusals — the one confinement
+(* Unit pins for [Session_endpoint.confined]'s refusals — the one confinement
    door. The whole-cone refusal has no product client left to send it (the
    frontends answer those cones locally), so its byte text is pinned here:
    every non-session cone answers the same refusal, while the two
@@ -90,7 +90,7 @@ let stub_driver () : Driver.t =
 let with_confined name fn =
   Eio_main.run @@ fun env ->
   let fs = Eio.Stdenv.fs env in
-  let base = Unix.realpath (temp_dir ~prefix:("sm-" ^ name) ()) in
+  let base = Unix.realpath (temp_dir ~prefix:("se-" ^ name) ()) in
   Eio.Switch.run @@ fun sw ->
   let store =
     match Store.open_ ~sw (Eio.Path.( / ) fs base) with
@@ -106,8 +106,8 @@ let with_confined name fn =
    with
   | Ok (_ : Store.Session.Document.t) -> ()
   | Error error -> failf "create session: %a" Store.Session.Error.pp error);
-  let cache = Serve_mount.Heads.create () in
-  fn ~served (Serve_mount.confined ~store ~cache ~served (stub_driver ()))
+  let cache = Session_endpoint.Heads.create () in
+  fn ~served (Session_endpoint.confined ~store ~cache ~served (stub_driver ()))
 
 let cone_refused_text =
   "this server serves one session; accounts, settings, lifecycle, review, \
@@ -167,7 +167,7 @@ let the_two_settings_writes_pass_the_member_guard () =
         other
 
 let () =
-  run "mentat.serve-mount"
+  run "mentat.session-endpoint"
     [
       group "the confinement door"
         [

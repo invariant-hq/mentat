@@ -76,8 +76,9 @@ module Error = Mentat_json.Error
 let ( let* ) = Result.bind
 let error ~context reason = Error (Mentat_json.Error.make ~context reason)
 
-(* The routine-name grammar must stay identical to the token the run
-   surface's --triggered flag admits for routine names. *)
+(* The routine-name grammar: a plain token, never a path. The name persists
+   as the [source] member of the trigger-origin mail a fire delivers
+   ([Mentat_session.Origin.Trigger]) and in receipts on disk. *)
 let name_char c =
   (c >= 'A' && c <= 'Z')
   || (c >= 'a' && c <= 'z')

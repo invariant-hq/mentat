@@ -76,12 +76,11 @@ end
 type triggered = { source : string; digest : string; key : string }
 (** Trigger provenance declared at turn start: the trigger's identity as the
     scheduling host defines it, the digest sealing the policy content it fired
-    under, and the key naming the event it fired on. When present on
-    {!Prompt}, the engine mints the turn's origin as
-    {!Mentat_session.Turn.Origin.Triggered} instead of
-    {!Mentat_session.Turn.Origin.User}. Provenance is attribution, never
-    authority: it changes nothing about how the turn is admitted or executed.
-    All members are non-empty. *)
+    under, and the key naming the event it fired on. All members are
+    non-empty. The member is decoded for wire compatibility — a prompt from an
+    older client may still carry it — but no current client sends it and the
+    engine admits every prompt as a user turn: trigger provenance rides mail,
+    as the {!Mentat_session.Origin.Trigger} origin on a queued entry. *)
 
 (** The type for session intents. Every verb targets exactly one session. *)
 type t = private
@@ -93,9 +92,8 @@ type t = private
       mode : Mentat_session.Contract.Mode.t option;
       max_steps : int option;
       triggered : triggered option;
-          (** Optional trigger provenance. When present, the engine mints the
-              turn's origin as {!Mentat_session.Turn.Origin.Triggered}; absent,
-              the turn admits as {!Mentat_session.Turn.Origin.User}. *)
+          (** Retained for wire compatibility with older clients ({!type-triggered});
+              nothing sends it and the engine does not read it. *)
       output_schema : Jsont.json option;
           (** An optional JSON Schema the turn's final answer must conform to.
               When present, the engine seals a synthetic [structured_output]

@@ -404,7 +404,7 @@ let policy_digest_identity () =
   equal int ~msg:"16 characters" 16 (String.length digest);
   is_true ~msg:"lowercase hexadecimal" (lowercase_hex digest);
   (* The derivation is a wire format: digests persist in receipts and in
-     --triggered provenance, so a silent change would re-run every head. *)
+     trigger-origin mail, so a silent change would re-run every head. *)
   equal string ~msg:"pinned derivation" "47f6195b5839d948" digest;
   equal string ~msg:"deterministic" digest
     (Routine.policy_digest ~routine_json:conforming

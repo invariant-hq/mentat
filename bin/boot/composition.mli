@@ -109,10 +109,9 @@ val instance :
   overrides:Mentat_config.t list ->
   ?environment:(string * string) list ->
   ?review_base:string ->
-  ?owner_label:string ->
+  ?owner:[ `Serve ] ->
   ?broker:Mentat_broker.t ->
   ?resolve_bin:(unit -> (string, string) result) ->
-  ?serve_mount:bool ->
   unit ->
   (t, Exit_status.t) result
 (** [instance shared ~sw ~cwd ~overrides ?environment ?review_base ()] stages
@@ -128,26 +127,20 @@ val instance :
     defaults to [shared]'s process snapshot, and a daemon passes the invoking
     client's snapshot instead so the child is configured from the shell that
     asked for the run, not the shell that spawned the daemon. [review_base] is
-    the review cone's base spec, as in {!with_base}. [owner_label] labels the
-    run-lock owner identity this instance acquires fences under (absent by
-    default); a per-session child server passes
-    {!Mentat_broker.serve_owner_label} so the broker can tell it apart from an
-    interactive holder. [broker] is the process broker the instance's engine
-    sends recorded child messages through and hands every delegated child to
-    (each child a [mentat serve] process of its own, reported back through
-    the {!Mentat_broker.Engine} seam sealed at assembly); a daemon passes its one node broker, and an
-    instance without one gets its own on first use, built over [resolve_bin]
-    — the staging fact naming the binary the broker spawns ({!val-broker});
-    absent, it spawns the running executable itself, with [MENTAT_BIN] as
-    the escape. [serve_mount] (default [false];
-    {!with_base} sets it) is the transitional serve-mount bridge: the
-    instance's engine serves each driven session's derived socket beside its
-    driver, and the instance's fence owner carries
-    {!Mentat_broker.serve_mount_owner_label} so a send's wire arm dials what
-    the mount serves; an explicit [owner_label] wins over the mount label.
-    The per-session child server leaves it off — it serves its one socket
-    itself, under the serving label. A staging failure (an unresolvable root,
-    malformed config) is an {!Exit_status.Runtime_error}. *)
+    the review cone's base spec, as in {!with_base}. [owner] marks what this
+    instance is to the run-lock: [`Serve] is the per-session child server,
+    acquiring its fences under {!Mentat_broker.serve_owner_label} so the
+    broker can tell it apart from an interactive holder; absent, the owner is
+    unlabeled — an interactive process. [broker] is the process broker the
+    instance's engine sends recorded child messages through and hands every
+    delegated child to (each child a [mentat serve] process of its own,
+    reported back through the {!Mentat_broker.Engine} seam sealed at
+    assembly); a daemon passes its one node broker, and an instance without
+    one gets its own on first use, built over [resolve_bin] — the staging
+    fact naming the binary the broker spawns ({!val-broker}); absent, it
+    spawns the running executable itself, with [MENTAT_BIN] as the escape. A
+    staging failure (an unresolvable root, malformed config) is an
+    {!Exit_status.Runtime_error}. *)
 
 val shutdown : t -> unit
 (** [shutdown t] shuts down [t]'s engine drivers when the client was built,

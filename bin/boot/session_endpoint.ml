@@ -8,11 +8,6 @@ module Store = Mentat_store
 module Session = Mentat_session
 module Driver = Mentat_client.Driver
 
-let log_src =
-  Logs.Src.create "mentat.serve-mount" ~doc:"The per-session serve mount"
-
-module Log = (val Logs.src_log log_src : Logs.LOG)
-
 (* One cached, stamp-elided, fence-free read of a session's durable head:
    whether it is settled with an empty queue, and its recorded delegation
    children. [None] when the stamp or the journal cannot be read —
@@ -212,8 +207,8 @@ let confined ~store ~cache ~served (driver : Driver.t) : Driver.t =
   { Driver.session; accounts; settings; lifecycle; review; workspace }
 
 (* One session, one workspace: a handshake binds only this endpoint's root,
-   and the offered environment is ignored — the serving instance keeps the
-   environment it booted with, exactly as a live daemon instance does. *)
+   and the offered environment is ignored — the serving agent keeps the
+   environment it booted with. *)
 let driver_for ~root ~driver ~active ~workspace ~environment:_ =
   match workspace with
   | Some w when String.equal w root ->
@@ -247,47 +242,3 @@ let ensure_socket_parents dir =
 
 let remove_socket dir =
   Server.Bind.remove_endpoint ~dir:(Lpath.Abs.of_string_exn dir)
-
-(* Transitional (it dies with the in-process drivers it bridges): serve the
-   driven session's derived socket beside its driver. The bind runs
-   synchronously so a failure answers [None] here and now; the serve loop and
-   its stop race ride one fiber under the caller's switch. The socket file
-   itself is unlinked by the listener's teardown at switch close — removing
-   the endpoint here would make that teardown fail on the missing entry — so
-   an unmounted session may leave an empty endpoint leaf directory behind,
-   which the broker's rediscovery sweep already tolerates and disposes. *)
-let mount ~sw ~stdenv ~store ~dirs ~driver ~root ~session =
-  let id = Session.Id.to_string session in
-  let dir = User_dirs.child_socket_dir dirs ~session:id in
-  match
-    ensure_socket_parents dir;
-    Server.listen ~sw
-      ~net:(Eio.Stdenv.net stdenv)
-      (Server.Bind.unix ~dir:(Lpath.Abs.of_string_exn dir))
-  with
-  | exception exn ->
-      Log.warn (fun m ->
-          m "serve-mount for session %s did not bind: %s" id
-            (Printexc.to_string exn));
-      None
-  | listener ->
-      let stop, resolve_stop = Eio.Promise.create () in
-      let cache = Heads.create () in
-      let confined = confined ~store ~cache ~served:session driver in
-      let active = Atomic.make 0 in
-      Eio.Fiber.fork ~sw (fun () ->
-          Eio.Fiber.first
-            (fun () ->
-              (* The short keep-alive matches the per-session child server:
-                 an idle stream notices its peer's disconnect only at the
-                 next heartbeat write. *)
-              Server.serve ~sw
-                ~clock:(Eio.Stdenv.clock stdenv)
-                ~heartbeat_s:1.0
-                ~driver_for:
-                  (driver_for
-                     ~root:(Lpath.Abs.to_string root)
-                     ~driver:confined ~active)
-                listener)
-            (fun () -> Eio.Promise.await stop));
-      Some (fun () -> ignore (Eio.Promise.try_resolve resolve_stop ()))

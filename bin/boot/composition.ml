@@ -101,11 +101,6 @@ type t = {
   (* Miss-path listing refreshes are rate-limited per provider: a selector
      that keeps missing must not probe the network on every resolution. *)
   listing_refresh_at : (string, float) Hashtbl.t;
-  (* Transitional, with the serve-mount bridge itself: whether this instance's
-     engine serves each driven session's derived socket beside its driver.
-     When set, the instance's fence owner carries the serve-mount label, so a
-     send's wire arm dials what the mount serves. *)
-  serve_mount : bool;
   (* The process broker the engine sends through. The daemon passes its one
      node broker; absent, an instance-owned one is built on first use over
      [resolve_bin] — a staging fact, so what the broker can do is fixed
@@ -532,12 +527,10 @@ let self_resolve_bin () =
              self)
 
 let make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
-    ~review_base ?owner_label ?broker ?(resolve_bin = self_resolve_bin)
-    ?(serve_mount = false) () : t =
+    ~review_base ?owner ?broker ?(resolve_bin = self_resolve_bin) () : t =
   let owner_label =
-    match owner_label with
-    | Some _ as label -> label
-    | None when serve_mount -> Some Mentat_broker.serve_mount_owner_label
+    match owner with
+    | Some `Serve -> Some Mentat_broker.serve_owner_label
     | None -> None
   in
   {
@@ -554,7 +547,6 @@ let make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
     overrides;
     staged_default = None;
     listing_refresh_at = Hashtbl.create 4;
-    serve_mount;
     broker;
     resolve_bin;
     owned_broker = None;
@@ -588,8 +580,7 @@ let build_base ~stdenv ~sw ~cwd ~overrides ?data_home ?review_base ?resolve_bin
   let shared = { dirs; runtime; store; environment; stdenv; sw } in
   Ok
     (make_instance ~shared ~sw ~root ~trusted ~config
-       ~environment:shared.environment ~overrides ~review_base ?resolve_bin
-       ~serve_mount:true ())
+       ~environment:shared.environment ~overrides ~review_base ?resolve_bin ())
 
 (* The daemon path: the per-user shared stage opened once under the owning
    switch. It stages the same dirs/runtime/store the CLI path does, in that
@@ -611,8 +602,8 @@ let stage_shared ~stdenv ~sw ?data_home () : (shared, Exit_status.t) result =
    own switch [sw] (the engine and watch lane live under it, so eviction closes
    one switch). No store is opened here — the shared handle is reused, which is
    what keeps the fence's same-process half honest. *)
-let instance shared ~sw ~cwd ~overrides ?environment ?review_base ?owner_label
-    ?broker ?resolve_bin ?serve_mount () : (t, Exit_status.t) result =
+let instance shared ~sw ~cwd ~overrides ?environment ?review_base ?owner
+    ?broker ?resolve_bin () : (t, Exit_status.t) result =
   let ( let* ) = Result.bind in
   let environment = Option.value environment ~default:shared.environment in
   let getenv = environment_get environment in
@@ -624,7 +615,7 @@ let instance shared ~sw ~cwd ~overrides ?environment ?review_base ?owner_label
   in
   Ok
     (make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
-       ~review_base ?owner_label ?broker ?resolve_bin ?serve_mount ())
+       ~review_base ?owner ?broker ?resolve_bin ())
 
 (* The engine's drivers are long-lived fibers under the instance switch; shut
    them down so the switch can close instead of blocking on idle drivers. The
@@ -3362,29 +3353,11 @@ let build_driver t :
     Cfg.Resolved.get Cfg.Field.run_subagent_max_concurrent t.config
   in
   let broker = broker t in
-  (* The transitional serve-mount hook: the engine applies it at each driver
-     registration, so a session this instance drives is dialable over its
-     derived socket while driven. It closes over the driver record assembled
-     below through a set-once cell — a mount can only fire at a driver
-     attach, which is only reachable after assembly returns. *)
-  let mounted_driver = ref None in
-  let serve_mount =
-    if not t.serve_mount then None
-    else
-      Some
-        (fun ~session ->
-          match !mounted_driver with
-          | None -> None
-          | Some driver ->
-              Serve_mount.mount ~sw:t.switch ~stdenv:t.shared.stdenv
-                ~store:t.shared.store ~dirs:t.shared.dirs ~driver ~root:t.root
-                ~session)
-  in
   let engine =
     Engine.create ~sw:t.switch ~store:store_port ~provider:provider_call
       ~config:(config_callback t ~product_rules:build_product_rules)
       ~now:(fun () -> now_time t)
-      ~max_children ~broker ~broker_engine:(broker_engine t) ?serve_mount
+      ~max_children ~broker ~broker_engine:(broker_engine t)
       ~execution_for_mode ~delegated_execution ()
   in
   t.engine <- Some engine;
@@ -3399,7 +3372,6 @@ let build_driver t :
         workspace_cone t build_capability ~base_spec:(review_base_spec t);
     }
   in
-  mounted_driver := Some driver_record;
   Ok (driver_record, read_capability, shell)
 
 let assemble t =

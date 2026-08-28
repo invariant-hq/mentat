@@ -94,15 +94,6 @@ val send_owner_label : string
     the same reason as {!serve_owner_label}: the two sides of the fence must
     spell it identically. *)
 
-val serve_mount_owner_label : string
-(** Transitional (it dies with the in-process drivers it labels): the serving
-    run-fence owner label an in-process driver host — an interactive process,
-    or a daemon hosting engines — acquires its fences under while it also
-    serves each driven session's derived socket beside the driver. {!send}
-    dials a holder carrying it exactly as it dials a per-session child
-    server; unlike {!serve_owner_label} it is never preemptable — the holder
-    is a live host no escalation ladder may signal. *)
-
 val custodial_label : string -> bool
 (** [custodial_label label] is [true] iff [label] is a custodial run-fence
     owner label: {!send_owner_label}, or the store's removal label
@@ -331,10 +322,10 @@ val send :
     own driver would admit it — the recorded-enqueue dedup, the admit
     judgment ({!Mentat_session.admits_mail}: the sender's standing and its
     unconsumed backlog both), the committed fact — and
-    released. A fence held under a serving label — a per-session child
-    server's, or a live host's serve-mount — is dialable: the entry crosses
-    its socket as a queue command on a short-lived
-    connection, and the driver's dedup makes redelivery idempotent. A fence
+    released. A fence held under the serving label — a per-session child
+    server's — is dialable: the entry crosses its socket as a queue command
+    on a short-lived connection, and the driver's dedup makes redelivery
+    idempotent. A fence
     held under another custodial label is a transient, re-probed on a short
     backoff, never dialed and never preempted. The loop is symmetric — a
     holder that exits mid-pass is caught by the next pass's acquire — and

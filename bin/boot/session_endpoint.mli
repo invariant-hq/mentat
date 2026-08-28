@@ -3,18 +3,13 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(** Serving one session's derived socket beside its driver.
+(** The per-session endpoint's shared machinery.
 
-    The shared machinery of every per-session endpoint: the confined session
-    cone that answers only for one session and its delegation subtree, the
-    handshake binder for a single-workspace server, the socket-directory
-    discipline, and — transitional, dying with the in-process drivers it
-    exists for — {!mount}, the serve-mount bridge: a process hosting an
-    in-process driver binds the driven session's derived socket and serves
-    the confined cone while it drives, so another process's send reaches the
-    session over the wire instead of spending its budget against the held
-    fence. The per-session child server ([mentat serve]) consumes the
-    shared pieces directly and owns its own boot, idle watchdog, and exit. *)
+    What every per-session endpoint is made of: the confined session cone
+    that answers only for one session and its delegation subtree, the
+    handshake binder for a single-workspace server, and the socket-directory
+    discipline. The per-session child server ([mentat serve]) consumes
+    these pieces directly and owns its own boot, idle watchdog, and exit. *)
 
 (** One cached, stamp-elided store of durable-head summaries, shared by every
     consumer of the subtree walk over one endpoint's lifetime so each journal
@@ -65,9 +60,8 @@ val driver_for :
 (** [driver_for ~root ~driver ~active] is the single-workspace handshake
     binder: a handshake naming exactly [root] binds [driver] and counts the
     connection in [active] until its close; any other — or absent — workspace
-    is refused. The offered environment is ignored — the serving instance
-    keeps the environment it booted with, exactly as a live daemon instance
-    does. *)
+    is refused. The offered environment is ignored — the serving agent keeps
+    the environment it booted with. *)
 
 val ensure_socket_parents : string -> unit
 (** [ensure_socket_parents dir] creates [dir]'s parent directories [0700] —
@@ -78,25 +72,3 @@ val remove_socket : string -> unit
 (** [remove_socket dir] removes the endpoint directory [dir] — the backstop
     for a teardown that could not run; a gone socket directory is the visible
     sign of a cleanly exited endpoint. *)
-
-val mount :
-  sw:Eio.Switch.t ->
-  stdenv:Eio_unix.Stdenv.base ->
-  store:Mentat_store.t ->
-  dirs:User_dirs.t ->
-  driver:Mentat_client.Driver.t ->
-  root:Lpath.Abs.t ->
-  session:Mentat_session.Id.t ->
-  (unit -> unit) option
-(** [mount ~sw ~stdenv ~store ~dirs ~driver ~root ~session] is the
-    transitional serve-mount bridge: it binds [session]'s derived socket
-    ({!User_dirs.child_socket_dir}) and serves [driver]'s {!confined} cone on
-    a fiber under [sw], returning the idempotent unmount that stops serving.
-    The socket file is unlinked by the listener's teardown at switch close;
-    an empty endpoint leaf directory may remain, which the broker's
-    rediscovery sweep tolerates. The caller must hold the session's
-    run fence under {!Mentat_broker.serve_mount_owner_label} for as long as
-    the mount serves — the label is what routes a send's wire arm here. A
-    bind that fails — a socket path over the [sun_path] budget, a colliding
-    endpoint — is [None], logged as a warning and never fatal: the bridge is
-    a reachability upgrade, not a condition of driving. *)

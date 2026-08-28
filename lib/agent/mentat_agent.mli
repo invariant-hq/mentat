@@ -87,7 +87,6 @@ val create :
   ?max_children:int ->
   broker:Mentat_broker.t ->
   broker_engine:Mentat_broker.Engine.t ->
-  ?serve_mount:(session:Mentat_session.Id.t -> (unit -> unit) option) ->
   execution_for_mode:Execution.factory ->
   delegated_execution:Execution.delegated_factory ->
   unit ->
@@ -145,15 +144,7 @@ val create :
     from the durable receipt at the next attach or the observed child exit;
     sending never wakes the child, a follow-up's wake is the separate
     materialization act. A recorded message to the session's own parent
-    rides the same lanes with no wake at all.
-
-    [serve_mount] is transitional, dying with the in-process drivers it
-    exists for: applied at each driver registration, it may open the driven
-    session's derived socket beside the driver — the serve-mount bridge that
-    makes a session this process drives dialable by another process's send —
-    returning the unmount the runtime calls at shutdown after the drivers
-    close. Absent, driven sessions stay reachable only inside this
-    process. *)
+    rides the same lanes with no wake at all. *)
 
 val child_first_turn :
   Mentat_session.Delegation.Id.t -> Mentat_session.Turn.Id.t

@@ -137,7 +137,7 @@ let leaf_dir t session =
 let serve_stub t ~sw session =
   let stdenv = Composition.stdenv t in
   let dir = leaf_dir t session in
-  Serve_mount.ensure_socket_parents dir;
+  Session_endpoint.ensure_socket_parents dir;
   let listener =
     Server.listen ~sw
       ~net:(Eio.Stdenv.net stdenv)

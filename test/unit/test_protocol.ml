@@ -1939,12 +1939,13 @@ let command_codec_group =
             (add_member "goal"
                (json_object [ ("objective", Json.string "Port the parser") ])
                prompt));
-      test "a prompt carries optional trigger provenance round-trip" (fun () ->
-          (* Trigger provenance rides the prompt payload: the wire tag stays
-             [prompt], the optional [triggered] member carries source, digest,
-             and key, and an absent member decodes as none — the
-             backward-compatible codec addition. *)
-          let with_triggered =
+      test "the prompt decode accepts trigger provenance" (fun () ->
+          (* The [triggered] member survives for wire compatibility: a prompt
+             from an older client may carry provenance, and the decode still
+             admits and validates it. Nothing in the tree encodes it any
+             more — trigger provenance rides mail, as a queued entry's
+             origin. *)
+          let expected =
             ok_or "prompt.triggered"
               (Protocol.Command.prompt ~session:fix_session_id
                  ~turn:(turn_id "turn-trig")
@@ -1957,10 +1958,23 @@ let command_codec_group =
                    }
                  ())
           in
-          let json = encode Protocol.Command.jsont with_triggered in
-          assert_v_and_tag ~msg:"prompt.triggered" "prompt" json;
-          equal command_value ~msg:"prompt.triggered round-trip" with_triggered
-            (decode Protocol.Command.jsont json);
+          let carried =
+            add_member "triggered"
+              (json_object
+                 [
+                   ("source", Json.string "nightly-review");
+                   ("digest", Json.string "0f9a4c1d2e3b4a5f");
+                   ("key", Json.string "delivery-42");
+                 ])
+              (encode Protocol.Command.jsont
+                 (ok_or "prompt.bare"
+                    (Protocol.Command.prompt ~session:fix_session_id
+                       ~turn:(turn_id "turn-trig")
+                       ~input:[ Llm.Content.text "Review the diff." ]
+                       ())))
+          in
+          equal command_value ~msg:"prompt.triggered decode" expected
+            (decode Protocol.Command.jsont carried);
           (* An empty member is rejected by the constructor. *)
           is_true ~msg:"empty triggered source rejected"
             (Result.is_error

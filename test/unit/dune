@@ -480,8 +480,8 @@
 ; library exactly as test_routine_fire does.
 
 (test
- (name test_serve_mount)
- (modules test_serve_mount)
+ (name test_session_endpoint)
+ (modules test_session_endpoint)
  (flags
   (:standard -open Mentat_boot))
  (libraries
@@ -500,7 +500,7 @@
   unix))
 
 ; The frontend's per-session router is a boot-library module; its suite
-; links the library exactly as test_serve_mount does. The composition is
+; links the library exactly as test_session_endpoint does. The composition is
 ; staged for real over a hermetic temp home, and the one process-shaped
 ; effect — the broker's spawn — is refused loudly through MENTAT_BIN, so
 ; every start decision is visible without a process.

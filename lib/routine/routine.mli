@@ -135,9 +135,10 @@ end
 type t = {
   name : string;
       (** The routine's name: non-empty, drawn from letters, digits,
-          ['.'], ['_'], and ['-'] — the same token grammar the run
-          surface's [--triggered] flag admits for routine names; the two
-          must never diverge. *)
+          ['.'], ['_'], and ['-'] — a plain token, never a path. It
+          persists as the [source] member of the trigger-origin mail a
+          fire delivers ({!Mentat_session.Origin.Trigger}) and in
+          receipts on disk. *)
   enabled : bool;  (** Whether the routine admits events; defaults true. *)
   repo : string;  (** The [owner/name] repository the routine watches. *)
   triggers : Trigger.t list;
@@ -215,5 +216,6 @@ val policy_digest :
     another. The digest covers exactly the three policy files — never
     secrets, never the ingress id — so editing any of the three re-stamps
     receipts and resets fence windows, and rotating a secret moves
-    nothing. The 16-character length is the length the run surface's
-    [--triggered] digest validation pins; the two must move together. *)
+    nothing. The 16-character spelling is a wire format: digests persist
+    in receipts and as the [digest] member of the trigger-origin mail a
+    fire delivers ({!Mentat_session.Origin.Trigger}). *)

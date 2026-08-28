@@ -59,18 +59,6 @@ val review_behavior :
     naming the accepted set. It is a session-scoped run posture (set through the
     client before the turn), not a config field. *)
 
-val triggered :
-  string -> (Mentat_protocol.Command.triggered, Exit_status.t) result
-(** [triggered raw] parses the [run start] [--triggered] value as
-    [<source>@<digest>:<key>]: a trigger source of letters, digits, ['.'],
-    ['_'], or ['-'] (the routine name, as mentatd mints it); the routine
-    policy digest — exactly 16 lowercase hexadecimal characters, the length
-    {!Mentat_routine.Routine.policy_digest} renders (the two must move
-    together); and a non-empty trigger key. The key may itself contain ['@']
-    or [':'] — the first ['@'] and the first [':'] after it delimit the
-    parts. Anything else is a {!Exit_status.Usage_error} naming the
-    grammar. *)
-
 val routine_name : string -> (string, Exit_status.t) result
 (** [routine_name raw] validates [raw] as an installed routine's name:
     non-empty, only letters, digits, ['.'], ['_'], ['-'], and not opening

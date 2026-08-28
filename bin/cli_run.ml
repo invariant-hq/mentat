@@ -1126,7 +1126,7 @@ let attach_images t ~client ~session ~images =
           loop [] images)
 
 let drive t ~environment_overrides ~json ~session ~create ~mode ~review
-    ~title ~skill_texts ~images ~triggered ~model_selection ~max_steps
+    ~title ~skill_texts ~images ~model_selection ~max_steps
     ~output_schema ~thinking ~prompt =
   (* Attribute this run's logs and any crash report to the session: a fresh
      session on [start] opened, an existing one on [resume] resumed. *)
@@ -1241,7 +1241,7 @@ let drive t ~environment_overrides ~json ~session ~create ~mode ~review
                           in
                           match
                             Command.prompt ~session ~turn ~input ?mode
-                              ?max_steps ?triggered ?output_schema ()
+                              ?max_steps ?output_schema ()
                           with
                           | Error _ ->
                               Exit_status.usage "prompt must not be empty"
@@ -1464,10 +1464,6 @@ let resolve_review = function
   | None -> Ok None
   | Some raw -> Result.map Option.some (Argv.review_behavior raw)
 
-let resolve_triggered = function
-  | None -> Ok None
-  | Some raw -> Result.map Option.some (Argv.triggered raw)
-
 let overrides_of_options options =
   build_overrides ~model:options.model ~reasoning:options.reasoning
     ~permission_unattended:options.permission_unattended
@@ -1546,8 +1542,8 @@ let model_selection_of_options t options =
 
 (* start. *)
 
-let start json id_opt title_opt options ephemeral skills images
-    triggered_raw prompt_raw cwd =
+let start json id_opt title_opt options ephemeral skills images prompt_raw
+    cwd =
   (let* id_opt = validate_id_opt id_opt in
    let* () =
      (* An ephemeral run is discarded with its store, so naming it for a later
@@ -1561,7 +1557,6 @@ let start json id_opt title_opt options ephemeral skills images
    let* title = Argv.title_opt title_opt in
    let* mode = resolve_mode options.mode in
    let* review = resolve_review options.permission in
-   let* triggered = resolve_triggered triggered_raw in
    let* output_schema = resolve_output_schema options.output_schema in
    let* overrides = overrides_of_options options in
    let environment_overrides = environment_overrides_of_options options in
@@ -1590,7 +1585,7 @@ let start json id_opt title_opt options ephemeral skills images
                         run_start_notices t ~json;
                         drive t ~environment_overrides ~json ~session
                           ~create:true ~mode ~review ~title ~skill_texts
-                          ~images ~triggered ~model_selection
+                          ~images ~model_selection
                           ~max_steps:options.max_steps ~output_schema
                           ~thinking:options.thinking ~prompt)))))
   |> Exit_status.of_result
@@ -1635,21 +1630,10 @@ let ephemeral_flag =
           "Persist nothing: stage the session under a throwaway store removed \
            when the run ends. A blocked ephemeral run cannot be resumed.")
 
-let triggered_opt =
-  Arg.(
-    value
-    & opt (some string) None
-    & info [ "triggered" ] ~docv:"SOURCE@DIGEST:KEY"
-        ~doc:
-          "Internal: record trigger provenance for this turn, as \
-           $(i,source)@$(i,digest):$(i,key). Set by trigger hosts; not for \
-           direct use.")
-
 let start_term =
   Term.(
     const start $ Cli_common.json $ id_opt $ title_opt $ run_options_term
-    $ ephemeral_flag $ skill_opt $ image_opt $ triggered_opt $ prompt_req
-    $ Cli_common.cwd)
+    $ ephemeral_flag $ skill_opt $ image_opt $ prompt_req $ Cli_common.cwd)
 
 let start_cmd =
   let doc = "Run a headless turn on a new session." in
@@ -1841,8 +1825,7 @@ let resume json options images last pos0 pos1 cwd =
                                   run_start_notices t ~json;
                                   drive t ~environment_overrides ~json ~session
                                     ~create:false ~mode ~review ~title:None
-                                    ~skill_texts:[] ~images ~triggered:None
-                                    ~model_selection
+                                    ~skill_texts:[] ~images ~model_selection
                                     ~max_steps:options.max_steps ~output_schema
                                     ~thinking:options.thinking ~prompt))))))))
   |> Exit_status.of_result
@@ -2326,7 +2309,7 @@ let run_review t ~json ~model_selection ~label ~framing ~diff ~max_steps =
             drive t ~environment_overrides:[] ~json ~session ~create:true
               ~mode:(Some Session.Contract.Mode.Review) ~review:None
               ~title:(Some ("review: " ^ label)) ~skill_texts:[] ~images:[]
-              ~triggered:None ~model_selection ~max_steps
+              ~model_selection ~max_steps
               ~output_schema:
                 (Some Mentat_connector.Review_finding.Document.schema)
               ~thinking:false

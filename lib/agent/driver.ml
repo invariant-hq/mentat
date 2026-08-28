@@ -547,8 +547,8 @@ and start_build_turn t cfg ~input ~origin =
 (* Queued admission on a session with a recorded run policy seals the turn
    under it — the recorded mode and output schema, never the plain Build
    defaults — and a trigger-origin entry mints the turn as [Triggered],
-   recording the consumed entry, so trigger provenance delivered as mail
-   reaches the turn exactly as a prompt-carried provenance would. *)
+   recording the consumed entry: trigger provenance rides mail, and this
+   admission is where it reaches the turn. *)
 and start_queued_turn t cfg entry =
   let policy =
     Mentat_session.Metadata.run_policy (Mentat_session.metadata t.session)
@@ -1147,18 +1147,8 @@ and handle_any t msg ~mid_effect =
 and handle_command t command ~mid_effect ~ack =
   match command with
   | Mentat_protocol.Command.Prompt
-      {
-        turn;
-        input;
-        options;
-        mode;
-        max_steps;
-        triggered;
-        output_schema;
-        _;
-      } ->
-      prompt t ~turn ~input ~options ~mode ~max_steps ~triggered ~output_schema
-        ~ack
+      { turn; input; options; mode; max_steps; output_schema; _ } ->
+      prompt t ~turn ~input ~options ~mode ~max_steps ~output_schema ~ack
   | Mentat_protocol.Command.Answer_decision { decision; answer; _ } ->
       if mid_effect then
         ack (Error (Mentat_protocol.Error.Decision_not_pending decision))
@@ -1249,8 +1239,7 @@ and journal_commit t ~ack events =
   | Error e -> ack (Error (unavailable e))
   | Ok () -> ack (Ok ())
 
-and prompt t ~turn ~input ~options ~mode ~max_steps ~triggered ~output_schema
-    ~ack =
+and prompt t ~turn ~input ~options ~mode ~max_steps ~output_schema ~ack =
   (* The engine mints the turn input from the command's content after admission:
      [Command.Prompt] carries content, never the engine-only [Continue]. The
      content is non-empty by the command constructor's contract. Inline
@@ -1284,21 +1273,12 @@ and prompt t ~turn ~input ~options ~mode ~max_steps ~triggered ~output_schema
                 with
                 | Error d -> ack (Error (unavailable (Error.Configuration d)))
                 | Ok cfg ->
-                    (* Trigger provenance is attribution, never authority: it
-                       selects the minted origin and changes nothing else
-                       about admission. *)
-                    let origin =
-                      match triggered with
-                      | None -> Mentat_session.Turn.Origin.User
-                      | Some { Mentat_protocol.Command.source; digest; key } ->
-                          Mentat_session.Turn.Origin.triggered ~source ~digest
-                            ~key ()
-                    in
                     start_turn t cfg
                       ~mode:
                         (Option.value mode
                            ~default:Mentat_session.Contract.Mode.Build)
-                      ~options ~max_steps ~id:turn ~input ~origin ~output_schema
+                      ~options ~max_steps ~id:turn ~input
+                      ~origin:Mentat_session.Turn.Origin.User ~output_schema
                       ~ack:(fun r ->
                         ack (Result.map_error (fun e -> unavailable e) r)))))
 

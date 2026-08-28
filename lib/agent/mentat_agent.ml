@@ -49,12 +49,8 @@ type t = {
          identity a child is spawned and dialed under, and the wrappers a
          brokered observation reports through. Handed at creation by the
          composition that owns both halves. *)
-  serve_mount : (session:Mentat_session.Id.t -> (unit -> unit) option) option;
   scheduler : Scheduler.t;
   drivers : (string, Driver.t) Hashtbl.t;
-  mounts : (string, unit -> unit) Hashtbl.t;
-      (* Transitional, with [serve_mount] itself: the open serve-mounts, one
-         per driven session, unmounted at shutdown after the drivers close. *)
   lanes : (string, lane) Hashtbl.t;
   hubs : (string, Feed.Hub.t) Hashtbl.t;
       (* One feed hub per observed session: observation subscribes to it
@@ -77,7 +73,7 @@ let child_first_turn delegation =
        [ Mentat_session.Delegation.Id.to_string delegation ])
 
 let create ~sw ~store ~provider ~config ~now ?(max_children = 4) ~broker
-    ~broker_engine ?serve_mount ~execution_for_mode ~delegated_execution () =
+    ~broker_engine ~execution_for_mode ~delegated_execution () =
   {
     sw;
     store;
@@ -88,10 +84,8 @@ let create ~sw ~store ~provider ~config ~now ?(max_children = 4) ~broker
     delegated_execution;
     broker;
     broker_engine;
-    serve_mount;
     scheduler = Scheduler.create ~capacity:max_children;
     drivers = Hashtbl.create 8;
-    mounts = Hashtbl.create 8;
     lanes = Hashtbl.create 8;
     hubs = Hashtbl.create 8;
     shutting_down = false;
@@ -488,19 +482,6 @@ let rec attach t id =
                             (* Register before starting: hooks fired by the first
                                drive resolve this driver through the registry. *)
                             Hashtbl.replace t.drivers (key id) driver;
-                            (* Transitional serve-mount: while this process
-                               drives the session — its fence held under the
-                               mount label — its derived socket serves, so a
-                               send from another process crosses the wire
-                               instead of burning its budget against the held
-                               fence. *)
-                            (match t.serve_mount with
-                            | None -> ()
-                            | Some mount -> (
-                                match mount ~session:id with
-                                | None -> ()
-                                | Some unmount ->
-                                    Hashtbl.replace t.mounts (key id) unmount));
                             Driver.start driver;
                             Ok driver)))))
 
@@ -1217,8 +1198,6 @@ let shutdown t =
      preserving "returns once every driver is quiescent." *)
   Eio.Fiber.all (List.map (fun driver () -> Driver.close driver) drivers);
   Hashtbl.reset t.drivers;
-  Hashtbl.iter (fun _ unmount -> unmount ()) t.mounts;
-  Hashtbl.reset t.mounts;
   (* Feeds hold their hub directly, so resetting the registry strands nothing:
      a still-open feed keeps serving its now-detached hub until switch teardown
      closes it, and that late close finds no registry entry to release. *)
