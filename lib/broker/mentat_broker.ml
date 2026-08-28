@@ -863,8 +863,9 @@ and foreign_watch t entry =
       | `Held_self -> (
           match entry.shape with
           | Delegated _ ->
-              (* An in-process driver took the child over (a message delivery
-                 attached it); its own hooks integrate from here. *)
+              (* This process itself holds the child's fence — a driver it
+                 hosts is the materialization; its own hooks integrate from
+                 here. *)
               Hashtbl.remove t.entries (key entry.child);
               `Done
           | Root _ ->

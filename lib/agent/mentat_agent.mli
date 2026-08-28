@@ -139,13 +139,13 @@ val create :
     ({!Mentat_broker.Engine.t}) — the workspace identity a child is spawned
     and dialed under, and the wrappers every brokered observation reports
     through; the composition that owns both halves builds it. Every recorded
-    parent-to-child message for a child this runtime does not itself drive
-    is sent through the broker ({!Mentat_broker.send}), one delegation
-    edge's messages delivered in receipt order — durable in the child's
-    journal or loudly undelivered, re-driven from the durable receipt at the
-    next attach or the observed child exit; sending never wakes the child, a
-    follow-up's wake is the separate materialization act. A recorded message
-    to the session's own parent rides the same lanes with no wake at all.
+    message is sent through the broker ({!Mentat_broker.send}) — the one
+    delivery road — one delegation edge's messages delivered in receipt
+    order, durable in the target's journal or loudly undelivered, re-driven
+    from the durable receipt at the next attach or the observed child exit;
+    sending never wakes the child, a follow-up's wake is the separate
+    materialization act. A recorded message to the session's own parent
+    rides the same lanes with no wake at all.
 
     [serve_mount] is transitional, dying with the in-process drivers it
     exists for: applied at each driver registration, it may open the driven

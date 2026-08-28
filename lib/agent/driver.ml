@@ -118,9 +118,6 @@ type msg =
       * (Mentat_mutation.Revert.Outcome.t, Mentat_protocol.Error.t) result
         Eio.Promise.u
   | Export of (string, Mentat_protocol.Error.t) result Eio.Promise.u
-  | Enqueue of
-      Mentat_session.Queue.Entry.t
-      * (unit, Mentat_protocol.Error.t) result Eio.Promise.u
   | Stop
 
 (* The worker's yield: the effect's raw runtime outcome. *)
@@ -1133,50 +1130,6 @@ and handle_any t msg ~mid_effect =
   | Revert (scope, ack) -> revert_flow t ~scope ~ack
   | Undo_op (op, ack) -> undo_flow t ~op ~ack
   | Export ack -> export_flow t ~ack
-  | Enqueue (entry, ack) -> (
-      let resolve r = Eio.Promise.resolve ack r in
-      match t.phase with
-      | Faulted e -> resolve (Error (unavailable e))
-      | _ -> (
-          let id = Mentat_session.Queue.Entry.id entry in
-          let delivered =
-            (* A consumed entry's [Enqueued] fact still proves delivery: the
-               session fold keeps the receipt past consumption. *)
-            Mentat_session.State.enqueue_recorded id
-              (Mentat_session.state t.session)
-          in
-          if delivered then resolve (Ok ())
-          else
-            (* The same admit judgment as the wire and fence-held arms — the
-               in-process arm must not be the one admission a full mailbox or
-               an unadmitted sender can slip through. *)
-            match
-              Mentat_session.admits_mail
-                ~origin:(Mentat_session.Queue.Entry.origin entry)
-                t.session
-            with
-            | `Refused_sender ->
-                resolve
-                  (Error
-                     (Mentat_protocol.Error.unavailable
-                        (Printf.sprintf
-                           "session %s does not accept this sender's mail"
-                           (Mentat_session.Id.to_string t.io.session_id))))
-            | `Refused_backlog ->
-                resolve
-                  (Error
-                     (Mentat_protocol.Error.unavailable
-                        (Printf.sprintf
-                           "session %s's mailbox is full for this sender \
-                            (backlog cap %d)"
-                           (Mentat_session.Id.to_string t.io.session_id)
-                           Mentat_session.mail_backlog_cap)))
-            | `Admitted ->
-                journal_commit t ~ack:resolve
-                  [
-                    Mentat_session.Event.queue_updated
-                      (Mentat_session.Queue.Update.enqueued entry);
-                  ]))
   | Stop -> (
       t.stopping <- true;
       if not mid_effect then
@@ -1226,7 +1179,7 @@ and handle_command t command ~mid_effect ~ack =
                    (Mentat_session.state t.session) ->
               (* A consumed entry's [Enqueued] fact still proves delivery: a
                  client-minted id makes the at-least-once resubmission
-                 idempotent, exactly as the in-process enqueue op's dedup. *)
+                 idempotent. *)
               ack (Ok ())
           | Some _ | None -> (
               (* The admit judgment, after the dedup exactly as the broker's
@@ -1788,8 +1741,7 @@ let drain_mailbox t =
         (match msg with
         | Command (_, resolver)
         | Unattended (_, resolver)
-        | Commit_metadata (_, resolver)
-        | Enqueue (_, resolver) ->
+        | Commit_metadata (_, resolver) ->
             refuse resolver
         | Fork (_, resolver) | Rewind (_, _, resolver) ->
             Eio.Promise.resolve resolver (Error Error.Shutting_down)
@@ -1945,11 +1897,6 @@ let answer_unattended t ~decision =
     (fun resolver -> Unattended (decision, resolver))
 
 let deliver t = post t Deliver
-
-let enqueue t entry =
-  ask t
-    ~when_stopping:(Error (unavailable Error.Shutting_down))
-    (fun resolver -> Enqueue (entry, resolver))
 
 let fork t ~id =
   ask t ~when_stopping:(Error Error.Shutting_down) (fun resolver ->

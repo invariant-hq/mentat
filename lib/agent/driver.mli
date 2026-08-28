@@ -249,17 +249,6 @@ val deliver : t -> unit
 (** [deliver t] pokes the driver's drain: a named child settled, so a parked
     wait may now be answerable. Non-blocking; idempotent. *)
 
-val enqueue :
-  t -> Mentat_session.Queue.Entry.t -> (unit, Mentat_protocol.Error.t) result
-(** [enqueue t entry] appends the caller-minted [entry] to the driven session's
-    next-turn queue, returning after durable admission — the message-delivery
-    path, which derives [entry]'s id from the recording turn and call.
-    Idempotent on that id: an id whose [Enqueued] fact is already in the journal
-    (pending or consumed) is [Ok ()] without a second fact; the session's own
-    [Queue.Duplicate] rejection backstops only the still-pending window, because
-    queue-id uniqueness is a property of the resulting queue, not of an id's
-    whole history. *)
-
 val answer_unattended :
   t ->
   decision:Mentat_session.Decision.Id.t ->

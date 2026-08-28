@@ -676,17 +676,15 @@ and drain_lane t lane =
               (Printexc.to_string exn));
         drain_lane t lane
 
-(* One message's delivery. A target this runtime drives takes the local arm:
-   the entry crosses its driver's enqueue op, which runs the same admit
-   judgment and dedup as every other admission (a consumed entry's fact
-   persists). This arm is transitional — it exists while in-process drivers
-   exist. Everything else is the broker's send: durable in the target's
-   journal, or a loud undelivered answer the durable receipt re-drives — at
-   the sender's next attach, or the observed child exit for a downward
-   message. Sending never wakes: a [`Follow_up] additionally wakes the
-   child — send then wake, two acts — while a [`Context] entry waits for
-   whatever next runs the target; a child holds no wake authority over its
-   parent at all. *)
+(* One message's delivery: the broker's send, the one road — durable in the
+   target's journal, or a loud undelivered answer the durable receipt
+   re-drives — at the sender's next attach, or the observed child exit for a
+   downward message. The target is always another process's session: a
+   parent is its own agent behind its own socket, a child is the broker's to
+   run. Sending never wakes: a [`Follow_up] additionally wakes the child —
+   send then wake, two acts — while a [`Context] entry waits for whatever
+   next runs the target; a child holds no wake authority over its parent at
+   all. *)
 and deliver_one t lane (message : Mentat_agent_step.Step.Mail.t) =
   let target_session = lane_session lane in
   let id = Mentat_session.Queue.Id.of_string (derived_message_id message) in
@@ -694,46 +692,27 @@ and deliver_one t lane (message : Mentat_agent_step.Step.Mail.t) =
     [ Mentat_llm.Content.text message.Mentat_agent_step.Step.Mail.message ]
   in
   let origin = Mentat_session.Origin.agent lane.sender in
-  let undelivered reason =
-    (* The receipt already promised delivery: the sender's next attach — or,
-       for a downward message, the observed child exit — re-drives the same
-       derived id. *)
-    Eio.traceln "mentat: message to %s undelivered: %s"
-      (Mentat_session.Id.to_string target_session)
-      reason
-  in
-  let enqueue_local driver =
-    match
-      Driver.enqueue driver
-        (Mentat_session.Queue.Entry.make ~origin ~id ~input ())
-    with
-    | Ok () -> ()
-    | Error e ->
-        undelivered (Format.asprintf "%a" Mentat_protocol.Error.pp e)
-  in
-  (match find_driver t target_session with
-  | Some driver -> enqueue_local driver
-  | None -> (
-      match
-        Mentat_broker.send t.broker ~origin ~target:target_session ~id ~input
-          ()
-      with
-      | `Delivered -> ()
-      | `Undelivered reason -> (
-          match find_driver t target_session with
-          | Some driver ->
-              (* A driver attached mid-send — its own fence is what spent the
-                 budget — so the local arm is the delivery now. *)
-              enqueue_local driver
-          | None -> undelivered reason)));
+  (match
+     Mentat_broker.send t.broker ~origin ~target:target_session ~id ~input ()
+   with
+  | `Delivered -> ()
+  | `Undelivered reason ->
+      (* The receipt already promised delivery: the sender's next attach —
+         or, for a downward message, the observed child exit — re-drives the
+         same derived id. *)
+      Eio.traceln "mentat: message to %s undelivered: %s"
+        (Mentat_session.Id.to_string target_session)
+        reason);
   match (message.Mentat_agent_step.Step.Mail.kind, lane.target) with
   | `Follow_up, To_child edge -> wake_child t edge
   | `Follow_up, To_parent _ | `Context, _ -> ()
 
 (* The wake half of a follow-up: make the child run so it consumes the mail.
    Materialization is the wake — the broker's unfinished-work probe sees the
-   queued mail. A child this runtime drives needs no wake: its driver's own
-   idle boundary consumes the entry the delivery enqueued. *)
+   queued mail. The guard is the materialization law above: a child whose
+   driver this process still holds is never handed to the broker — a second
+   process racing that fence could only lose, and the driver's own idle
+   boundary consumes durable mail. *)
 and wake_child t edge =
   let child = Mentat_session.Delegation.child edge in
   if Option.is_none (find_driver t child) then

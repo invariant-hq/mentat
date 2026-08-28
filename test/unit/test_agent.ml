@@ -672,14 +672,35 @@ let mk_engine ~sw ~store ?(script = default_script) ?(config = default_config)
   in
   (* The mocked broker seam: the unit tier runs over the fake store, so a
      send's real fence-and-append effects have nowhere to land — the default
-     stub answers [`Delivered], materializes locally, and a test that cares
-     injects its own recording stubs. *)
+     stub plays the target's own server folded into this one runtime, the
+     same fold as [local_materialize]: the entry crosses the engine's client
+     cone as the queue command the wire carries, landing the driver's dedup
+     and admit judgment. A test that cares injects its own recording
+     stubs. *)
   let broker =
     match broker with
     | Some broker -> broker
     | None ->
         Mentat_broker.for_tests
-          ~send:(fun ~origin:_ ~target:_ ~id:_ ~input:_ -> `Delivered)
+          ~send:(fun ~origin ~target ~id ~input ->
+            match !engine_cell with
+            | None -> `Undelivered "the engine is not built yet"
+            | Some engine -> (
+                match
+                  Protocol.Command.queue_next ~id ?origin ~session:target
+                    ~input ()
+                with
+                | Error invalid ->
+                    `Undelivered (Protocol.Command.Invalid.message invalid)
+                | Ok command -> (
+                    match
+                      (Agent.driver engine).Client.Driver.Session.submit
+                        command
+                    with
+                    | Ok () -> `Delivered
+                    | Error e ->
+                        `Undelivered
+                          (Format.asprintf "%a" Protocol.Error.pp e))))
           ~materialize:(Option.value materialize ~default:local_materialize)
           ()
   in
@@ -5149,10 +5170,10 @@ let message_script ~verbs =
   end
   else Ok (plain_response "CHILD_SEEN")
 
-(* A message for a child this runtime does not drive is one broker send with
-   the derived queue id and the parent's agent origin — never an in-process
-   attach, never a prompt. The recording stub plays the broker and answers
-   [`Delivered], so the child journal must stay untouched by this process.
+(* A message for a child is one broker send with the derived queue id and
+   the parent's agent origin — never a local enqueue, never a prompt. The
+   recording stub plays the broker and answers [`Delivered], so the child
+   journal must stay untouched by this process.
    The [`Follow_up] additionally wakes the child through the broker's
    materialization — send then wake, two acts — while the [`Context] sends
    without waking. *)
