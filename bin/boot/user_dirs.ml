@@ -59,6 +59,7 @@ let config_file t = Filename.concat t.config_home "config.json"
 let auth_file t = Filename.concat t.config_home "auth.json"
 let trust_file t = Filename.concat t.config_home "trust.json"
 let daemon_dir t = Filename.concat t.data_home "daemon"
+let github_app_dir t = Filename.concat t.config_home "github-app"
 let routines_dir t = Filename.concat t.config_home "routines"
 let routine_dir t name = Filename.concat (routines_dir t) name
 

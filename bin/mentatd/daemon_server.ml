@@ -154,7 +154,7 @@ let max_idle_seconds environment =
    costs one read per idle window; a daemon with no routines keeps
    the backstop. *)
 let routine_resident dirs () =
-  match Routine_store.ingress_index dirs with
+  match Routine_store.roster dirs with
   | Error e ->
       (* An unreadable roster must fail safe for a stop decision: stopping
          a daemon that may hold an enabled webhook routine bounces every
@@ -162,10 +162,20 @@ let routine_resident dirs () =
       Eio.traceln "mentatd: idle stop deferred, the roster is unreadable: %s"
         (Routine_store.Error.message e);
       true
-  | Ok (bindings, _failures) ->
+  | Ok entries ->
+      (* The commission is the enabled webhook arm itself, not a per-routine
+         ingress binding: an App routine binds no id of its own — its
+         deliveries arrive on the App's — and must pin residency all the
+         same. *)
       List.exists
-        (fun (b : Routine_store.Binding.t) -> b.Routine_store.Binding.enabled)
-        bindings
+        (fun (_, result) ->
+          match result with
+          | Error _ -> false
+          | Ok (loaded : Routine_store.Loaded.t) ->
+              let routine = loaded.Routine_store.Loaded.routine in
+              routine.Mentat_routine.Routine.enabled
+              && Option.is_some (Mentat_routine.Routine.webhook_arm routine))
+        entries
 
 (* [active] counts the daemon's held connections — the web frontend's open
    feed streams; the sessions' agents account for their own. *)

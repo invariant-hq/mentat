@@ -23,7 +23,12 @@ module Github = struct
 end
 
 module Repo = struct
-  type t = { git_url : string; github : Github.t }
+  type t = {
+    git_url : string;
+    github : Github.t;
+    git_token : unit -> (string option, string) result;
+    write_token : unit -> (string option, string) result;
+  }
 end
 
 type env = {
@@ -154,9 +159,6 @@ let read_receipts env ~name =
 
 let receipt_now ~identity ~digest kind =
   { Receipt.at = now (); identity; digest; kind }
-
-let read_secret loaded ~file =
-  Result.map_error store_error (Routine_store.read_secret loaded ~file)
 
 (* One resident process speaks for many routines, so a routine-scoped line
    carries the routine's name as its provenance. *)
@@ -345,15 +347,16 @@ let diff_rel_of_session session = Printf.sprintf ".mentat-review-%s.patch" sessi
    dotfile already present is not a fault: the run root is keyed on the
    derived session, so an occupied slot means another pass committed this
    identity first — the racing-adopter loser's benign collision. *)
-let provision env (loaded : Routine_store.Loaded.t) ~git_url
+let provision env (loaded : Routine_store.Loaded.t) ~(repo : Repo.t)
     ~(event : Event.Pull_request.t) ~session ~run_root ~wall_clock =
   let name = loaded.Routine_store.Loaded.name in
+  let git_url = repo.Repo.git_url in
   let* () = Fs.mkdir_p run_root in
   let hooks_dir =
     Filename.concat (User_dirs.routine_state_dir env.dirs name) "empty-hooks"
   in
   let* () = Fs.mkdir_p hooks_dir in
-  let* token = read_secret loaded ~file:"read-token" in
+  let* token = repo.Repo.git_token () in
   let* git = resolve_git env in
   let genv = git_environment env ~git_url ~hooks_dir ~token in
   let timeout_s = Float.min wall_clock provision_timeout_s in
@@ -662,11 +665,15 @@ let publish env ~(repo : Repo.t) (loaded : Routine_store.Loaded.t)
     append_receipt env ~name
       (receipt_now ~identity ~digest (Receipt.Kind.Egress { summary; threads }))
   in
-  let* write_token = read_secret loaded ~file:"write-token" in
+  let* write_token =
+    Result.map_error
+      (fun e -> Printf.sprintf "write credential: %s" e)
+      (repo.Repo.write_token ())
+  in
   match write_token with
   | None ->
       let* () = egress `Skipped_no_token 0 in
-      env.say "publish skipped: no write token";
+      env.say "publish skipped: no write credential";
       Ok ()
   | Some token -> (
       let* posted =
@@ -926,8 +933,8 @@ let commit env ~(repo : Repo.t) (loaded : Routine_store.Loaded.t)
                     (fun e ->
                       match refuse (Printf.sprintf "checkout: %s" (excerpt e)) with
                       | Ok _ | Error _ -> e)
-                    (provision env loaded ~git_url:repo.Repo.git_url ~event
-                       ~session ~run_root ~wall_clock)
+                    (provision env loaded ~repo ~event ~session ~run_root
+                       ~wall_clock)
                 in
                 match provisioned with
                 | `Superseded ->

@@ -124,7 +124,7 @@ any receipt — the pipeline cannot gate what it cannot observe.
 
   $ rm "$CDIR/secrets/read-token"
   $ mentatd routine fire pr-review --event event-fresh.json 2>&1 | censor
-  mentat: fire needs the GitHub read credential at $TESTCASE_ROOT/config/mentat/routines/pr-review/secrets/read-token (a fine-grained PAT with read access to acme/widgets)
+  mentat: routine pr-review has no GitHub credential: install the App (`mentatd github setup`) or write $TESTCASE_ROOT/config/mentat/routines/pr-review/secrets/read-token
   [1]
 
 A routine without a cli trigger arm does not admit hand fires at all; one

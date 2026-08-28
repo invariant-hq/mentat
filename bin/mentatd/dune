@@ -4,6 +4,8 @@
  (package mentat)
  (flags (:standard -open Mentat_boot))
  (modules
+  github_auth
+  github_cli
   routine_cli
   routine_dashboard
   routine_reconcile
@@ -26,4 +28,5 @@
   mentat_server
   mentat_session
   mentat_store
-  mentat_web))
+  mentat_web
+  uri))

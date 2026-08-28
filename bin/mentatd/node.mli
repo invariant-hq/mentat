@@ -81,14 +81,14 @@ val reconcile_env : t -> Routine_fire.env
     with the routine it concerns itself, exactly as {!val-env} would. *)
 
 val repo : t -> Routine_store.Loaded.t -> (Routine_fire.Repo.t, string) result
-(** [repo t loaded] is the per-fire connection to [loaded]'s repository:
-    the injected GitHub reads over a client holding the routine's read
-    credential, and the fetch remote. Built fresh per fire — the credential
-    is re-read from the routine's [secrets/read-token] on every call, so a
-    rotated token is in force at the next event; nothing here retains a
-    returned value, and no caller may either. [Error message] when the
-    routine holds no read credential or the client cannot be
-    constructed. *)
+(** [repo t loaded] is the per-fire connection to [loaded]'s repository —
+    {!Github_auth.repo} over the node's validated API base and derived
+    remote: the injected reads and credential closures for whichever auth
+    mode the routine's files select (PAT files winning, else the
+    owner-level App, else the refusal naming both exits). Built fresh per
+    fire — credentials are re-read or re-minted on every call, so a
+    rotated token or replaced key is in force at the next event; nothing
+    here retains a returned value, and no caller may either. *)
 
 val ingress : t -> Mentat_server.Ingress.t
 (** [ingress t] is the webhook ingress the wire family routes through. Its
@@ -98,7 +98,17 @@ val ingress : t -> Mentat_server.Ingress.t
     the dashboard and the reconcile beat name it — while [deliver] re-loads
     the addressed routine, routes the verified body ({!event_route}),
     admits the delivery, and hands the admitted event to the pump's queue,
-    per the module's 202 contract. A recognizable ping, or a foreign-kind
+    per the module's 202 contract. Beside the per-routine ids the resolver
+    scans one more source: the App's own ingress id, answering the App's
+    webhook secret with enabled true while the credential home loads. A
+    delivery on that id is routed {e after} verification by its payload's
+    repository ({!app_route}) to every App-mode webhook routine watching
+    it, each receipted before the 202 — N3 per routine, any receipt
+    failure the same 500 — and a repository no App routine watches is a
+    trace note and a 202, the owner having installed the App more widely
+    than they routine. PAT routines are excluded from App routing: they
+    have their own id and repo webhook, and routing both would receipt one
+    arrival twice. A recognizable ping, or a foreign-kind
     body under a foreign-kind header, is answered [202] and noted in the
     trace log only — the receipt log speaks routine facts; a body the
     narrow decode refuses under a pull-request-claiming or absent header is
@@ -156,6 +166,19 @@ val event_route :
     non-pull-request kind the refusing body is consistent with; and
     [`Malformed reason] — a refusal — when the header claimed
     [pull_request] or was absent. *)
+
+val app_route :
+  Routine_store.Loaded.t list ->
+  app_mode:(Routine_store.Loaded.t -> bool) ->
+  repo:string ->
+  Routine_store.Loaded.t list
+(** [app_route loadeds ~app_mode ~repo] is the routines a verified App
+    delivery for [repo] selects: the webhook-armed routines watching
+    [repo] that [app_mode] admits, in roster order. The predicate is
+    injected so the fold stays pure; the caller passes the mode selector's
+    App half (no PAT files, under a loaded credential home). Routines
+    without a webhook arm never match — a delivery is webhook material,
+    whatever else the routine admits. *)
 
 val checkout_url : git_base:string option -> repo:string -> string
 (** [checkout_url ~git_base ~repo] is the remote a routine watching [repo]

@@ -56,15 +56,22 @@
     disposition is written, with whatever cost the journal holds, before
     returning.
 
-    GitHub reads are injected as closures ({!Github.t}) inside a per-fire
-    {!Repo.t}, so this module takes no HTTP dependency: the caller
-    constructs them over whatever client it links, holding the read
-    credential. The write credential never enters this process at all —
-    publication rides two short-lived children of the [mentat] binary, the
-    tokenless renderer ([github review]) and the poster ([github publish]),
-    and the write token is read from the routine's [secrets/write-token]
-    into the poster child's environment only. An absent write token skips
-    publication and says so in the egress receipt; it never fails the run.
+    GitHub reads and credentials are injected as closures inside a per-fire
+    {!Repo.t}, so this module takes no HTTP dependency and never chooses an
+    auth mode: the caller constructs the reads over whatever client it
+    links, and the two credential closures answer from wherever the
+    routine's mode says — a PAT routine's [secrets/] files, or an App
+    routine's per-fire installation-token mints. The write credential is
+    obtained only at publish time and rides no further than the poster
+    child — publication is two short-lived children of the [mentat]
+    binary, the tokenless renderer ([github review]) and the poster
+    ([github publish]), and the write credential enters the poster child's
+    environment only. A write closure answering [None] (a PAT routine with
+    no [secrets/write-token]) skips publication and says so in the egress
+    receipt; it never fails the run. A write closure answering [Error] (an
+    App mint refused) is a machinery failure like a refused post: the
+    receipt is owed no egress line, so the sweep's publisher re-entry
+    re-mints and retries, spending nothing.
 
     Checkout provisioning invokes [git] directly, hardened on every
     invocation: no system or global configuration, no terminal prompt, an
@@ -119,9 +126,23 @@ module Repo : sig
             from the routine's validated repository (or an explicit
             override), never from a payload. *)
     github : Github.t;  (** The injected GitHub reads. *)
+    git_token : unit -> (string option, string) result;
+        (** The credential the checkout's git fetch rides — per-invocation
+            environment-scoped configuration, never argv and never a URL.
+            The PAT arm re-reads [secrets/read-token]; the App arm answers
+            the fire's read mint. [Ok None] fetches unauthenticated (a
+            local fixture remote). *)
+    write_token : unit -> (string option, string) result;
+        (** The publish-time write credential, called only when a
+            publication is owed and handed to the poster child's
+            environment alone. The PAT arm reads [secrets/write-token]
+            ([Ok None] when absent — publication is skipped and receipted
+            so); the App arm mints a fresh write-scoped installation token,
+            and a refused mint is [Error] — no egress line lands, so the
+            sweep re-enters the publisher. *)
   }
   (** The type for per-fire connections. Deliberately not part of
-      {!type-env}: the closures hold the read credential and the URL
+      {!type-env}: the closures hold or mint the credentials and the URL
       encodes the watched repository, and the store's law is that an
       owner's edit is in force at the next event — so a resident node must
       rebuild this value per delivery, never hold one per routine. The

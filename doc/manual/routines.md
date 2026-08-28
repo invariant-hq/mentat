@@ -20,9 +20,8 @@ credential.
 ## What a routine is
 
 A routine is a directory holding a `routine.json`, the prompt file it names,
-the findings-schema file it names, and a `secrets/` directory for its
-credentials. This example carries every commonly-set member; it installs
-as-is:
+and the findings-schema file it names. This example carries every
+commonly-set member; it installs as-is:
 
 ```json
 { "routine": 1, "name": "pr-review",
@@ -74,35 +73,66 @@ Installed routines live under `~/.config/mentat/routines/<name>`, their
 receipt logs under `~/.local/state/mentat/routines/<name>`, and each run's
 ephemeral checkout under `~/.cache/mentat/routines/<name>/runs`.
 
-## The two credentials
+## Connecting to GitHub: your own App
 
-A routine reads and writes GitHub with two fine-grained personal access
-tokens, each a plain file under the routine directory's `secrets/`:
+Routines authenticate to GitHub through a GitHub App you own — created
+once, serving every routine. One verb creates it:
 
-| File | Used for | Repository permissions |
-| --- | --- | --- |
-| `secrets/read-token` | The git fetch of the base branch and the pull request head, and three API reads: the pull request's current head, the open-PR listing, and the comments already posted. | Contents: read, Pull requests: read (plus the Metadata: read every fine-grained token carries). |
-| `secrets/write-token` | Posting and patching the review comments — nothing else. | Pull requests: write. |
+```sh
+mentatd github setup
+```
 
-Create both tokens from the same account: the publisher decides which
-existing comments are its own by the read credential's login, so a read and
-a write token from different accounts would stack comments instead of
-converging. Scope each token to the one repository the routine watches.
+The browser opens on GitHub's own "Create GitHub App" page, pre-filled: a
+generated name (App names are global on GitHub, so the pre-fill carries a
+random suffix — edit it in place if you prefer; if the name is taken,
+GitHub's page says so), the three permissions the pipeline needs (Contents:
+read, Pull requests: write, Metadata: read), and the `pull_request` event.
+One click on **Create GitHub App**, and the verb finishes: GitHub redirects
+back with a one-time code, mentat exchanges it, and the App's credentials —
+its identity, its private key, its webhook secret — land in
+`~/.config/mentat/github-app`, owner-only files written atomically. (The
+client secret GitHub also returns is deliberately discarded: nothing here
+performs user OAuth, and an unused credential on disk is pure liability.)
 
-Write each file with a trailing newline or without — surrounding whitespace
-is trimmed — and keep it owner-only: `chmod 600`. A routine directory or
-secret readable by group or world is refused at load, the way sshd refuses
-a loose key.
+Then install the App on the repositories your routines watch — the verb
+prints the link (`https://github.com/apps/<name>/installations/new`);
+GitHub's own page, one more click, one repository or all of them. That is
+the whole journey:
 
-The write token is optional. Without it, reviews still run and the receipt
-records that publication was skipped — useful while you trial a routine
-before letting it comment.
+```sh
+mentatd routine add ./pr-review
+```
 
-Consider a dedicated machine account. Both tokens minted by your own account
-make every review comment appear as you, personally. A separate account
-(invited to the repository with read access, plus the token permissions
-above) keeps the reviews clearly attributed to the automation, and its
-tokens revocable without touching your own.
+No token minted, no secret pasted, no webhook configured on the repository.
+Reviews post as `<name>[bot]` — attributed to the automation, revocable in
+one place (the App's GitHub settings page) without touching anyone's
+personal tokens — and every credential the pipeline actually uses is a
+short-lived installation token minted per fire, scoped to the one
+repository the routine watches: the read-scoped token feeds the fetch and
+the API reads, a write-scoped token exists only for the seconds a
+publication takes, and nothing expires on a calendar you have to remember.
+
+`mentatd github status` is the pre-flight doctor: locally, that the
+credential home is present, complete, and private, and which auth mode each
+routine is in; over the network, that the App still exists and the stored
+key still signs, that the webhook configuration matches your local files,
+and that each routine's repository is covered by an installation — with the
+install link printed when one is not. Run it when anything looks wrong.
+
+Adding a second repository later: if the App was installed on all
+repositories, `mentatd routine add ./other-review` is the entire journey;
+if per-repository, one click on the same installations page first.
+
+Setup wants a browser on the machine. On a headless box, run `mentatd
+github setup` wherever a browser lives and copy `~/.config/mentat/github-app`
+over — provisioning is files. For GitHub Enterprise hosts, pass
+`--github-base-url`; the base is recorded with the App, and a node
+configured for a different host refuses the credentials loudly rather than
+sending them to the wrong place.
+
+There is no `github remove`: the credential home is files, so removal is
+`rm -r ~/.config/mentat/github-app` — and the App itself is deleted from
+its GitHub settings page (no API deletes an App).
 
 ## Installing
 
@@ -111,47 +141,40 @@ mentatd routine add ./pr-review
 ```
 
 `add` validates the directory (or a path to its `routine.json`) and installs
-it under its own name, printing the routine's policy digest and — for a
-webhook routine, on first install — the two pieces of webhook identity it
-mints: the ingress URL path (`/ingress/github/` followed by a random
-32-character token) and the HMAC secret at `secrets/webhook`. Re-adding
-after an edit replaces the policy files and keeps the identity, so your
-edits never move the webhook URL; editing the installed directory in place
-works too, since the files themselves are the registration. A proposal you
-install from must not carry `secrets/` or `ingress.id` — secrets never ride
-a proposal, and identity is minted at install.
+it under its own name, printing the routine's policy digest and its auth
+mode — which App it posts through, or that it runs on personal access
+tokens (the [fallback](#fallback-personal-access-tokens) below), or that
+neither is set up yet. Editing the installed directory in place works too,
+since the files themselves are the registration; re-adding after an edit
+replaces the policy files. A proposal you install from must not carry
+`secrets/` — secrets never ride a proposal.
 
 The policy digest identifies what the three policy files say. Editing any of
 them moves it, which resets the budget windows and re-admits every open
 head — the deliberate re-review path.
 
-`mentatd routine rotate-secret NAME` re-mints the webhook HMAC secret in
-place; the URL never moves. The old secret stops verifying the moment the
-verb returns, so set the new one on the GitHub hook immediately — deliveries
-signed with the old secret answer 401 until you do, and the sweep converges
-whatever the gap missed. `mentatd routine remove NAME` deletes the
-configuration, secrets and webhook identity included (a later re-add mints a
-fresh URL), and deliberately keeps the receipts: they are the audit trail.
+`mentatd routine remove NAME` deletes the routine's configuration and
+deliberately keeps the receipts: they are the audit trail.
 
 ## Running it with a crontab line
 
 The smallest complete deployment is one crontab line — nothing resident, no
-tunnel, no inbound URL. `mentatd` here is a one-shot command: it runs the
-pipeline in the invoking process and exits.
+tunnel, no inbound URL, no webhook. `mentatd` here is a one-shot command: it
+runs the pipeline in the invoking process and exits.
 
 ```
 */15 * * * * /usr/local/bin/mentatd routine fire pr-review --sweep >>"$HOME/pr-review.log" 2>&1
 ```
 
-`fire --sweep` lists the repository's open pull requests once with the read
-token, then drives every head that has not been reviewed under the current
-policy through the full pipeline: gate, budget fences, hardened checkout,
-the sealed review run, publication, receipts. The record makes the line
-idempotent: a head already reviewed stays silent, a fresh push is a new head
-and is reviewed, a draft is skipped until it goes ready, a fenced head
-re-enters when its budget window frees, and a pass that finds an interrupted
-run or an unfinished publication from an earlier pass settles or finishes
-it — publication re-entry spends nothing and mints no run. Use the routine
+`fire --sweep` lists the repository's open pull requests once, then drives
+every head that has not been reviewed under the current policy through the
+full pipeline: gate, budget fences, hardened checkout, the sealed review
+run, publication, receipts. The record makes the line idempotent: a head
+already reviewed stays silent, a fresh push is a new head and is reviewed, a
+draft is skipped until it goes ready, a fenced head re-enters when its
+budget window frees, and a pass that finds an interrupted run or an
+unfinished publication from an earlier pass settles or finishes it —
+publication re-entry spends nothing and mints no run. Use the routine
 above as-is: `--sweep` replays webhook-shaped deliveries, so the routine
 needs its `github_webhook` arm for the events and its `cli` arm for the
 by-hand invocation.
@@ -188,24 +211,29 @@ store, the logs, or any running child.
 `--ingress-port` binds a loopback listener that answers only the
 `POST /ingress/github/…` family. Every delivery is authenticated end-to-end
 by its HMAC signature, so any tunnel you already trust can point at it —
-expose the port through the tunnel of your choosing and use its public
-hostname in the webhook settings. Then, in the repository's **Settings →
-Webhooks → Add webhook**:
+expose the port through the tunnel of your choosing, then route the App's
+one webhook at its public hostname:
 
-- **Payload URL**: your tunnel's public address followed by the routine's
-  printed path, `https://<your-host>/ingress/github/<token>`;
-- **Content type**: `application/json` — the signature covers the raw JSON
-  body, and a form-encoded payload is refused;
-- **Secret**: the contents of the routine's `secrets/webhook`;
-- **Events**: "Let me select individual events", then **Pull requests**
-  only.
+```sh
+mentatd github repoint https://hooks.example.com
+```
 
-GitHub sends a ping on creation; the ingress answers it 202 and records
-nothing, so a 202 under the hook's Recent Deliveries is your end-to-end
-check. A delivery with a bad signature is a content-free 401. Routines
-register by file: one installed or edited while the daemon runs is in force
-at the next event, with no restart, and a daemon holding at least one
-enabled webhook routine never stops itself as idle.
+That single verb points deliveries for *every* installed repository at your
+node — the App has one webhook, and its configuration on GitHub is a
+projection of your local files, so re-running the verb after a failure or a
+tunnel move converges. Until you repoint, the webhook targets an unroutable
+placeholder: undelivered pings show as red lines in the App's delivery log
+on GitHub and nothing else, and the reconcile sweep keeps reviews flowing
+without a webhook at all.
+
+`mentatd github rotate-secret` re-mints the webhook's HMAC secret and
+updates GitHub in the same motion — the one-verb rotation for every
+routine's deliveries at once. Deliveries signed with the old secret answer
+401 until the update lands, and the sweep covers whatever the gap misses.
+
+Routines register by file: one installed or edited while the daemon runs is
+in force at the next event, with no restart, and a daemon holding at least
+one enabled webhook routine never stops itself as idle.
 
 Be honest with yourself about residency: the machine must stay up and the
 tunnel must stay pointed, because GitHub does not redeliver on its own. What
@@ -237,9 +265,10 @@ recorded in `daemon.json`, never printed to the service log. Running
 verbs below are the status surface either way.
 
 ```sh
-mentatd routine list          # roster: name, digest, state, last disposition
-mentatd routine status        # per routine: budgets against their windows, last receipt
+mentatd routine list          # roster: name, digest, state, auth mode, last disposition
+mentatd routine status        # per routine: auth, budgets against their windows, last receipt
 mentatd routine runs NAME     # the disposition receipts, one line per decision
+mentatd github status         # the App doctor: credentials, hook, installations
 ```
 
 Every decision is a receipt line in
@@ -279,12 +308,80 @@ transports closed — so fetching a hostile branch executes nothing from it.
 The run child then works in that checkout under mode `review` with an
 enforced read-only sandbox, and refuses to start if the sandbox cannot be
 enforced; the diff and the files it touches are handed to the model as
-material under review, never as instructions. The read token reaches git
-per-invocation and never appears on a command line; the write token never
-enters the run at all — it is read only for the short-lived publish step
-after the run has ended, and a checkout layout that would place any secret
-under the run's readable roots is refused before spawning. Ambient
-`GITHUB_TOKEN` and `GH_TOKEN` variables are stripped from every child.
+material under review, never as instructions. The read credential reaches
+git per-invocation and never appears on a command line; the write
+credential never enters the run at all — in App mode it is minted only for
+the short-lived publish step after the run has ended, and in PAT mode the
+token file is read only then. The App's private key never enters any child
+process, any command line, or any file outside the credential home; only
+minted tokens flow. A checkout layout that would place any secret under the
+run's readable roots is refused before spawning, and ambient `GITHUB_TOKEN`
+and `GH_TOKEN` variables are stripped from every child.
+
+## Fallback: personal access tokens
+
+An owner who cannot create an App (organization policy), watches a
+non-GitHub forge, or simply prefers tokens can run any routine on two
+fine-grained personal access tokens instead. Write them as plain files
+under the routine directory's `secrets/`, and that routine is a PAT
+routine — the presence of either file decides the mode, per routine, and
+every roster surface (`add`, `list`, `status`, the doctor) names which mode
+each routine is in:
+
+| File | Used for | Repository permissions |
+| --- | --- | --- |
+| `secrets/read-token` | The git fetch of the base branch and the pull request head, and three API reads: the pull request's current head, the open-PR listing, and the comments already posted. | Contents: read, Pull requests: read (plus the Metadata: read every fine-grained token carries). |
+| `secrets/write-token` | Posting and patching the review comments — nothing else. | Pull requests: write. |
+
+Create both tokens from the same account: the publisher decides which
+existing comments are its own by the posting identity, so a read and a
+write token from different accounts would stack comments instead of
+converging. Scope each token to the one repository the routine watches, and
+mind the expiry date GitHub imposes on fine-grained tokens — re-minting
+them on time is yours to remember in this mode.
+
+Write each file with a trailing newline or without — surrounding whitespace
+is trimmed — and keep it owner-only: `chmod 600`. A routine directory or
+secret readable by group or world is refused at load, the way sshd refuses
+a loose key. The write token is optional: without it, reviews still run and
+the receipt records that publication was skipped — useful while you trial a
+routine before letting it comment.
+
+A PAT routine carries its own webhook identity, minted by `add` once a
+token file is present (installing before writing the tokens? re-run `add`
+on the installed directory — the load error says so): the ingress URL path
+(`/ingress/github/` followed by a random 32-character token) and the HMAC
+secret at `secrets/webhook`. Re-adding after an edit replaces the policy
+files but never the identity, so your edits never move the webhook URL. For
+a resident node, each PAT routine's webhook is configured per repository,
+in **Settings → Webhooks → Add webhook**:
+
+- **Payload URL**: your tunnel's public address followed by the routine's
+  printed path, `https://<your-host>/ingress/github/<token>`;
+- **Content type**: `application/json` — the signature covers the raw JSON
+  body, and a form-encoded payload is refused;
+- **Secret**: the contents of the routine's `secrets/webhook`;
+- **Events**: "Let me select individual events", then **Pull requests**
+  only.
+
+GitHub sends a ping on creation; the ingress answers it 202 and records
+nothing, so a 202 under the hook's Recent Deliveries is your end-to-end
+check. A delivery with a bad signature is a content-free 401.
+`mentatd routine rotate-secret NAME` re-mints a PAT routine's webhook HMAC
+secret in place; the URL never moves, and the old secret stops verifying
+the moment the verb returns — set the new one on the GitHub hook
+immediately. (On an App routine that verb refuses: App deliveries verify
+against the owner-level secret, which `mentatd github rotate-secret`
+rotates.)
+
+Switching a routine between modes is a credential change, not a policy
+change — the digest does not move and settled heads stay settled. One
+migration wart, stated plainly: comments posted under one identity are
+invisible to the other's convergence filter, so a pull request reviewed
+under both identities across a switch carries the old identity's summary
+until you delete it, and a still-standing finding whose thread the old
+identity posted is re-posted once by the new one. One time, per straddling
+pull request, at switch.
 
 For GitHub Enterprise hosts, both the CLI fire and the daemon accept
 overrides for the GitHub API base and the git host checkouts fetch from —

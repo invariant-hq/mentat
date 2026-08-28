@@ -4,7 +4,6 @@
  ---------------------------------------------------------------------------*)
 
 open Mentat_routine
-open Mentat_github
 
 (* The admission bound on the delivery queue. Overflow refuses at the wire
    before any receipt is written: the pump serializes runs of minutes, so a
@@ -104,52 +103,36 @@ let reconcile_env t = t.env
 
 let repo t (loaded : Routine_store.Loaded.t) =
   let watched = loaded.Routine_store.Loaded.routine.Routine.repo in
-  match Routine_store.read_secret loaded ~file:"read-token" with
-  | Error e -> Error (Routine_store.Error.message e)
-  | Ok None ->
-      Error
-        (Printf.sprintf
-           "routine %s has no GitHub read credential at %s (a fine-grained \
-            PAT with read access to %s)"
-           loaded.Routine_store.Loaded.name
-           (Filename.concat
-              (Filename.concat loaded.Routine_store.Loaded.dir "secrets")
-              "read-token")
-           watched)
-  | Ok (Some token) -> (
-      match
-        Github_api.make ?base_url:t.github_base_url ~token
-          (Eio.Stdenv.net t.env.Routine_fire.stdenv)
-      with
-      | Error e -> Error (Github_api.Error.message e)
-      | Ok api ->
-          let github =
-            {
-              Routine_fire.Github.current_head =
-                (fun ~number ->
-                  Github_reads.current_head api ~repo:watched ~number);
-              open_prs =
-                (fun () ->
-                  Result.map
-                    (List.map (fun (pr : Github_reads.Open_pr.t) ->
-                         {
-                           Routine_fire.Github.number =
-                             pr.Github_reads.Open_pr.number;
-                           head_sha = pr.Github_reads.Open_pr.head_sha;
-                           base_ref = pr.Github_reads.Open_pr.base_ref;
-                           draft = pr.Github_reads.Open_pr.draft;
-                           author_association =
-                             pr.Github_reads.Open_pr.author_association;
-                         }))
-                    (Github_reads.open_prs api ~repo:watched));
-              posted =
-                (fun ~number -> Github_reads.posted api ~repo:watched ~number);
-            }
-          in
-          let git_url = checkout_url ~git_base:t.git_base ~repo:watched in
-          Ok { Routine_fire.Repo.git_url; github })
+  let git_url = checkout_url ~git_base:t.git_base ~repo:watched in
+  Github_auth.repo ~dirs:(dirs t)
+    ~net:(Eio.Stdenv.net t.env.Routine_fire.stdenv)
+    ~base_url:t.github_base_url ~git_url loaded
 
 (* Ingress. *)
+
+(* The App-level ingress source: the one id minted at setup, resolving to
+   the App's webhook secret while the credential home loads. Re-read per
+   request like the routine bindings — the file is the registration. *)
+let app_binding t =
+  match Github_app_store.load (dirs t) with
+  | Ok None | Error _ -> None
+  | Ok (Some app) -> (
+      match Github_app_store.ingress_id app with
+      | Ok id -> Some (app, id)
+      | Error _ -> None)
+
+(* The App delivery's routing fold: a verified payload's repository selects
+   every webhook-armed routine watching it that the [app_mode] predicate
+   admits — App-mode routines only; PAT routines have their own ingress id
+   and repo webhook, and routing both would receipt one arrival twice. *)
+let app_route loadeds ~app_mode ~repo =
+  List.filter
+    (fun (loaded : Routine_store.Loaded.t) ->
+      let routine = loaded.Routine_store.Loaded.routine in
+      Option.is_some (Routine.webhook_arm routine)
+      && String.equal routine.Routine.repo repo
+      && app_mode loaded)
+    loadeds
 
 let resolution bindings ~ingress_id =
   match
@@ -220,7 +203,36 @@ let skip_disabled t (loaded : Routine_store.Loaded.t) event =
   | Ok () -> Ok identity
   | Error e -> Error (Routine_store.Error.message e)
 
-let deliver t ~ingress_id ~enabled ~event ~delivery_id ~body =
+(* One routine's admission: the queue-cap check, the durable delivery
+   receipt, and either the queue or the skipped-disabled receipt. [enabled]
+   is the caller's snapshot — the resolver's answer for a per-routine
+   delivery, the routine's own member for an App-routed one. *)
+let admit_one t (loaded : Routine_store.Loaded.t) ~enabled ~delivery_id ~body =
+  let name = loaded.Routine_store.Loaded.name in
+  if enabled && Eio.Stream.length t.queue >= queue_cap then
+    `Refused (Printf.sprintf "routine %s: the delivery queue is full" name)
+  else
+    match Routine_fire.admit_delivery (env t ~name) loaded ~body with
+    | Error reason -> `Refused (Printf.sprintf "routine %s: %s" name reason)
+    | Ok ev ->
+        if not enabled then (
+          match skip_disabled t loaded ev with
+          | Error reason ->
+              `Refused (Printf.sprintf "routine %s: %s" name reason)
+          | Ok identity ->
+              say t
+                (Printf.sprintf "routine %s: skipped %s: disabled" name
+                   identity);
+              `Accepted)
+        else (
+          Eio.Stream.add t.queue (loaded, ev);
+          say t
+            (Printf.sprintf "routine %s: queued %s%s" name
+               (Event.Identity.to_string (Event.Identity.of_pull_request ev))
+               (delivery_suffix delivery_id));
+          `Accepted)
+
+let deliver_routine t ~ingress_id ~enabled ~event ~delivery_id ~body =
   match binding_name t ~ingress_id with
   | Error reason -> `Refused reason
   | Ok name -> (
@@ -241,32 +253,77 @@ let deliver t ~ingress_id ~enabled ~event ~delivery_id ~body =
               `Accepted
           | `Malformed reason ->
               `Refused (Printf.sprintf "routine %s: event: %s" name reason)
-          | `Admit ->
-              if enabled && Eio.Stream.length t.queue >= queue_cap then
-                `Refused
-                  (Printf.sprintf "routine %s: the delivery queue is full" name)
-              else (
-                match Routine_fire.admit_delivery (env t ~name) loaded ~body with
-                | Error reason ->
-                    `Refused (Printf.sprintf "routine %s: %s" name reason)
-                | Ok ev ->
-                    if not enabled then (
-                      match skip_disabled t loaded ev with
-                      | Error reason ->
-                          `Refused (Printf.sprintf "routine %s: %s" name reason)
-                      | Ok identity ->
-                          say t
-                            (Printf.sprintf "routine %s: skipped %s: disabled"
-                               name identity);
-                          `Accepted)
-                    else (
-                      Eio.Stream.add t.queue (loaded, ev);
-                      say t
-                        (Printf.sprintf "routine %s: queued %s%s" name
-                           (Event.Identity.to_string
-                              (Event.Identity.of_pull_request ev))
-                           (delivery_suffix delivery_id));
-                      `Accepted))))
+          | `Admit -> admit_one t loaded ~enabled ~delivery_id ~body))
+
+(* An App delivery: verified upstream against the App secret, routed here by
+   the payload's repository — App-mode webhook routines only, each
+   receipted before the 202 (N3 per routine); the first refusal answers the
+   whole delivery 500, and the sender's retry re-lands earlier routines'
+   delivery lines as harmless duplicates. A repository no App routine
+   watches is a trace note and a 202 — the owner installed the App more
+   widely than they routine, which is their business, not an error. *)
+let deliver_app t ~event ~delivery_id ~body =
+  match event_route event ~body with
+  | `Ping ->
+      say t
+        (Printf.sprintf "app ingress: ignoring ping delivery%s"
+           (delivery_suffix delivery_id));
+      `Accepted
+  | `Foreign kind ->
+      say t
+        (Printf.sprintf "app ingress: ignoring %s delivery%s" (clean kind)
+           (delivery_suffix delivery_id));
+      `Accepted
+  | `Malformed reason ->
+      `Refused (Printf.sprintf "app ingress: event: %s" reason)
+  | `Admit -> (
+      match Event.Pull_request.decode body with
+      | Error e ->
+          (* [event_route] admitted on this same decode; losing it here is a
+             machinery fault, not a payload judgment. *)
+          `Refused
+            (Printf.sprintf "app ingress: event: %s"
+               (Event.Pull_request.Error.message e))
+      | Ok ev -> (
+          let repo = ev.Event.Pull_request.repo in
+          match Routine_store.roster (dirs t) with
+          | Error e -> `Refused (Routine_store.Error.message e)
+          | Ok entries ->
+              let loadeds =
+                List.filter_map (fun (_, result) -> Result.to_option result)
+                  entries
+              in
+              let matched =
+                app_route loadeds
+                  ~app_mode:(fun loaded ->
+                    not (Routine_store.pat_files_present loaded))
+                  ~repo
+              in
+              if List.is_empty matched then (
+                say t
+                  (Printf.sprintf
+                     "app ingress: no routine watches %s; ignoring delivery%s"
+                     repo
+                     (delivery_suffix delivery_id));
+                `Accepted)
+              else
+                List.fold_left
+                  (fun acc loaded ->
+                    match acc with
+                    | `Refused _ as refused -> refused
+                    | `Accepted ->
+                        let enabled =
+                          loaded.Routine_store.Loaded.routine.Routine.enabled
+                        in
+                        admit_one t loaded ~enabled ~delivery_id ~body)
+                  `Accepted matched))
+
+let deliver t ~ingress_id ~enabled ~event ~delivery_id ~body =
+  match app_binding t with
+  | Some (_, app_id) when String.equal app_id ingress_id ->
+      deliver_app t ~event ~delivery_id ~body
+  | Some _ | None ->
+      deliver_routine t ~ingress_id ~enabled ~event ~delivery_id ~body
 
 let ingress t =
   {
@@ -284,7 +341,20 @@ let ingress t =
             say t
               (Printf.sprintf "ingress: %s" (Routine_store.Error.message e));
             Mentat_server.Ingress.Unknown
-        | Ok (bindings, _failures) -> resolution bindings ~ingress_id);
+        | Ok (bindings, _failures) -> (
+            match resolution bindings ~ingress_id with
+            | Mentat_server.Ingress.Resolved _ as resolved -> resolved
+            | Mentat_server.Ingress.Unknown -> (
+                (* One more source beside the routine directories: the
+                   App-level id, resolving to the App's webhook secret with
+                   enabled true while the credential home loads. *)
+                match app_binding t with
+                | Some (app, app_id) when String.equal app_id ingress_id -> (
+                    match Github_app_store.webhook_secret app with
+                    | Ok secret ->
+                        Mentat_server.Ingress.Resolved { secret; enabled = true }
+                    | Error _ -> Mentat_server.Ingress.Unknown)
+                | Some _ | None -> Mentat_server.Ingress.Unknown)));
     deliver =
       (fun ~ingress_id ~enabled ~event ~delivery_id ~body ->
         deliver t ~ingress_id ~enabled ~event ~delivery_id ~body);

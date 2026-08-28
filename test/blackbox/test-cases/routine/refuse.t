@@ -62,8 +62,8 @@ every later load — refuses it, naming the mode.
   mentat: load: $TESTCASE_ROOT/config/mentat/routines/loose/secrets/webhook: mode 644 grants group or world access; make it private (chmod go-rwx)
   [1]
   $ mentatd routine list | censor
-  NAME   DIGEST  STATE  LAST
-  loose  -       -      load: $TESTCASE_ROOT/config/mentat/routines/loose/secrets/webhook: mode 644 grants group or world access; make it private (chmod go-rwx)
+  NAME   DIGEST  STATE  AUTH  LAST
+  loose  -       -      -     load: $TESTCASE_ROOT/config/mentat/routines/loose/secrets/webhook: mode 644 grants group or world access; make it private (chmod go-rwx)
 
 A proposal must not carry secrets: they are created at install, never copied
 out of a repository checkout.

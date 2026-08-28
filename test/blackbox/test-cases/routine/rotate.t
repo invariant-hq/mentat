@@ -29,6 +29,7 @@ construction.
   digest $DIGEST1
   webhook POST /ingress/github/$DIGEST2 (fresh URL; update GitHub settings)
   webhook secret minted at $TESTCASE_ROOT/config/mentat/routines/pr-review/secrets/webhook; set it on the GitHub hook
+  auth: none; run `mentatd github setup` or write secrets/read-token
 
   $ cp config/mentat/routines/pr-review/secrets/webhook secret.before
   $ cp config/mentat/routines/pr-review/ingress.id id.before
@@ -47,8 +48,8 @@ The secret changed; the ingress id — the webhook URL — did not.
 The routine still loads whole: same digest, same state.
 
   $ mentatd routine list | censor
-  NAME       DIGEST            STATE    LAST
-  pr-review  $DIGEST  enabled  -
+  NAME       DIGEST            STATE    AUTH  LAST
+  pr-review  $DIGEST  enabled  none  -
 
 A missing routine is refused loudly.
 
@@ -73,6 +74,7 @@ A routine without a webhook arm has no secret to rotate.
   $ mentatd routine add cli-proposal | censor
   added cli-review ($TESTCASE_ROOT/config/mentat/routines/cli-review)
   digest $DIGEST
+  auth: none; run `mentatd github setup` or write secrets/read-token
   $ mentatd routine rotate-secret cli-review 2>&1
   mentat: routine cli-review has no github_webhook trigger, so there is no webhook secret to rotate
   [2]

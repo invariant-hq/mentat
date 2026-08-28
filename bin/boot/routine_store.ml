@@ -78,6 +78,31 @@ let read_secret (loaded : Loaded.t) ~file =
        (Filename.concat loaded.Loaded.dir secrets_dir_name)
        file)
 
+(* The auth-mode selector's PAT half: file presence, not content — a stale
+   or blank token file still pins the routine to PAT mode, and the printing
+   obligation (add/list/status name every routine's mode) is what surfaces
+   it. *)
+let pat_files_present (loaded : Loaded.t) =
+  let secret file =
+    Filename.concat (Filename.concat loaded.Loaded.dir secrets_dir_name) file
+  in
+  Sys.file_exists (secret "read-token") || Sys.file_exists (secret "write-token")
+
+let app_store_error (e : Github_app_store.Error.t) =
+  {
+    Error.operation = e.Github_app_store.Error.operation;
+    path = e.Github_app_store.Error.path;
+    reason = e.Github_app_store.Error.reason;
+  }
+
+let auth_mode dirs (loaded : Loaded.t) =
+  if pat_files_present loaded then Ok `Pat
+  else
+    match Github_app_store.load dirs with
+    | Ok (Some app) -> Ok (`App app)
+    | Ok None -> Ok `Neither
+    | Error e -> Error (app_store_error e)
+
 (* Every entry of [secrets/] must be owner-only, not just the ones this build
    reads: a loose unknown file under [secrets/] is a loose secret. *)
 let check_secrets ~operation dir =
@@ -123,13 +148,19 @@ let load dirs ~name =
   let* ingress_id =
     read_token ~operation (Filename.concat dir ingress_id_name)
   in
+  (* The webhook-identity demand is mode-aware: only a PAT routine (a PAT
+     file present, the mode selector's winning arm) owns a per-routine
+     webhook identity — an App routine's deliveries arrive on the App's own
+     ingress id, so there is nothing to demand or paste into GitHub. *)
   let* () =
-    if not (Option.is_some (Routine.webhook_arm routine)) then Ok ()
+    let secrets = Filename.concat dir secrets_dir_name in
+    let pat =
+      Sys.file_exists (Filename.concat secrets "read-token")
+      || Sys.file_exists (Filename.concat secrets "write-token")
+    in
+    if not (Option.is_some (Routine.webhook_arm routine) && pat) then Ok ()
     else
-      let secret_path =
-        Filename.concat (Filename.concat dir secrets_dir_name)
-          webhook_secret_name
-      in
+      let secret_path = Filename.concat secrets webhook_secret_name in
       match (ingress_id, Sys.file_exists secret_path) with
       | Some _, true -> Ok ()
       | None, _ ->
@@ -165,14 +196,27 @@ end
 
 let ingress_index dirs =
   let* entries = roster dirs in
+  (* One App-home read per fold: an App-mode routine binds no per-routine
+     id — its deliveries arrive on the App's own ingress id, and routing
+     both would receipt one arrival twice. A home that fails to load is the
+     doctor's to name; here it reads as no App, so the per-routine binding
+     keeps answering. *)
+  let app_present =
+    match Github_app_store.load dirs with
+    | Ok (Some _) -> true
+    | Ok None | Error _ -> false
+  in
   let bindings, failures =
     List.fold_left
       (fun (bindings, failures) (name, result) ->
         match result with
         | Error e -> (bindings, (name, e) :: failures)
         | Ok loaded ->
-            if not (Option.is_some (Routine.webhook_arm loaded.Loaded.routine)) then
-              (bindings, failures)
+            if
+              (not
+                 (Option.is_some (Routine.webhook_arm loaded.Loaded.routine)))
+              || (app_present && not (pat_files_present loaded))
+            then (bindings, failures)
             else
               let secret_path =
                 Filename.concat
@@ -184,20 +228,28 @@ let ingress_index dirs =
                 match (loaded.Loaded.ingress_id, secret) with
                 | Some id, Some secret ->
                     Ok
-                      {
-                        Binding.name;
-                        id;
-                        secret;
-                        enabled = loaded.Loaded.routine.Routine.enabled;
-                      }
+                      (Some
+                         {
+                           Binding.name;
+                           id;
+                           secret;
+                           enabled = loaded.Loaded.routine.Routine.enabled;
+                         })
                 | None, _ | _, None ->
-                    (* [load] refuses a webhook routine without either file,
-                       so reaching here means it moved underneath us. *)
-                    error ~operation:"ingress" ~path:secret_path
-                      "webhook identity disappeared between load and read"
+                    if pat_files_present loaded then
+                      (* [load] refuses a PAT webhook routine without either
+                         file, so reaching here means it moved underneath
+                         us. *)
+                      error ~operation:"ingress" ~path:secret_path
+                        "webhook identity disappeared between load and read"
+                    else
+                      (* No App, no PAT files, no minted identity: nothing
+                         was ever pasted into GitHub, so nothing binds. *)
+                      Ok None
               in
               (match binding with
-              | Ok binding -> (binding :: bindings, failures)
+              | Ok (Some binding) -> (binding :: bindings, failures)
+              | Ok None -> (bindings, failures)
               | Error e -> (bindings, (name, e) :: failures)))
       ([], []) entries
   in
@@ -378,8 +430,26 @@ let install dirs ~src =
         (Filename.concat dst routine.Routine.run.Routine.Run.output_schema)
         output_schema
   in
+  (* The per-routine webhook identity is the PAT journey's: an App routine
+     (no PAT file, the credential home loads) has nothing to paste into
+     GitHub settings, so nothing is minted for it. A loose or half-present
+     App home refuses the install loudly rather than guessing the mode. *)
+  let* app_present =
+    match Github_app_store.load dirs with
+    | Ok (Some _) -> Ok true
+    | Ok None -> Ok false
+    | Error e -> Error (app_store_error e)
+  in
+  let pat =
+    let secrets = Filename.concat dst secrets_dir_name in
+    Sys.file_exists (Filename.concat secrets "read-token")
+    || Sys.file_exists (Filename.concat secrets "write-token")
+  in
   let* webhook =
-    if not (Option.is_some (Routine.webhook_arm routine)) then Ok None
+    if
+      (not (Option.is_some (Routine.webhook_arm routine)))
+      || (app_present && not pat)
+    then Ok None
     else
       let* id, id_minted =
         mint_token ~operation

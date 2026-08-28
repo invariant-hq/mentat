@@ -5,7 +5,6 @@
 
 open! Cmdliner
 open Mentat_routine
-open Mentat_github
 
 let ( let* ) = Result.bind
 
@@ -21,6 +20,29 @@ let load dirs ~name =
 
 let read_receipts dirs ~name =
   Result.map_error store_error (Routine_store.read_receipts dirs ~name)
+
+(* The printing obligation (A4): every roster surface names each routine's
+   auth mode and posting identity — the price of deciding the mode by file
+   presence, so a stale token file or a forgotten setup can never flip a
+   routine's identity silently. One projection, two densities. *)
+
+let auth_word dirs loaded =
+  match Routine_store.auth_mode dirs loaded with
+  | Ok `Pat -> "pat"
+  | Ok (`App _) -> "app"
+  | Ok `Neither -> "none"
+  | Error _ -> "error"
+
+let auth_line dirs loaded =
+  match Routine_store.auth_mode dirs loaded with
+  | Ok `Pat -> "auth: personal access tokens (secrets/)"
+  | Ok (`App app) ->
+      Printf.sprintf "auth: GitHub App %s (posts as %s)"
+        app.Github_app_store.name
+        (Github_app_store.posting_login app)
+  | Ok `Neither ->
+      "auth: none; run `mentatd github setup` or write secrets/read-token"
+  | Error e -> Printf.sprintf "auth: %s" (Routine_store.Error.message e)
 
 (* add *)
 
@@ -48,6 +70,13 @@ let add src =
            (Filename.concat
               (Filename.concat loaded.Routine_store.Loaded.dir "secrets")
               "webhook"));
+   Output.stdout_printf "%s\n" (auth_line dirs loaded);
+   (match Routine_store.auth_mode dirs loaded with
+   | Ok (`App _) ->
+       Output.stdout_printf
+         "verify the installation covers %s: mentatd github status\n"
+         loaded.Routine_store.Loaded.routine.Routine.repo
+   | Ok `Pat | Ok `Neither | Error _ -> ());
    Ok Exit_status.Success)
   |> Exit_status.of_result
 
@@ -67,6 +96,22 @@ let rotate_secret name =
                  "routine %s has no github_webhook trigger, so there is no \
                   webhook secret to rotate"
                  name))
+   in
+   (* A per-routine verb must not silently act on owner-level state: an App
+      routine's deliveries verify against the App's webhook secret, which
+      `mentatd github rotate-secret` owns. *)
+   let* () =
+     match Routine_store.auth_mode dirs loaded with
+     | Ok (`App _) ->
+         Error
+           (Exit_status.usage
+              (Printf.sprintf
+                 "routine %s authenticates through the GitHub App, whose \
+                  webhook secret is owner-level; use `mentatd github \
+                  rotate-secret`"
+                 name))
+     | Ok `Pat | Ok `Neither -> Ok ()
+     | Error e -> Error (store_error e)
    in
    let* path =
      Result.map_error store_error (Routine_store.rotate_webhook_secret loaded)
@@ -114,7 +159,8 @@ let list () =
          List.map
            (fun (name, result) ->
              match result with
-             | Error e -> [ name; "-"; "-"; Routine_store.Error.message e ]
+             | Error e ->
+                 [ name; "-"; "-"; "-"; Routine_store.Error.message e ]
              | Ok loaded ->
                  [
                    name;
@@ -122,11 +168,14 @@ let list () =
                    (if loaded.Routine_store.Loaded.routine.Routine.enabled then
                       "enabled"
                     else "disabled");
+                   auth_word dirs loaded;
                    last_disposition dirs name;
                  ])
            entries
        in
-       Output.print_table ~header:[ "NAME"; "DIGEST"; "STATE"; "LAST" ] rows);
+       Output.print_table
+         ~header:[ "NAME"; "DIGEST"; "STATE"; "AUTH"; "LAST" ]
+         rows);
    Ok Exit_status.Success)
   |> Exit_status.of_result
 
@@ -159,6 +208,7 @@ let render_status dirs ~now (loaded : Routine_store.Loaded.t) =
   Output.stdout_printf "  state: %s\n"
     (if routine.Routine.enabled then "enabled" else "disabled");
   Output.stdout_printf "  digest: %s\n" digest;
+  Output.stdout_printf "  %s\n" (auth_line dirs loaded);
   let budget = routine.Routine.budget in
   Output.stdout_printf "  %s\n" (Fence.spend_line ~digest ~now ~budget receipts);
   Output.stdout_printf "  %s\n"
@@ -271,54 +321,17 @@ let with_stop_signal f =
 
 let fire_env t ~stop (loaded : Routine_store.Loaded.t) =
   let repo = loaded.Routine_store.Loaded.routine.Routine.repo in
-  let* token =
-    match Routine_store.read_secret loaded ~file:"read-token" with
-    | Ok (Some token) -> Ok token
-    | Ok None ->
-        Error
-          (Exit_status.runtime
-             (Printf.sprintf
-                "fire needs the GitHub read credential at %s (a fine-grained \
-                 PAT with read access to %s)"
-                (Filename.concat
-                   (Filename.concat loaded.Routine_store.Loaded.dir "secrets")
-                   "read-token")
-                repo))
-    | Error e -> Error (store_error e)
-  in
   let base_url = Composition.getenv t "MENTAT_GITHUB_BASE_URL" in
-  let* api =
-    match
-      Github_api.make ?base_url ~token (Eio.Stdenv.net (Composition.stdenv t))
-    with
-    | Ok api -> Ok api
-    | Error e -> Error (Exit_status.runtime (Github_api.Error.message e))
-  in
-  let github =
-    {
-      Routine_fire.Github.current_head =
-        (fun ~number -> Github_reads.current_head api ~repo ~number);
-      open_prs =
-        (fun () ->
-          Result.map
-            (List.map
-               (fun (pr : Github_reads.Open_pr.t) ->
-                 {
-                   Routine_fire.Github.number = pr.Github_reads.Open_pr.number;
-                   head_sha = pr.Github_reads.Open_pr.head_sha;
-                   base_ref = pr.Github_reads.Open_pr.base_ref;
-                   draft = pr.Github_reads.Open_pr.draft;
-                   author_association =
-                     pr.Github_reads.Open_pr.author_association;
-                 }))
-            (Github_reads.open_prs api ~repo));
-      posted = (fun ~number -> Github_reads.posted api ~repo ~number);
-    }
-  in
   let git_url =
     match Composition.getenv t "MENTAT_ROUTINE_GIT_URL" with
     | Some url when String.length url > 0 -> url
     | Some _ | None -> Printf.sprintf "https://github.com/%s.git" repo
+  in
+  let* repo_connection =
+    Result.map_error Exit_status.runtime
+      (Github_auth.repo ~dirs:(Composition.dirs t)
+         ~net:(Eio.Stdenv.net (Composition.stdenv t))
+         ~base_url ~git_url loaded)
   in
   let* mentat_bin =
     Result.map_error Exit_status.runtime
@@ -341,7 +354,7 @@ let fire_env t ~stop (loaded : Routine_store.Loaded.t) =
         stop;
         say = (fun line -> Output.stdout_printf "%s\n" line);
       },
-      { Routine_fire.Repo.git_url; github } )
+      repo_connection )
 
 let fire name event_file sweep =
   (let* name = Argv.routine_name name in
@@ -447,13 +460,17 @@ let add_cmd =
       `P
         "Validates the routine at $(i,PATH|DIR) — strictly, refusing unknown \
          members, unimplemented trigger kinds, and any write-capable grant — \
-         and installs it under its own name in the config home. For a \
-         webhook routine the ingress URL token and the webhook secret are \
-         minted once, where absent: re-adding replaces the policy files \
+         and installs it under its own name in the config home, printing \
+         the routine's auth mode (GitHub App, PAT files, or neither). For a \
+         PAT webhook routine the ingress URL token and the webhook secret \
+         are minted once, where absent: re-adding replaces the policy files \
          (which moves the policy digest and resets fence windows) but never \
          the identity, so owner edits never move the webhook URL. The \
          printed $(b,/ingress/github/…) path and the secret at \
-         $(b,secrets/webhook) go into the repository's webhook settings.";
+         $(b,secrets/webhook) go into the repository's webhook settings. An \
+         App routine mints no per-routine webhook identity — its deliveries \
+         arrive on the App's own ingress id, and there is nothing to paste \
+         into GitHub settings.";
       `P
         "A proposal shipped inside a repository must not carry $(b,secrets/) \
          or $(b,ingress.id); both are created at install, and a removed \
@@ -479,7 +496,10 @@ let rotate_secret_cmd =
          whatever the gap misses.";
       `P
         "A routine without a $(b,github_webhook) trigger has no webhook \
-         secret and is refused.";
+         secret and is refused. So is an App routine: its deliveries verify \
+         against the App's owner-level secret, which \
+         $(b,mentatd github rotate-secret) rotates — a per-routine verb \
+         must not silently act on owner-level state.";
     ]
   in
   Cmd.v
@@ -571,10 +591,13 @@ let fire_cmd =
          crontab line is a complete, fenced, deduplicated review routine \
          with no listener.";
       `P
-        "The read credential is $(b,secrets/read-token) in the routine \
-         directory; the write credential, $(b,secrets/write-token), is \
-         optional — absent, the run still reviews and the egress receipt \
-         records that publication was skipped.";
+        "The GitHub credential follows the routine's auth mode: with PAT \
+         files, $(b,secrets/read-token) reads and the optional \
+         $(b,secrets/write-token) publishes (absent, the run still reviews \
+         and the egress receipt records that publication was skipped); \
+         with neither file and the owner's GitHub App set up \
+         ($(b,mentatd github setup)), short-lived installation tokens are \
+         minted per fire and reviews post as the App.";
     ]
   in
   Cmd.v

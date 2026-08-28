@@ -210,6 +210,11 @@ let fake_repo ?current_head ?(open_prs = fun () -> Ok []) () =
         open_prs;
         posted = (fun ~number:_ -> fail "posted must not be read");
       };
+    (* The PAT arm's answers for a routine with no secrets on disk: an
+       unauthenticated fixture fetch, and a publication skipped for want of
+       a write credential. *)
+    git_token = (fun () -> Ok None);
+    write_token = (fun () -> Ok None);
   }
 
 let count pred receipts = List.length (List.filter pred receipts)

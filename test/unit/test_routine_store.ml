@@ -355,6 +355,118 @@ let read_secret () =
     ~holds:[ "file is empty" ]
     (Routine_store.read_secret loaded ~file:"read-token")
 
+(* The auth-mode selector: file presence, per routine, PAT files winning
+   (RFC 0025 A4) — and the consequences the stores draw from it: the
+   webhook-identity demand and the ingress binding are PAT-mode concerns,
+   and an App routine mints and binds nothing per-routine. *)
+
+let write_app_home dirs =
+  match
+    Github_app_store.write dirs
+      ~app:
+        {
+          Github_app_store.dir = "";
+          app_id = 7;
+          slug = "mentat-review-test";
+          name = "mentat-review-test";
+          client_id = "Iv1.test";
+          html_url = "https://github.com/apps/mentat-review-test";
+          api_base = "https://api.github.com";
+          created_at = "2026-08-28T00:00:00Z";
+        }
+      ~key_pem:"PEM\n" ~webhook_secret:"whs" ~ingress_id:"feedface"
+      ~public_url:None
+  with
+  | Ok app -> app
+  | Error e -> failf "app home: %s" (Github_app_store.Error.message e)
+
+let mode ~msg dirs loaded =
+  match Routine_store.auth_mode dirs loaded with
+  | Ok mode -> mode
+  | Error e -> failf "%s: %s" msg (Routine_store.Error.message e)
+
+let secret_file loaded file bytes =
+  let secrets = Filename.concat loaded.Routine_store.Loaded.dir "secrets" in
+  let path = Filename.concat secrets file in
+  write_file path bytes;
+  Unix.chmod path 0o600;
+  path
+
+let auth_modes () =
+  let root = temp_root () in
+  let dirs = make_dirs root in
+  let src = proposal root ~name:"hook" (webhook_json ~name:"hook") in
+  let installed = ok ~msg:"install" (Routine_store.install dirs ~src) in
+  let loaded = installed.Routine_store.Installed.loaded in
+  (* No PAT files, no home: neither — refused at fire time by the caller. *)
+  (match mode ~msg:"fresh" dirs loaded with
+  | `Neither -> ()
+  | `Pat | `App _ -> fail "no files and no home must be `Neither");
+  is_true ~msg:"no PAT files present"
+    (not (Routine_store.pat_files_present loaded));
+  (* The home appears: the same routine is now an App routine. *)
+  let _app = write_app_home dirs in
+  (match mode ~msg:"app" dirs loaded with
+  | `App app ->
+      equal string ~msg:"the mode carries the loaded App identity"
+        "mentat-review-test[bot]"
+        (Github_app_store.posting_login app)
+  | `Pat | `Neither -> fail "a loaded home with no PAT files must be `App");
+  (* A PAT file wins over the home — either file, presence not content. *)
+  let write_token_path = secret_file loaded "write-token" "tok\n" in
+  (match mode ~msg:"pat" dirs loaded with
+  | `Pat -> ()
+  | `App _ | `Neither -> fail "a PAT file must win over the App home");
+  is_true ~msg:"either PAT file counts"
+    (Routine_store.pat_files_present loaded);
+  Sys.remove write_token_path;
+  (* An App webhook routine binds no per-routine ingress id. *)
+  let bindings, failures =
+    ok ~msg:"index" (Routine_store.ingress_index dirs)
+  in
+  equal int ~msg:"no per-routine binding in App mode" 0 (List.length bindings);
+  equal int ~msg:"and no failure rows" 0 (List.length failures);
+  (* Back in PAT mode the binding answers again. *)
+  let read_token_path = secret_file loaded "read-token" "tok\n" in
+  let bindings, _ = ok ~msg:"index" (Routine_store.ingress_index dirs) in
+  equal int ~msg:"the PAT binding is back" 1 (List.length bindings);
+  Sys.remove read_token_path
+
+let app_mode_install () =
+  let root = temp_root () in
+  let dirs = make_dirs root in
+  let _app = write_app_home dirs in
+  (* Installing a webhook routine under a loaded home mints nothing: there
+     is nothing to paste into GitHub settings for an App routine. *)
+  let src = proposal root ~name:"hook" (webhook_json ~name:"hook") in
+  let installed = ok ~msg:"install" (Routine_store.install dirs ~src) in
+  is_true ~msg:"an App routine's install mints no webhook identity"
+    (Option.is_none installed.Routine_store.Installed.webhook);
+  let loaded = installed.Routine_store.Installed.loaded in
+  equal (option string) ~msg:"no ingress id exists" None
+    loaded.Routine_store.Loaded.ingress_id;
+  (* The mode-aware load: no webhook-identity demand outside PAT mode... *)
+  let reloaded = ok ~msg:"load" (Routine_store.load dirs ~name:"hook") in
+  is_true ~msg:"the App routine loads without per-routine identity"
+    (Option.is_none reloaded.Routine_store.Loaded.ingress_id);
+  (* ...but writing a PAT file revives the demand, with the minting hint. *)
+  let token = secret_file loaded "read-token" "tok\n" in
+  err ~msg:"a PAT webhook routine without identity is refused"
+    ~holds:[ "ingress id"; "routine add" ]
+    (Routine_store.load dirs ~name:"hook");
+  (* And re-running add in place mints it, as the hint says. *)
+  let again =
+    ok ~msg:"re-add"
+      (Routine_store.install dirs ~src:(User_dirs.routine_dir dirs "hook"))
+  in
+  (match again.Routine_store.Installed.webhook with
+  | Some webhook ->
+      is_true ~msg:"the PAT re-add mints both"
+        (webhook.Routine_store.Installed.id_minted
+        && webhook.Routine_store.Installed.secret_minted)
+  | None -> fail "a PAT webhook routine's add must mint identity");
+  Sys.remove token
+
 let () =
   run "mentat.routine_store"
     [
@@ -366,4 +478,6 @@ let () =
       test "receipts roundtrip" receipts_roundtrip;
       test "claim markers" claim;
       test "one secret-read policy" read_secret;
+      test "auth modes" auth_modes;
+      test "app-mode install" app_mode_install;
     ]

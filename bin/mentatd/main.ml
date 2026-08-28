@@ -326,6 +326,7 @@ let root =
          Term.(
            const serve $ stop_flag $ web_flag $ web_port_opt
            $ ingress_port_opt $ github_base_url_opt $ routine_git_base_opt))
-    info [ stop_cmd; install_cmd; uninstall_cmd; Routine_cli.cmd ]
+    info
+    [ stop_cmd; install_cmd; uninstall_cmd; Routine_cli.cmd; Github_cli.cmd ]
 
 let () = Entry.run ~version:Daemon.binary_version root

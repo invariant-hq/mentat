@@ -439,6 +439,18 @@
  (libraries windtrap mentat_github jsont jsont.bytesrw))
 
 (test
+ (name test_github_app)
+ (modules test_github_app)
+ (libraries windtrap mentat_github jsont jsont.bytesrw))
+
+(test
+ (name test_github_app_store)
+ (modules test_github_app_store)
+ (flags
+  (:standard -open Mentat_boot))
+ (libraries windtrap mentat_boot unix))
+
+(test
  (name test_review_finding)
  (modules test_review_finding)
  (libraries windtrap mentat_connector jsont jsont.bytesrw mentat_llm))
@@ -740,9 +752,12 @@
 (copy_files
  (files ../../bin/mentatd/node.{ml,mli}))
 
+(copy_files
+ (files ../../bin/mentatd/github_auth.{ml,mli}))
+
 (test
  (name test_node)
- (modules test_node node)
+ (modules test_node node github_auth)
  (flags
   (:standard -open Mentat_boot))
  (libraries

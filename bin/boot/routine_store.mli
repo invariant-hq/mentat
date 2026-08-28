@@ -66,15 +66,40 @@ val read_secret : Loaded.t -> file:string -> (string option, Error.t) result
     trimmed (an editor's trailing newline is not part of a secret), and a
     present-but-blank file is an [Error], never an empty token. *)
 
+val pat_files_present : Loaded.t -> bool
+(** [pat_files_present loaded] is [true] iff [secrets/read-token] or
+    [secrets/write-token] exists — the PAT half of the auth-mode selector.
+    Presence, not content: either file makes the whole routine a PAT
+    routine (mixing roles across identities is the comment-stacking
+    failure), and a stale or blank file still pins the mode — which is why
+    every roster surface prints each routine's mode. *)
+
+val auth_mode :
+  User_dirs.t ->
+  Loaded.t ->
+  ([ `Pat | `App of Github_app_store.t | `Neither ], Error.t) result
+(** [auth_mode dirs loaded] is [loaded]'s GitHub auth mode, decided by file
+    presence with PAT files winning: [`Pat] when {!pat_files_present},
+    else [`App app] when the owner-level credential home loads, else
+    [`Neither] — refused at fire time naming both exits. An [Error] is a
+    credential home that exists but does not load (loose permissions, a
+    half-present home). The selector is deliberately not a [routine.json]
+    member: [secrets/] is excluded from the policy digest, so switching a
+    routine's auth mode never moves its digest and never re-admits every
+    open head. *)
+
 val load : User_dirs.t -> name:string -> (Loaded.t, Error.t) result
 (** [load dirs ~name] reads and validates the installed routine [name]. An
     [Error] names the first refusal: a missing directory, a directory or
     [secrets/] entry that is group- or world-accessible, an unreadable or
     strictly-invalid [routine.json], a document whose [name] member differs
     from the directory's basename, an unreadable prompt or schema file, or —
-    for a routine with a webhook arm — a missing [ingress.id] or
-    [secrets/webhook] (with the hint to run [routine add], which mints
-    them). *)
+    for a {e PAT} routine with a webhook arm ({!pat_files_present}) — a
+    missing [ingress.id] or [secrets/webhook] (with the hint to run
+    [routine add], which mints them). A webhook routine without PAT files
+    is not refused over webhook identity: an App routine's deliveries
+    arrive on the App's own ingress id, so there is no per-routine
+    identity to demand. *)
 
 val roster :
   User_dirs.t -> ((string * (Loaded.t, Error.t) result) list, Error.t) result
@@ -106,9 +131,12 @@ val ingress_index :
   (Binding.t list * (string * Error.t) list, Error.t) result
 (** [ingress_index dirs] folds the installed routines into the bindings a
     webhook listener resolves ingress ids against: one {!Binding.t} per
-    loadable routine with a webhook arm, plus the routines that failed to
-    load, by name — a broken routine answers to no id, and the caller
-    decides how loudly to say so. The outer [Error] is an unreadable
+    loadable routine with a webhook arm and a minted identity, plus the
+    routines that failed to load, by name — a broken routine answers to no
+    id, and the caller decides how loudly to say so. App-mode routines
+    (no PAT files while the credential home loads) bind nothing here:
+    their deliveries arrive on the App's own ingress id, and binding both
+    would receipt one arrival twice. The outer [Error] is an unreadable
     routines directory. *)
 
 (** {1:record The durable record}
@@ -197,14 +225,18 @@ val install : User_dirs.t -> src:string -> (Installed.t, Error.t) result
     or a path to its [routine.json] — and installs it under its own name:
     the three policy files ([routine.json], prompt, schema) are copied into
     {!User_dirs.routine_dir}, each written [0o600] with the directory chain
-    [0o700]; for a webhook routine, [ingress.id] (a random 128-bit token,
-    32 lowercase hexadecimal characters) and [secrets/webhook] (a random
-    256-bit key, 64 hexadecimal characters) are minted where absent and kept
-    where present — minting is once, so an owner's edits never move the
-    webhook URL. Re-installing over an existing routine replaces the policy
-    files (the digest moves, resetting fence windows) and keeps identity and
-    secrets. When [src] is the installed directory itself, nothing is
-    copied — the call validates in place and mints what is missing.
+    [0o700]; for a webhook routine outside App mode, [ingress.id] (a random
+    128-bit token, 32 lowercase hexadecimal characters) and
+    [secrets/webhook] (a random 256-bit key, 64 hexadecimal characters) are
+    minted where absent and kept where present — minting is once, so an
+    owner's edits never move the webhook URL. An App routine (no PAT file
+    while the credential home loads) skips the mint whole: its deliveries
+    arrive on the App's own ingress id, so there is nothing to paste into
+    GitHub settings, and its [webhook] outcome is [None]. Re-installing
+    over an existing routine replaces the policy files (the digest moves,
+    resetting fence windows) and keeps identity and secrets. When [src] is
+    the installed directory itself, nothing is copied — the call validates
+    in place and mints what is missing.
 
     Refused with a named [Error]: an invalid or unreadable source (the
     library's strict decode error, verbatim), a name opening with a dot, and

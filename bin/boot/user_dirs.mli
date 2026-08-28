@@ -48,6 +48,13 @@ val daemon_dir : t -> string
     store. Sockets do not live here — they live under [/tmp] to fit
     [sun_path]. *)
 
+val github_app_dir : t -> string
+(** [github_app_dir t] is [config_home / "github-app"] — the owner-level
+    GitHub App credential home {!Github_app_store} reads and writes. Homed
+    under the config home because one App serves every routine, the way one
+    auth store serves every session — and the config home is already denied
+    to every confined run. *)
+
 val routines_dir : t -> string
 (** [routines_dir t] is [config_home / "routines"] — the root under which each
     routine owns one directory. Homed under the config home because a routine

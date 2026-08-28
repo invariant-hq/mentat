@@ -144,11 +144,76 @@ let environment_table () =
        [ ("PATH", "/usr/bin") ]
        ~github_base_url:(Some "http://validated.example"))
 
+(* The App routing fold: a verified App delivery's repository selects the
+   webhook-armed routines watching it that the injected mode predicate
+   admits — PAT routines and cli-only routines never match. *)
+let app_route_table () =
+  let loaded ~name ~json =
+    let routine =
+      match Mentat_routine.Routine.decode json with
+      | Ok routine -> routine
+      | Error e -> failf "fixture: %s" (Mentat_routine.Routine.Error.message e)
+    in
+    {
+      Routine_store.Loaded.name;
+      dir = "/nonexistent/" ^ name;
+      routine;
+      digest = "0000000000000000";
+      prompt = "p";
+      output_schema = "{}";
+      ingress_id = None;
+    }
+  in
+  let webhook ~name ~repo =
+    loaded ~name
+      ~json:
+        (Printf.sprintf
+           {|{ "routine": 1, "name": %S,
+               "workspace": { "repo": %S },
+               "trigger": [ { "kind": "github_webhook",
+                              "events": ["pull_request.opened"] } ],
+               "run": { "mode": "review", "prompt": "p.md",
+                        "output_schema": "s.json" },
+               "budget": { "per_run": { "wall_clock": "5m" } },
+               "publish": { "github": "review-threads" } }|}
+           name repo)
+  in
+  let cli_only =
+    loaded ~name:"cli-only"
+      ~json:
+        {|{ "routine": 1, "name": "cli-only",
+            "workspace": { "repo": "acme/widgets" },
+            "trigger": [ { "kind": "cli" } ],
+            "run": { "mode": "review", "prompt": "p.md",
+                     "output_schema": "s.json" },
+            "budget": { "per_run": { "wall_clock": "5m" } },
+            "publish": { "github": "review-threads" } }|}
+  in
+  let app = webhook ~name:"app-watcher" ~repo:"acme/widgets" in
+  let pat = webhook ~name:"pat-watcher" ~repo:"acme/widgets" in
+  let elsewhere = webhook ~name:"elsewhere" ~repo:"acme/gears" in
+  let app_mode (l : Routine_store.Loaded.t) =
+    not (String.equal l.Routine_store.Loaded.name "pat-watcher")
+  in
+  let matched =
+    Node.app_route [ app; pat; elsewhere; cli_only ] ~app_mode
+      ~repo:"acme/widgets"
+  in
+  equal (list string)
+    ~msg:"only the App-mode webhook routine watching the repo matches"
+    [ "app-watcher" ]
+    (List.map (fun (l : Routine_store.Loaded.t) -> l.Routine_store.Loaded.name)
+       matched);
+  equal (list string) ~msg:"an unwatched repository matches nothing" []
+    (List.map (fun (l : Routine_store.Loaded.t) -> l.Routine_store.Loaded.name)
+       (Node.app_route [ app; pat; cli_only ] ~app_mode ~repo:"acme/gizmos"))
+
 let () =
   run "mentat.node"
     [
       test "the ingress resolution" resolution_table;
       test "the delivery route" route_table;
+      test "the app delivery routing" app_route_table;
       test "the derived checkout remote" checkout_urls;
       test "the child environment" environment_table;
     ]

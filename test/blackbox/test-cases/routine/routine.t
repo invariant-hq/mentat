@@ -26,6 +26,7 @@ The first add mints the ingress URL and the webhook secret.
   digest $DIGEST1
   webhook POST /ingress/github/$DIGEST2 (fresh URL; update GitHub settings)
   webhook secret minted at $TESTCASE_ROOT/config/mentat/routines/pr-review/secrets/webhook; set it on the GitHub hook
+  auth: none; run `mentatd github setup` or write secrets/read-token
 
 Re-adding replaces the policy files and keeps the identity: the URL is not
 fresh and the secret is not re-minted, so owner edits never move the webhook
@@ -35,15 +36,17 @@ URL.
   added pr-review ($TESTCASE_ROOT/config/mentat/routines/pr-review)
   digest $DIGEST1
   webhook POST /ingress/github/$DIGEST2
+  auth: none; run `mentatd github setup` or write secrets/read-token
 
   $ mentatd routine list | censor
-  NAME       DIGEST            STATE    LAST
-  pr-review  $DIGEST  enabled  -
+  NAME       DIGEST            STATE    AUTH  LAST
+  pr-review  $DIGEST  enabled  none  -
 
   $ mentatd routine status | censor
   pr-review
     state: enabled
     digest: $DIGEST
+    auth: none; run `mentatd github setup` or write secrets/read-token
     spend 24h: 0.00 usd of 15.00
     runs 1h: 0 of 6
     last: no receipts
