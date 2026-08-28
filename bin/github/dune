@@ -1,11 +1,15 @@
 (library
  (name mentat_github)
- (modules github_api github_reads)
+ (modules github_api github_app github_reads)
  (libraries
+  base64
   cohttp
   cohttp-eio
+  digestif
+  mirage-crypto-pk
   oauth2_eio
   uri
+  x509
   eio
   jsont
   jsont.bytesrw

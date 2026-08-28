@@ -86,18 +86,18 @@ let open_prs api ~repo =
              | _ -> [])
            pages)
 
-let posted api ~repo ~number =
-  let* login =
-    match Github_api.get api ~path:"/user" with
-    | Error e -> Error (api_error e)
-    | Ok json -> (
-        match
-          Option.bind (Mentat_json.Lenient.mem "login" json)
-            Mentat_json.Lenient.string
-        with
-        | Some login -> Ok login
-        | None -> Error "/user answered without a login member")
-  in
+let viewer_login api =
+  match Github_api.get api ~path:"/user" with
+  | Error e -> Error (api_error e)
+  | Ok json -> (
+      match
+        Option.bind (Mentat_json.Lenient.mem "login" json)
+          Mentat_json.Lenient.string
+      with
+      | Some login -> Ok login
+      | None -> Error "/user answered without a login member")
+
+let posted api ~login ~repo ~number =
   let listing path =
     match Github_api.get_paginated api ~path ~max_pages:10 with
     | Error e -> Error (api_error e)

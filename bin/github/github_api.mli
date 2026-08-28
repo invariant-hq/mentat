@@ -85,13 +85,17 @@ type t
 (** The type for GitHub clients. A client holds its requester, token, and API
     base; it owns no connections. *)
 
-val of_http : ?base_url:string -> token:string -> http -> t
+val of_http : ?base_url:string -> ?token:string -> http -> t
 (** [of_http ~token http] is a client over the caller-owned requester [http].
     [base_url] (default [https://api.github.com], trailing slashes dropped)
-    prefixes every request path. Production callers construct with {!make};
+    prefixes every request path. An absent [token] sends no authorization
+    header at all — the app-manifest conversion is the one endpoint called
+    unauthenticated by design, and a garbage bearer would be refused where
+    no header is accepted. Production callers construct with {!make};
     [of_http] is the seam for tests and alternative transports. *)
 
-val make : ?base_url:string -> token:string -> _ Eio.Net.t -> (t, Error.t) result
+val make :
+  ?base_url:string -> ?token:string -> _ Eio.Net.t -> (t, Error.t) result
 (** [make ~token net] is a client whose requester opens one connection per
     request over [net], with TLS from the system CA bundle and endpoint
     identity verified against each request's host. Redirects are not

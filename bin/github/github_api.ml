@@ -46,9 +46,14 @@ type http =
   body:string option ->
   (reply, Error.t) result
 
-type t = { http : http; token : string; base_url : string; base : Uri.t }
+type t = {
+  http : http;
+  token : string option;
+  base_url : string;
+  base : Uri.t;
+}
 
-let of_http ?(base_url = "https://api.github.com") ~token http =
+let of_http ?(base_url = "https://api.github.com") ?token http =
   let rec strip url =
     if String.length url > 0 && url.[String.length url - 1] = '/' then
       strip (String.sub url 0 (String.length url - 1))
@@ -58,12 +63,14 @@ let of_http ?(base_url = "https://api.github.com") ~token http =
   { http; token; base_url; base = Uri.of_string base_url }
 
 let request_headers t ~write =
-  ("authorization", "Bearer " ^ t.token)
-  :: ("accept", "application/vnd.github+json")
-  :: ("x-github-api-version", api_version)
-  :: ("user-agent", "mentat")
-  ::
-  (if write then [ ("content-type", "application/json") ] else [])
+  (match t.token with
+  | Some token -> [ ("authorization", "Bearer " ^ token) ]
+  | None -> [])
+  @ ("accept", "application/vnd.github+json")
+    :: ("x-github-api-version", api_version)
+    :: ("user-agent", "mentat")
+    ::
+    (if write then [ ("content-type", "application/json") ] else [])
 
 let url_of_path t ~path =
   if String.length path = 0 || path.[0] <> '/' then
@@ -207,10 +214,10 @@ let requester client : http =
       | Mentat_llm_http.Response _ ->
           Error (Error.transport (Mentat_llm_http.transport_message exn)))
 
-let make ?base_url ~token net =
+let make ?base_url ?token net =
   match Oauth2_eio.make_tls_client net with
   | Error `System_ca_unavailable ->
       Error (Error.transport "system CA bundle unavailable")
   | Error `Tls_configuration_failed ->
       Error (Error.transport "TLS client configuration failed")
-  | Ok client -> Ok (of_http ?base_url ~token (requester client))
+  | Ok client -> Ok (of_http ?base_url ?token (requester client))

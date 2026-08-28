@@ -45,15 +45,28 @@ val open_prs :
     pagination, in listing order. A listed item missing a needed member is
     passed over, the narrow-read posture every foreign payload gets. *)
 
+val viewer_login :
+  Github_api.t -> (string, string) result
+(** [viewer_login api] is the login of the credential's own account, from
+    [GET /user] — the PAT arm's posting identity. An installation token
+    cannot call [/user] (403 by design); the App arm's identity is the
+    stored bot login, knowable without any network call, so it never calls
+    this. *)
+
 val posted :
-  Github_api.t -> repo:string -> number:int -> (string, string) result
-(** [posted api ~repo ~number] is the JSON array of comments the client's
-    credential already posted on pull request [number] — review comments
-    and issue comments merged, each an object with [id] and [body]
-    members — the renderer's upsert input. A comment is ours iff its
-    author is the credential's own login {e and} its body carries a
-    publication marker ({!Mentat_connector.Publication.Marker.marks}):
-    marker presence alone
+  Github_api.t ->
+  login:string ->
+  repo:string ->
+  number:int ->
+  (string, string) result
+(** [posted api ~login ~repo ~number] is the JSON array of comments the
+    posting identity [login] already posted on pull request [number] —
+    review comments and issue comments merged, each an object with [id]
+    and [body] members — the renderer's upsert input. The identity comes
+    from the caller: the PAT arm resolves {!viewer_login} as before, the
+    App arm passes the stored [<slug>[bot]] login. A comment is ours iff
+    its author is [login] {e and} its body carries a publication marker
+    ({!Mentat_connector.Publication.Marker.marks}): marker presence alone
     is forgeable, so the author predicate is what makes a comment ours.
-    Assumes the read and write credentials share the owner's posting
-    identity, which single-owner routines do. *)
+    Assumes the read and write credentials share the posting identity,
+    which single-owner routines and a single App both do. *)
