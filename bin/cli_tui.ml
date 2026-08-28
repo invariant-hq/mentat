@@ -672,22 +672,47 @@ let sandbox_overrides = function
    capability and shell ([tui_capabilities]): the engines are the agents',
    but file completion and the local shell stay local. Trust prompting
    precedes this (in [launch]), so an untrusted workspace never starts an
-   agent. *)
-let tui_client_bundle t = Agent_client.client_with_tui_capabilities t
+   agent. [environment_overrides] is the spawn-scoped half of the boot-config
+   flags — the MENTAT_* spellings a freshly started agent resolves its
+   configuration from. *)
+let tui_client_bundle t ~environment_overrides =
+  Agent_client.client_with_tui_capabilities ~environment_overrides t
+
+(* The spawn-scoped flags configure an agent at its start; against a session
+   whose agent is already running they would silently not apply — the TUI's
+   display would show a posture the agent does not enforce — so they refuse
+   instead, exactly as the run verb's gate does. *)
+let spawn_scoped_gate t ~session ~environment_overrides =
+  match session with
+  | Some id
+    when environment_overrides <> [] && Agent_client.serving t id ->
+      Error
+        (Exit_status.usage
+           (Printf.sprintf
+              "session %s's agent is already running; %s configures an agent \
+               at its start — let it idle out (or interrupt it) and re-run"
+              (Mentat_session.Id.to_string id)
+              (String.concat ", " (List.map fst environment_overrides))))
+  | Some _ | None -> Ok ()
 
 let launch_loaded ?(activation_ready = fun () -> ()) ?(launch_review = false)
-    ~version ~mode ~session ~last ~input t =
+    ~version ~mode ~session ~last ~input ~environment_overrides t =
   match Composition.default_model t with
   | Error message -> Exit_status.runtime message
   | Ok model -> (
       match snapshot ~version t model with
       | Error status -> status
       | Ok snapshot -> (
-          match tui_client_bundle t with
+          match tui_client_bundle t ~environment_overrides with
           | Error status -> status
           | Ok (client, read_capability, shell) -> (
               activation_ready ();
-              match resolve_session t session last with
+              match
+                Result.bind (resolve_session t session last) (fun session ->
+                    Result.map
+                      (fun () -> session)
+                      (spawn_scoped_gate t ~session ~environment_overrides))
+              with
               | Error status -> status
               | Ok session -> (
                   (* Attribute logs to the resumed session before the runtime
@@ -777,11 +802,13 @@ let set_trust path root status =
   Eio_main.run @@ fun _ -> Trust_store.set ~path ~root status
 
 let rec launch_trusted ~launch_review ~review_base ~version ~cwd ~overrides
-    ~mode ~session ~last ~input ~path ~root ~root_text =
+    ~mode ~session ~last ~input ~environment_overrides ~path ~root ~root_text
+    =
   let entered = ref false in
   let status =
     Composition.with_base ?review_base ~cwd ~overrides (fun t ->
-        launch_loaded ~launch_review ~version ~mode ~session ~last ~input t
+        launch_loaded ~launch_review ~version ~mode ~session ~last ~input
+          ~environment_overrides t
           ~activation_ready:(fun () ->
             entered := true;
             Output.stdout_printf "\nRepository activation is enabled.\n"))
@@ -802,13 +829,14 @@ let rec launch_trusted ~launch_review ~review_base ~version ~cwd ~overrides
         | Run ->
             Composition.with_base ?review_base ~cwd ~overrides (fun t ->
                 launch_loaded ~launch_review ~version ~mode ~session ~last
-                  ~input t)
+                  ~input ~environment_overrides t)
         | Reload ->
             launch_trusted ~launch_review ~review_base ~version ~cwd ~overrides
-              ~mode ~session ~last ~input ~path ~root ~root_text)
+              ~mode ~session ~last ~input ~environment_overrides ~path ~root
+              ~root_text)
 
 let launch ~launch_review ~review_base ~version ~cwd ~overrides ~mode
-    ~session ~last ~input =
+    ~session ~last ~input ~environment_overrides =
   let reload = ref None in
   let first =
     Composition.with_base ?review_base ~cwd ~overrides (fun t ->
@@ -816,7 +844,8 @@ let launch ~launch_review ~review_base ~version ~cwd ~overrides ~mode
         | Error status -> status
         | Ok Stop -> Exit_status.Success
         | Ok Run ->
-            launch_loaded ~launch_review ~version ~mode ~session ~last ~input t
+            launch_loaded ~launch_review ~version ~mode ~session ~last ~input
+              ~environment_overrides t
         | Ok Reload ->
             reload :=
               Some
@@ -829,7 +858,8 @@ let launch ~launch_review ~review_base ~version ~cwd ~overrides ~mode
   | None -> first
   | Some (path, root, root_text) ->
       launch_trusted ~launch_review ~review_base ~version ~cwd ~overrides
-        ~mode ~session ~last ~input ~path ~root ~root_text
+        ~mode ~session ~last ~input ~environment_overrides ~path ~root
+        ~root_text
 
 let launch_input draft prompt =
   match (draft, prompt) with
@@ -857,10 +887,20 @@ let run version session last continue sandbox mode_raw draft prompt cwd =
           match launch_input draft prompt with
           | Error status -> status
           | Ok input ->
+              (* The flag rides both halves: the local overlay is what the
+                 TUI's own display reads, and the spawn override is what a
+                 freshly started agent enforces — one source, two consumers,
+                 so they cannot diverge. *)
+              let environment_overrides =
+                match sandbox with
+                | None -> []
+                | Some raw -> [ ("MENTAT_SANDBOX_MODE", raw) ]
+              in
               (* [-c]/[--continue] is [--last]: open the newest resumable
                  session in the workspace. *)
               launch ~launch_review:false ~review_base:None ~version ~cwd
-                ~overrides ~mode ~session ~last:(last || continue) ~input))
+                ~overrides ~mode ~session ~last:(last || continue) ~input
+                ~environment_overrides))
 
 let run_review version base cwd =
   Log_setup.divert_for_tui ~getenv:Sys.getenv_opt;
@@ -869,7 +909,7 @@ let run_review version base cwd =
      the HEAD default. [None] leaves the default in force. *)
   launch ~launch_review:true ~review_base:base ~version ~cwd ~overrides:[]
     ~mode:Mentat_session.Contract.Mode.Build ~session:None ~last:false
-    ~input:Mentat_tui.Startup.Empty
+    ~input:Mentat_tui.Startup.Empty ~environment_overrides:[]
 
 let session_option =
   let doc = "Open the TUI with session $(docv) loaded." in

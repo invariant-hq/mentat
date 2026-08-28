@@ -10,12 +10,10 @@ module Session = Mentat_session
 module Command = Mentat_protocol.Command
 module Driver = Mentat_client.Driver
 
-(* How long a settled session lingers before its server's clean exit, so a
-   follow-up delivery landing just after settlement still finds a live server.
-   MENTAT_CHILD_LINGER (test-only, seconds) shortens it so a blackbox stage is
-   not paced by the default. *)
-let default_linger_s = 3.0
-
+(* How long a settled session lingers before its server's clean exit — the
+   shared [Mentat_broker.serve_linger_s], which the offline fence patience is
+   derived from. MENTAT_CHILD_LINGER (test-only, seconds) shortens it so a
+   blackbox stage is not paced by the default. *)
 let linger_seconds environment =
   match
     Option.bind
@@ -23,7 +21,7 @@ let linger_seconds environment =
       float_of_string_opt
   with
   | Some s when s >= 0. -> s
-  | Some _ | None -> default_linger_s
+  | Some _ | None -> Mentat_broker.serve_linger_s
 
 (* The boot's shape, derived from the session document — no mode flags. *)
 type shape =
@@ -167,11 +165,18 @@ let idle_watchdog clock ~linger store cache served active stop =
     (match Store.Session.stamp store served with
     | Some _ -> gone_since := None
     | None -> (
-        match !gone_since with
-        | None -> gone_since := Some (Eio.Time.now clock)
-        | Some since ->
-            if Eio.Time.now clock -. since >= gone_backstop_s then
-              Stop_signal.request stop));
+        (* [stamp] maps every failure to [None]; only proven absence feeds
+           the gone clock. A transient EMFILE/EIO flap during a heavy turn
+           is a sign of life, not of removal — the idle predicate's own
+           "unreadable presumes outstanding work" posture. *)
+        match Store.Session.load store served with
+        | Error (Store.Session.Error.Not_found _) -> (
+            match !gone_since with
+            | None -> gone_since := Some (Eio.Time.now clock)
+            | Some since ->
+                if Eio.Time.now clock -. since >= gone_backstop_s then
+                  Stop_signal.request stop)
+        | Error _ | Ok _ -> gone_since := None));
     (if Atomic.get active > 0 || not (idle store cache served) then
        idle_since := None
      else
@@ -184,8 +189,7 @@ let idle_watchdog clock ~linger store cache served active stop =
   in
   loop ()
 
-let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
-    ~bound_socket_dir =
+let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd =
   Eio_main.run @@ fun stdenv ->
   Eio.Switch.run @@ fun sw ->
   match Composition.stage_shared ~stdenv ~sw () with
@@ -316,24 +320,6 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
                            | Root -> "attach")
                            message)
                   | Ok () ->
-                      (* The listener binds only after the attach holds the
-                         fence: the bind unlinks whatever stale socket a
-                         killed predecessor left, so a boot that would lose
-                         the fence race must never reach it — a loser that
-                         bound first would sever the winner's live endpoint
-                         and then remove the directory on its way out. The
-                         fence is the exclusivity; the endpoint follows it. *)
-                      let listener =
-                        Server.listen ~sw ~net
-                          (Server.Bind.unix
-                             ~dir:(Lpath.Abs.of_string_exn socket_dir))
-                      in
-                      bound_socket_dir := Some socket_dir;
-                      if not spawned then
-                        Printf.printf "mentat serve: serving %s at %s\n%!"
-                          session
-                          (Server.Bind.socket_path
-                             ~dir:(Lpath.Abs.of_string_exn socket_dir));
                       (* A carried interrupt intent (a cancelled child killed
                          at the escalation's final rung and re-materialized):
                          interrupt right behind the idempotent first-turn
@@ -361,49 +347,72 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
                           let linger =
                             linger_seconds shared.Composition.environment
                           in
-                          Eio.Fiber.any
-                            [
-                              (fun () ->
-                                (* A short keep-alive: an idle stream notices
-                                   its peer's disconnect only at the next
-                                   heartbeat write, and a settled session may
-                                   not exit until its last observer's
-                                   connection is seen closed — the default
-                                   15s pace would hold an idle server open
-                                   that long past the broker's close. *)
-                                Server.serve ~sw ~clock ~heartbeat_s:1.0
-                                  ~driver_for:
-                                    (Serve_mount.driver_for
-                                       ~root:
-                                         (Lpath.Abs.to_string
-                                            (Composition.root instance))
-                                       ~driver ~active)
-                                  listener);
-                              (fun () -> Stop_signal.wait ~clock stop);
-                              (fun () ->
-                                idle_watchdog clock ~linger store heads served
-                                  active stop);
-                            ];
-                          (* Durable-first close; the endpoint itself is
-                             removed by {!serve} once the Eio run — whose
-                             switch teardown unlinks the socket — has
-                             completed. *)
+                          (* The endpoint lives on its own switch, closed
+                             before the durable close below: its LIFO
+                             teardown unlinks the listener's socket, then
+                             removes the directory — all while the fence is
+                             still held (the engine releases it only in the
+                             shutdown). A gone socket directory is the
+                             visible sign of a cleanly exited server, and no
+                             window exists where a freed fence coexists with
+                             a live-looking socket a successor could be
+                             severed through. *)
+                          Eio.Switch.run (fun serve_sw ->
+                              Eio.Switch.on_release serve_sw (fun () ->
+                                  Serve_mount.remove_socket socket_dir);
+                              (* The listener binds only after the attach
+                                 holds the fence: the bind unlinks whatever
+                                 stale socket a killed predecessor left, so
+                                 a boot that would lose the fence race must
+                                 never reach it — a loser that bound first
+                                 would sever the winner's live endpoint and
+                                 then remove the directory on its way out.
+                                 The fence is the exclusivity; the endpoint
+                                 follows it. *)
+                              let listener =
+                                Server.listen ~sw:serve_sw ~net
+                                  (Server.Bind.unix
+                                     ~dir:(Lpath.Abs.of_string_exn socket_dir))
+                              in
+                              if not spawned then
+                                Printf.printf
+                                  "mentat serve: serving %s at %s\n%!" session
+                                  (Server.Bind.socket_path
+                                     ~dir:(Lpath.Abs.of_string_exn socket_dir));
+                              Eio.Fiber.any
+                                [
+                                  (fun () ->
+                                    (* A short keep-alive: an idle stream
+                                       notices its peer's disconnect only at
+                                       the next heartbeat write, and a
+                                       settled session may not exit until
+                                       its last observer's connection is
+                                       seen closed — the default 15s pace
+                                       would hold an idle server open that
+                                       long past the broker's close. *)
+                                    Server.serve ~sw:serve_sw ~clock
+                                      ~heartbeat_s:1.0
+                                      ~driver_for:
+                                        (Serve_mount.driver_for
+                                           ~root:
+                                             (Lpath.Abs.to_string
+                                                (Composition.root instance))
+                                           ~driver ~active)
+                                      listener);
+                                  (fun () -> Stop_signal.wait ~clock stop);
+                                  (fun () ->
+                                    idle_watchdog clock ~linger store heads
+                                      served active stop);
+                                ]);
+                          (* Durable-first close, behind the endpoint's
+                             removal; the fence releases here. *)
                           Composition.shutdown instance);
                       Exit_status.Success)))))
 
 let serve ~session ~socket_dir_override ~spawned ~interrupted ~cwd =
   if String.length session = 0 then
     Exit_status.usage "serve requires a non-empty --session id"
-  else (
-    let bound_socket_dir = ref None in
-    let status =
-      serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
-        ~bound_socket_dir
-    in
-    (* A gone socket directory is the visible sign of a cleanly exited
-       server. *)
-    Option.iter Serve_mount.remove_socket !bound_socket_dir;
-    status)
+  else serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
 
 let session_opt =
   Arg.(

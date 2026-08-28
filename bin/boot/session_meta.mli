@@ -29,32 +29,37 @@ val session_error_to_protocol :
 val with_fence :
   store:Mentat_store.t ->
   sw:Eio.Switch.t ->
+  clock:_ Eio.Time.clock ->
   owner:Mentat_store.Run_lock.Owner.t ->
   Mentat_session.Id.t ->
   (Mentat_store.Run_lock.guard -> ('a, Mentat_protocol.Error.t) result) ->
   ('a, Mentat_protocol.Error.t) result
-(** [with_fence ~store ~sw ~owner session f] runs [f] under a short-lived run
-    fence over [session] (the "one driver per session" lock), releasing it on
-    exit. A hold that releases on its own — a custodial hold, or a settled
-    session's agent lingering toward its own exit — is waited out on a
-    bounded patience rather than refused, so an offline command issued right
-    after a run does not race the agent's linger. Any other held fence — an
-    agent actively driving, or a lingering one still held open past the
-    patience — is {!Mentat_protocol.Error.Busy} (with the owner); an IO
-    failure is [Unavailable]. *)
+(** [with_fence ~store ~sw ~clock ~owner session f] runs [f] under a
+    short-lived run fence over [session] (the "one driver per session" lock),
+    releasing it on exit. A hold that releases on its own — a custodial hold,
+    or a settled session's agent lingering toward its own exit — is waited
+    out on a bounded patience (derived from the agent's linger, sleeping on
+    [clock] so the wait parks a fiber, never the caller's domain) rather than
+    refused, so an offline command issued right after a run does not race the
+    agent's linger. Any other held fence — an agent actively driving, or a
+    lingering one still held open past the patience — is
+    {!Mentat_protocol.Error.Busy} (with the owner); an IO failure is
+    [Unavailable]. *)
 
 val commit_transform :
   store:Mentat_store.t ->
   sw:Eio.Switch.t ->
+  clock:_ Eio.Time.clock ->
   owner:Mentat_store.Run_lock.Owner.t ->
   now:Mentat_session.Time.t ->
   Mentat_session.Id.t ->
   transform:
     (Mentat_session.t -> (Mentat_session.t, Mentat_protocol.Error.t) result) ->
   (unit, Mentat_protocol.Error.t) result
-(** [commit_transform ~store ~sw ~owner ~now session ~transform] loads [session]
-    under a fence, applies [transform], stamps the result with [now], and
-    atomically commits it. Every failure is a {!Mentat_protocol.Error.t}. *)
+(** [commit_transform ~store ~sw ~clock ~owner ~now session ~transform] loads
+    [session] under a fence ({!with_fence}, [clock] as there), applies
+    [transform], stamps the result with [now], and atomically commits it.
+    Every failure is a {!Mentat_protocol.Error.t}. *)
 
 val fresh_id : ?prefix:string -> unit -> string
 (** [fresh_id ?prefix ()] mints a fresh identifier body at the command boundary

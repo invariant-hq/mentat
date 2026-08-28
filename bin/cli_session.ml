@@ -466,8 +466,10 @@ let target_action ~report ~make_transform session_opt last cwd =
           let id = Document.id d in
           match
             Session_meta.commit_transform ~store:(Composition.store t)
-              ~sw:(Composition.sw t) ~owner:(Composition.owner t)
-              ~now:(Composition.now_time t) id ~transform:(make_transform id)
+              ~sw:(Composition.sw t)
+              ~clock:(Eio.Stdenv.clock (Composition.stdenv t))
+              ~owner:(Composition.owner t) ~now:(Composition.now_time t) id
+              ~transform:(make_transform id)
           with
           | Ok () ->
               report id ();
@@ -1142,6 +1144,7 @@ let revert_apply t ~json ~document ~latest ~change ~path ~force =
              refusal — never a blanket accept. *)
           let result =
             Session_meta.with_fence ~store ~sw:(Composition.sw t)
+              ~clock:(Eio.Stdenv.clock (Composition.stdenv t))
               ~owner:(Composition.owner t) session (fun fence ->
                 Result.map_error
                   (fun e ->
@@ -1417,6 +1420,7 @@ let export format output no_timestamp max_bytes max_tool_bytes max_image_bytes
               in
               let result =
                 Session_meta.with_fence ~store ~sw:(Composition.sw t)
+                  ~clock:(Eio.Stdenv.clock (Composition.stdenv t))
                   ~owner:(Composition.owner t) session (fun fence ->
                     match Store.Export.write ~root:store ~fence ~write with
                     | Ok () -> Ok ()

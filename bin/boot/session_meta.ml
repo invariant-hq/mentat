@@ -56,15 +56,22 @@ let transient_hold ~store session holder =
              Session.State.finished
                (Session.state (Store.Session.Document.session doc)))
 
-let fence_patience_s = 4.0
+(* Derived from the linger, never restated: the patience must clear a
+   settled agent's linger plus its watchdog beat and durable close, or the
+   run-then-offline-command Busy this wait exists to kill returns on a
+   loaded machine. *)
+let fence_patience_s = Mentat_broker.serve_linger_s +. 1.0
 
-let with_fence ~store ~sw ~owner session f =
+let with_fence ~store ~sw ~clock ~owner session f =
   let rec acquire waited =
     match Store.Run_lock.try_acquire ~sw store ~session ~owner with
     | Error (`Held holder) ->
         if waited < fence_patience_s && transient_hold ~store session holder
         then begin
-          Unix.sleepf 0.1;
+          (* The wait parks a fiber, never the domain: the TUI answers its
+             lifecycle calls on the one Eio domain this would otherwise
+             freeze for the whole patience. *)
+          Eio.Time.sleep clock 0.1;
           acquire (waited +. 0.1)
         end
         else
@@ -77,8 +84,8 @@ let with_fence ~store ~sw ~owner session f =
   in
   acquire 0.
 
-let commit_transform ~store ~sw ~owner ~now session ~transform =
-  with_fence ~store ~sw ~owner session (fun guard ->
+let commit_transform ~store ~sw ~clock ~owner ~now session ~transform =
+  with_fence ~store ~sw ~clock ~owner session (fun guard ->
       match Store.Session.load store session with
       | Error e -> Error (session_store_error_to_protocol session e)
       | Ok doc -> (

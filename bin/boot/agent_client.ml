@@ -243,8 +243,8 @@ let driver ?(environment_overrides = []) t =
 let client ?environment_overrides t =
   Result.map (Composition.attach_client t) (driver ?environment_overrides t)
 
-let client_with_tui_capabilities t =
-  match client t with
+let client_with_tui_capabilities ?environment_overrides t =
+  match client ?environment_overrides t with
   | Error status -> Error status
   | Ok client -> (
       match Composition.tui_capabilities t with

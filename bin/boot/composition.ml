@@ -1455,7 +1455,8 @@ let lifecycle_cone t : Client.Driver.Lifecycle.t =
   let commit session ~transform =
     let offline () =
       Session_meta.commit_transform ~store:t.shared.store ~sw:t.switch
-        ~owner:t.owner ~now:(now_time t) session ~transform
+        ~clock:(Eio.Stdenv.clock t.shared.stdenv) ~owner:t.owner
+        ~now:(now_time t) session ~transform
     in
     match t.engine with
     | Some engine -> (

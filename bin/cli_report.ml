@@ -144,6 +144,7 @@ let export_record t ~session =
   let write chunk = Buffer.add_string buffer chunk in
   match
     Session_meta.with_fence ~store:(Composition.store t) ~sw:(Composition.sw t)
+      ~clock:(Eio.Stdenv.clock (Composition.stdenv t))
       ~owner:(Composition.owner t) session (fun fence ->
         match
           Mentat_store.Export.write ~root:(Composition.store t) ~fence ~write

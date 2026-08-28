@@ -828,28 +828,156 @@ let prompt_content ~client ~prompt =
    config home. Removal waits for the started agents to exit — their derived
    endpoints under the throwaway-keyed socket tree are the visible sign — so
    the tree is never pulled out from under a lingering agent, which could
-   then never observe its own settled idle. An agent still up past the bound
-   keeps the tree, loudly. *)
+   then never observe its own settled idle. An agent that outlives the
+   quiesce — a parked one over a store nobody will ever reply into — is
+   actively ended before the tree goes: discarding the store is the owner's
+   stated intent, so the wind-down interrupts it over its socket, waits, and
+   only then signals the fence holder; an agent that survives even that
+   keeps the tree, loudly. An agent spawned but not yet bound has no leaf
+   and no fence, so it is invisible to the whole quiesce — the consequence
+   is bounded to a loud boot failure logged inside a discarded throwaway. *)
+let ephemeral_socket_tree dirs =
+  Filename.concat (User_dirs.daemon_socket_dir dirs) "s"
+
+let ephemeral_tree_quiet tree =
+  match Sys.readdir tree with
+  | [||] -> true
+  | _ -> false
+  | exception Sys_error _ -> true
+
+(* Interrupt the session's agent over its derived socket — one short-lived
+   dial that never starts anything: a refused connect is an agent already
+   gone. *)
+let ephemeral_interrupt t session =
+  match
+    Command.interrupt ~session
+      ~reason:"the ephemeral run is discarding its store" ()
+  with
+  | Error _ -> ()
+  | Ok command -> (
+      let dir =
+        User_dirs.child_socket_dir
+          (Composition.dirs t)
+          ~session:(Id.to_string session)
+      in
+      match
+        Eio.Switch.run @@ fun sw ->
+        match
+          Mentat_server.connect ~sw
+            ~net:(Eio.Stdenv.net (Composition.stdenv t))
+            ~clock:(Eio.Stdenv.clock (Composition.stdenv t))
+            ~workspace:(Lpath.Abs.to_string (Composition.root t))
+            (Mentat_server.Bind.unix ~dir:(Lpath.Abs.of_string_exn dir))
+        with
+        | Error _ -> ()
+        | Ok driver ->
+            ignore
+              (driver.Client.Driver.session.Client.Driver.Session.submit
+                 command)
+      with
+      | () -> ()
+      | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
+      | exception _ -> ())
+
+let ephemeral_held_sessions t =
+  match Mentat_store.Session.scan (Composition.store t) with
+  | Error _ -> []
+  | Ok (documents, _corrupt) ->
+      List.filter_map
+        (fun doc ->
+          let id = Document.id doc in
+          match
+            Mentat_store.Run_lock.holder (Composition.store t) ~session:id
+          with
+          | `Held _ -> Some id
+          | `Free | `Io _ -> None)
+        documents
+
+(* Signal the fence holder named by the owner line — only a same-host owner,
+   and only while the fence is still held, so a released fence is never
+   chased into a recycled pid. *)
+let ephemeral_signal t session signal =
+  match Mentat_store.Run_lock.holder (Composition.store t) ~session with
+  | `Held (Some owner)
+    when String.equal
+           (Mentat_store.Run_lock.Owner.host owner)
+           (Unix.gethostname ()) -> (
+      try Unix.kill (Mentat_store.Run_lock.Owner.pid owner) signal
+      with Unix.Unix_error _ -> ())
+  | `Held _ | `Free | `Io _ -> ()
+
+(* A SIGKILLed agent leaves its socket leaf behind; its lock died with it,
+   so a free fence over a leftover leaf is residue this owner may clear —
+   the same judgment the broker's exit funnel applies. *)
+let ephemeral_clear_free_residue t =
+  match Mentat_store.Session.scan (Composition.store t) with
+  | Error _ -> ()
+  | Ok (documents, _corrupt) ->
+      List.iter
+        (fun doc ->
+          let id = Document.id doc in
+          match
+            Mentat_store.Run_lock.holder (Composition.store t) ~session:id
+          with
+          | `Free ->
+              Mentat_server.Bind.remove_endpoint
+                ~dir:
+                  (Lpath.Abs.of_string_exn
+                     (User_dirs.child_socket_dir
+                        (Composition.dirs t)
+                        ~session:(Id.to_string id)))
+          | `Held _ | `Io _ -> ())
+        documents
+
+(* The quiesce-then-escalate wind-down, inside the composition so the store,
+   the derived socket tree, and the wire are still at hand. *)
+let ephemeral_wind_down t =
+  let clock = Eio.Stdenv.clock (Composition.stdenv t) in
+  let tree = ephemeral_socket_tree (Composition.dirs t) in
+  let rec await budget =
+    if ephemeral_tree_quiet tree then true
+    else if budget <= 0 then false
+    else begin
+      Eio.Time.sleep clock 0.1;
+      await (budget - 1)
+    end
+  in
+  (* 15 s covers every clean exit: settlement, the linger, the durable
+     close. What survives it is a parked or wedged agent. *)
+  if not (await 150) then begin
+    List.iter (fun session -> ephemeral_interrupt t session)
+      (ephemeral_held_sessions t);
+    (* The interrupt settles the turn; the agent still pays its linger and
+       durable close before removing its leaf. *)
+    if not (await 100) then begin
+      List.iter
+        (fun session -> ephemeral_signal t session Sys.sigterm)
+        (ephemeral_held_sessions t);
+      if not (await 50) then
+        List.iter
+          (fun session -> ephemeral_signal t session Sys.sigkill)
+          (ephemeral_held_sessions t);
+      ephemeral_clear_free_residue t;
+      ignore (await 20)
+    end
+  end
+
 let ephemeral_agents_exited root =
   match User_dirs.resolve ~getenv:Sys.getenv_opt with
   | Error _ -> true
   | Ok dirs -> (
-      let tree = Filename.concat (User_dirs.daemon_socket_dir dirs) "s" in
-      let quiet () =
-        match Sys.readdir tree with
-        | [||] -> true
-        | _ -> false
-        | exception Sys_error _ -> true
-      in
+      let tree = ephemeral_socket_tree dirs in
+      (* The wind-down already quiesced and escalated inside the
+         composition; this re-check only rides out its last teardown tail. *)
       let rec await budget =
-        if quiet () then true
+        if ephemeral_tree_quiet tree then true
         else if budget <= 0 then false
         else begin
           Unix.sleepf 0.1;
           await (budget - 1)
         end
       in
-      match await 150 with
+      match await 20 with
       | true -> true
       | false ->
           Output.stderr_printf
@@ -863,7 +991,11 @@ let with_run_base ~cwd ~overrides ~ephemeral f =
     Unix.putenv "MENTAT_DATA_HOME" root;
     Fun.protect
       ~finally:(fun () -> if ephemeral_agents_exited root then Fs.remove_tree root)
-      (fun () -> Composition.with_base ~cwd ~overrides f)
+      (fun () ->
+        Composition.with_base ~cwd ~overrides (fun t ->
+            let status = f t in
+            ephemeral_wind_down t;
+            status))
   end
 
 (* [--output-schema FILE] validation at the argv boundary: read the file
@@ -1560,17 +1692,28 @@ let inbox_work t ~session =
       then `Nothing
       else `Runnable
 
-let drive_inbox t ~environment_overrides ~session =
+let drive_inbox t ~environment_overrides ~thinking ~session =
   Log_setup.set_session ~event:Log_setup.Resumed (Some (Id.to_string session));
+  let settled_line () =
+    Output.stderr_printf "mentat: session %s is settled with nothing queued\n"
+      (Id.to_string session);
+    Exit_status.Success
+  in
+  let waiting_block request =
+    render_human_waiting ~session request;
+    Exit_status.Blocked
+      (Printf.sprintf
+         "session blocked on a %s decision (%s); resolve with `mentat run \
+          reply`"
+         (Mentat_session.Decision.Requested.tag request)
+         (Session.Decision.Id.to_string
+            (Session.Decision.Requested.id request)))
+  in
   match spawn_scoped_gate t ~session ~environment_overrides with
   | Error status -> status
   | Ok () -> (
       match inbox_work t ~session with
-      | `Nothing ->
-          Output.stderr_printf
-            "mentat: session %s is settled with nothing queued\n"
-            (Id.to_string session);
-          Exit_status.Success
+      | `Nothing -> settled_line ()
       | `Runnable -> (
           match run_client t ~environment_overrides with
           | Error status -> status
@@ -1580,15 +1723,7 @@ let drive_inbox t ~environment_overrides ~session =
                  arrives live — the waiting block and exit 3. *)
               match Client.pending_decision client session with
               | Error e -> Exit_status.of_protocol_error e
-              | Ok (Some request) ->
-                  render_human_waiting ~session request;
-                  Exit_status.Blocked
-                    (Printf.sprintf
-                       "session blocked on a %s decision (%s); resolve with \
-                        `mentat run reply`"
-                       (Mentat_session.Decision.Requested.tag request)
-                       (Session.Decision.Id.to_string
-                          (Session.Decision.Requested.id request)))
+              | Ok (Some request) -> waiting_block request
               | Ok None -> (
                   match
                     Client.follow_session ~sw:(Composition.sw t) client session
@@ -1596,16 +1731,31 @@ let drive_inbox t ~environment_overrides ~session =
                   with
                   | Error e -> Exit_status.of_protocol_error e
                   | Ok feed ->
-                      let interrupted = ref false in
-                      let status =
-                        with_sigint_guard t ~client ~session ~interrupted
-                          (fun () ->
-                            render_feed t ~client ~json:false ~session
-                              ~output_schema:false ~thinking:false
-                              ~terminal:Inbox ~interrupted feed)
+                      let close_and status =
+                        Client.Feed.close feed;
+                        status
                       in
-                      Client.Feed.close feed;
-                      status))))
+                      (* The agent's boot attach consumes the mail before its
+                         listener binds, so the turn can settle — or park —
+                         before this follow attached, and a from-Now feed
+                         would never speak of it while the open connection
+                         pins the agent alive. With the follow attached,
+                         re-read the durable truth once; anything settling
+                         after this read crosses the feed. *)
+                      if session_concluded t ~session then
+                        close_and (settled_line ())
+                      else (
+                        match Client.pending_decision client session with
+                        | Ok (Some request) ->
+                            close_and (waiting_block request)
+                        | Error _ | Ok None ->
+                            let interrupted = ref false in
+                            close_and
+                              (with_sigint_guard t ~client ~session
+                                 ~interrupted (fun () ->
+                                   render_feed t ~client ~json:false ~session
+                                     ~output_schema:false ~thinking
+                                     ~terminal:Inbox ~interrupted feed)))))))
 
 let resume json options images last pos0 pos1 cwd =
   (let* mode = resolve_mode options.mode in
@@ -1676,7 +1826,8 @@ let resume json options images last pos0 pos1 cwd =
                                         options.reasoning;
                                     ]
                               in
-                              drive_inbox t ~environment_overrides ~session
+                              drive_inbox t ~environment_overrides
+                                ~thinking:options.thinking ~session
                         | Some prompt_raw -> (
                             match model_selection_of_options t options with
                             | Error status -> status

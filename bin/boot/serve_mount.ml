@@ -69,10 +69,12 @@ let member ~store cache ~root target =
 (* The one-session confinement, making the man page's claim a code fact. The
    session cone answers only for the served session's own delegation
    subtree — the only sessions this endpoint can speak for; a foreign session
-   id is refused, never resolved against the shared store. Every other cone —
-   accounts, settings, lifecycle, review, workspace — is refused whole: a
-   per-session endpoint exists to drive one session, not to reach the user's
-   accounts, configuration, or session index. *)
+   id is refused, never resolved against the shared store. The two
+   session-scoped settings writes pass under the same membership guard; every
+   other cone — accounts, the sessionless settings, lifecycle, review,
+   workspace — is refused whole: a per-session endpoint exists to drive one
+   session, not to reach the user's accounts, configuration, or session
+   index. *)
 let confined ~store ~cache ~served (driver : Driver.t) : Driver.t =
   let foreign session =
     Mentat_protocol.Error.unavailable

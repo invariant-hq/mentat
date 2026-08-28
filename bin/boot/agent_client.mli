@@ -18,7 +18,9 @@
 
     The caller's connections are the lease: a held feed keeps the agent
     alive, and an agent nobody dials idles out on its own linger. No engine
-    is ever assembled in this process. *)
+    is ever assembled in this process. Wire calls carry no client-side
+    timeout: they ride the server's own bounds, and a wedged agent is the
+    operator's cancel to deliver. *)
 
 val serving : Composition.t -> Mentat_session.Id.t -> bool
 (** [serving t session] is whether [session]'s derived endpoint accepts a
@@ -39,11 +41,13 @@ val client :
     {!Composition.daemon_cones}'s prefix (an unsealable workspace). *)
 
 val client_with_tui_capabilities :
+  ?environment_overrides:(string * string) list ->
   Composition.t ->
   ( Mentat_client.t * Mentat_workspace_io.t * Mentat_tool.t,
     Exit_status.t )
   result
-(** [client_with_tui_capabilities t] is {!client} paired with
-    {!Composition.tui_capabilities} — the read-only workspace capability for
+(** [client_with_tui_capabilities ?environment_overrides t] is {!client} —
+    [environment_overrides] exactly as there — paired with
+    {!Composition.tui_capabilities}: the read-only workspace capability for
     file completion and the local-user shell definition, both local; the
     engines are the sessions' own agents. *)
