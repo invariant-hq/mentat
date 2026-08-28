@@ -135,7 +135,7 @@ val instance :
     interactive holder. [broker] is the process broker the instance's engine
     sends recorded child messages through and hands every delegated child to
     (each child a [mentat serve] process of its own, reported back through
-    {!val-broker_engine}); a daemon passes its one node broker, and an
+    the {!Mentat_broker.Engine} seam sealed at assembly); a daemon passes its one node broker, and an
     instance without one gets its own on first use, built over [resolve_bin]
     — the staging fact naming the binary the broker spawns ({!val-broker});
     absent, it spawns the running executable itself, with [MENTAT_BIN] as
@@ -152,15 +152,7 @@ val instance :
 val shutdown : t -> unit
 (** [shutdown t] shuts down [t]'s engine drivers when the client was built,
     settling durable-first and leaving parked decisions intact; a no-op when no
-    engine was assembled. {!with_base} calls it before its switch closes; a
-    daemon's eviction sweep calls it before closing an instance's switch. *)
-
-val retained_hub_count : t -> int
-(** [retained_hub_count t] is the number of sessions [t]'s engine currently
-    retains a hub for (a driver attached or a feed open); [0] when no engine was
-    assembled. The daemon's eviction sweep reads it as the third of the three
-    zeros — an instance with no bound connections, no in-flight call, and no
-    retained hub is idle and evictable. *)
+    engine was assembled. {!with_base} calls it before its switch closes. *)
 
 type daemon_cones = {
   accounts : Mentat_client.Driver.Accounts.t;
@@ -298,51 +290,14 @@ val broker : t -> Mentat_broker.t
     owned broker's fibers live under the instance switch and are stopped by
     {!shutdown}. *)
 
-(** {2:broker The child broker's engine reach}
-
-    Thin wrappers over the engine's brokered observation seam
-    ({!Mentat_agent.adopt}, {!Mentat_agent.integrate_brokered_child},
-    {!Mentat_agent.fail_brokered_child}), so a child broker acts on an
-    instance without ever holding the engine value — and
-    {!val-broker_engine}, the same three sealed with the instance's
-    workspace identity into the record the broker consumes. *)
-
 val adopt_session :
   t -> Mentat_session.Id.t -> (unit, Mentat_protocol.Error.t) result
 (** [adopt_session t session] attaches [session]'s driver in [t]'s engine with
     no accompanying command — fence, load, recovery to quiescence — building
-    the engine first if this instance has not assembled it yet. The restarted
-    node's verb for re-adopting the parent of an orphaned child: recovery
-    reconstructs the parked wait and re-drives unfinished edges through the
-    instance's broker. [Busy] when another process drives the session. *)
-
-val integrate_child :
-  t ->
-  child:Mentat_session.Id.t ->
-  [ `Integrated | `Not_settled | `Unbound ]
-(** [integrate_child t ~child] is {!Mentat_agent.integrate_brokered_child} on
-    [t]'s engine: fold [child]'s journal-settled result into its parent's
-    scheduler and wake the parked wait. [`Unbound] when no engine is built or
-    the engine holds no parent binding — the journals still integrate at the
-    parent's next attach. *)
-
-val fail_child : t -> child:Mentat_session.Id.t -> message:string -> unit
-(** [fail_child t ~child ~message] is {!Mentat_agent.fail_brokered_child} on
-    [t]'s engine: settle the parent's wait for [child] with the spawn-failure
-    text carrying [message] — the loud floor for a child the broker has
-    abandoned. A no-op when no engine is built. *)
-
-val broker_engine : t -> Mentat_broker.Engine.t
-(** [broker_engine t] is the broker's engine-reach seam for this instance
-    ({!Mentat_broker.Engine.t}): the workspace root and environment snapshot
-    a child is spawned and dialed under, and the three wrappers above as one
-    record. The instance's own engine is created holding it, so its brokered
-    children report back into it; a daemon's boot rediscovery builds it for
-    the instances it adopts orphans into. The record's closures answer
-    through the instance's assembled engine — {!driver} or {!client} is the
-    assembling step — and an instance that never assembled answers each
-    seam's null arm ([adopt_session] unavailable, [integrate_child]
-    [`Unbound], [fail_child] a no-op). *)
+    the engine first if this instance has not assembled it yet. The agent
+    boot's attach verb ([mentat serve]): recovery reconstructs any parked
+    wait and re-drives unfinished delegation edges through the instance's
+    broker. [Busy] when another process drives the session. *)
 
 val tool_declarations :
   t ->

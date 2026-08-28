@@ -57,24 +57,3 @@ let supervise_action ~fence ~reachable ~head =
       | `Unfinished -> Spawn
       | `Terminal -> Settle
       | `Absent -> Refuse "the session does not exist")
-
-type boot =
-  [ `Adopt
-  | `Adopt_and_watch
-  | `Watch
-  | `Adopt_and_dispose
-  | `Dispose
-  | `Skip of string ]
-
-let boot_action ~fence ~head ~parent =
-  match (fence, head, parent) with
-  | `Io, _, _ -> `Skip "the run fence could not be probed"
-  | _, _, `Absent -> (
-      match fence with
-      | `Free -> `Dispose
-      | `Held | `Io -> `Skip "an orphan with no parent integrates nowhere")
-  | `Held, _, `Waiting -> `Adopt_and_watch
-  | `Held, _, `Idle -> `Watch
-  | `Free, `Unfinished, _ -> `Adopt
-  | `Free, (`Terminal | `Absent), `Waiting -> `Adopt_and_dispose
-  | `Free, (`Terminal | `Absent), `Idle -> `Dispose

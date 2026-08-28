@@ -5,12 +5,11 @@
 
 open! Cmdliner
 
-let serve socket stop spawned web web_port ingress_port github_base_url
-    routine_git_base =
+let serve stop web web_port ingress_port github_base_url routine_git_base =
   if stop then Daemon.stop ()
   else
-    Daemon_server.serve ~socket_override:socket ~spawned ~web ~web_port
-      ~ingress_port ~github_base_url ~routine_git_base
+    Daemon_server.serve ~web ~web_port ~ingress_port ~github_base_url
+      ~routine_git_base
 
 (* TCP ports live in 0–65535. An out-of-range value would raise only at
    bind time — or persist a permanently failing service unit — so both
@@ -24,32 +23,11 @@ let port_conv =
   in
   Arg.conv (parse, Format.pp_print_int)
 
-let socket_opt =
-  Arg.(
-    value
-    & opt (some string) None
-    & info [ "socket" ] ~docv:"DIR"
-        ~doc:
-          "Bind the daemon's unix socket under DIR instead of the default \
-           per-user, per-store directory under $(b,/tmp). The choice is \
-           recorded in $(b,daemon.json), so attachers follow it automatically. \
-           Use this when the default path is unsuitable (an unusual $(b,/tmp), \
-           a test harness).")
-
 let stop_flag =
   Arg.(
     value & flag
     & info [ "stop" ] ~deprecated:"use 'mentatd stop' instead"
         ~doc:"Deprecated alias of the $(b,stop) subcommand.")
-
-let spawned_flag =
-  Arg.(
-    value & flag
-    & info [ "spawned" ]
-        ~doc:
-          "Internal: mark this daemon as detached-spawned, so it calls \
-           $(b,setsid) at startup to survive the terminal. Set by the \
-           find-or-spawn path; not for direct use.")
 
 let web_flag =
   Arg.(
@@ -84,10 +62,9 @@ let ingress_port_opt =
            output). The listener answers only the pre-auth \
            $(b,POST /ingress/github/…) family — every delivery is \
            authenticated end-to-end by its HMAC signature, so any tunnel the \
-           owner already trusts can point at it. Without this flag the \
-           ingress family still rides the daemon's unix wire socket, and the \
-           reconcile sweep keeps webhook routines converging with no ingress \
-           at all.")
+           owner already trusts can point at it. Without this flag no \
+           ingress listens, and the reconcile sweep still keeps webhook \
+           routines' records converging.")
 
 let github_base_url_opt =
   Arg.(
@@ -125,16 +102,19 @@ let man =
        Sessions are driven by their own per-session agents, which \
        $(b,mentat) starts and dials directly; the daemon hosts the standing \
        surfaces around them — the web dashboard and the webhook ingress — \
-       and adopts orphaned runs at boot.";
+       and settles orphaned routine runs at boot. It holds no engine and \
+       serves no wire driver of its own.";
     `P "The daemon is $(b,opt-in); nothing in $(b,mentat) starts one.";
     `P
-      "The daemon's captured environment makes its provider calls, so a \
-       shell's $(b,MENTAT_*) overrides do not reach a daemon that is \
+      "The agents the daemon starts — a browser action's session, a \
+       routine's run — boot against the daemon's captured environment, so \
+       a shell's $(b,MENTAT_*) overrides do not reach a daemon that is \
        already running with a different environment.";
     `P
-      "A first SIGTERM or SIGINT stops the daemon gracefully (it settles every \
-       instance durable-first). Send the signal a second time to force an \
-       immediate exit if a graceful teardown wedges.";
+      "A first SIGTERM or SIGINT stops the daemon gracefully; running \
+       agents keep running and account for themselves. Send the signal a \
+       second time to force an immediate exit if a graceful teardown \
+       wedges.";
     `S "ROUTINES";
     `P
       "The daemon is also the resident routine node: it serves the webhook \
@@ -344,9 +324,8 @@ let root =
     ~default:
       (Exit_status.term
          Term.(
-           const serve $ socket_opt $ stop_flag $ spawned_flag $ web_flag
-           $ web_port_opt $ ingress_port_opt $ github_base_url_opt
-           $ routine_git_base_opt))
+           const serve $ stop_flag $ web_flag $ web_port_opt
+           $ ingress_port_opt $ github_base_url_opt $ routine_git_base_opt))
     info [ stop_cmd; install_cmd; uninstall_cmd; Routine_cli.cmd ]
 
 let () = Entry.run ~version:Daemon.binary_version root

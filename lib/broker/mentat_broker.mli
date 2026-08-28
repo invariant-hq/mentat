@@ -11,11 +11,14 @@
     document, the capacity permit — and hands this broker a child's identity;
     the broker owns the processes: it spawns the detached per-session server,
     watches the child's feed over its endpoint, reaps exits, re-materializes a
-    child that died mid-work, escalates a cancel, and at boot re-adopts the
-    parents of orphans a previous process life left running. Every observation
+    child that died mid-work, and escalates a cancel. Every observation
     reports back through the owning engine's {!Engine} seam, and every path
     terminates in either an integrated settlement or a parent-visible
-    failure — a parked wait is never abandoned silently.
+    failure — a parked wait is never abandoned silently. What a previous
+    process life left behind needs no adoption verb: a live agent holds its
+    own fence and endpoint, a parent agent's recovery re-drives its
+    unfinished delegations, and {!sweep_endpoints} clears the endpoint
+    residue of removed sessions at boot.
 
     {!val-supervise} is the same machinery with a root shape: a session with
     no delegation edge — a routine run, any owned root — is made to run and
@@ -120,12 +123,6 @@ module Engine : sig
         (** The engine's process-environment snapshot, rendered whole as a
             spawned child's environment — the child's own composition
             re-resolves everything else from it. *)
-    adopt_session :
-      Mentat_session.Id.t -> (unit, Mentat_protocol.Error.t) result;
-        (** Attach a session's driver with no accompanying command — fence,
-            load, recovery to quiescence. {!rediscover}'s verb for re-adopting
-            the parent of an orphaned child: recovery reconstructs the parked
-            wait and re-drives unfinished edges into {!materialize}. *)
     integrate_child :
       child:Mentat_session.Id.t -> [ `Integrated | `Not_settled | `Unbound ];
         (** Fold [child]'s journal-settled result into its parent's scheduler
@@ -371,35 +368,23 @@ val cancel : t -> child:Mentat_session.Id.t -> unit
     resuming the cancelled work. Non-blocking; completion is observed through
     the child's journal, not through this call. *)
 
-val rediscover :
-  t ->
-  engine_for:(root:string -> (Engine.t * (unit -> unit), string) result) ->
-  unit
-(** [rediscover t ~engine_for] is the boot orphan sweep, run before serving.
-    Candidates come from two sources, because neither alone sees every
-    orphan: the per-session endpoint directories left under the socket tree
-    (a digest leaf cannot be inverted, so leaves resolve against the store's
-    session index), and every delegated child session whose run fence is held
-    (a live child whose endpoint directory was lost). For each candidate the
-    pure {!Reconcile.boot_action} table decides: an unfinished child —
-    running or dead — has its parent adopted through [engine_for]'s engine,
-    whose recovery re-drives the edge into {!materialize} (the single
-    probe-and-spawn path); a live child is additionally watched, so its exit
-    re-drives whatever its held fence shadowed; a settled child with a
-    still-waiting parent is adopted so the buffered result wakes the wait; a
-    settled or vanished child nobody waits for has its stale endpoint
-    directory removed and nothing else — leftover directories after a forced
-    kill are expected. [engine_for ~root] stages the engine hosting the
-    workspace at [root] and pairs it with the release of whatever lease the
-    staging took; the sweep calls that release exactly once, after the
-    candidate's action has been issued. Failures are logged and skip the
-    candidate; they never abort the sweep or the boot. *)
+val sweep_endpoints : t -> unit
+(** [sweep_endpoints t] is the boot residue sweep, run before serving: every
+    per-session endpoint directory under the socket tree whose session no
+    longer exists in the store is removed — the residue of a removed session,
+    which nothing would ever rebind or clean (leftover directories after a
+    forced kill are expected). A digest leaf cannot be inverted, so leaves
+    resolve against the store's session index; a stored session's leaf is
+    never touched, whatever its state — a stale but claimed leaf is rebound
+    by the session's next agent. An unreadable store logs and sweeps
+    nothing. *)
 
 val stop : t -> unit
 (** [stop t] ends the broker's fibers promptly: the reaper exits, observers
     are released, and no further materialization is accepted. Running children
-    are left running — their journals are durable and a successor process's
-    {!rediscover} re-adopts them. Idempotent. *)
+    are left running — their journals are durable, and whoever next runs each
+    session (its parent agent's recovery, a frontend's dial-or-start) picks
+    them up. Idempotent. *)
 
 val for_tests :
   ?supervise:
@@ -441,7 +426,7 @@ val for_tests :
     to model — a script that drives the child forks its own fiber.
 
     Every process-facing operation left unstubbed — {!val-serve},
-    {!val-watch}, {!cancel}, {!rediscover}, and {!val-materialize} or
+    {!val-watch}, {!cancel}, {!sweep_endpoints}, and {!val-materialize} or
     {!val-supervise} without a script — raises [Invalid_argument]: the stub
     performs no process work, and a test that reaches one of those has wired
     the wrong seam. *)

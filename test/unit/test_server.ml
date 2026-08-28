@@ -1375,11 +1375,6 @@ let make_engine ~sw ~store ~script =
       {
         Mentat_broker.Engine.root = Lpath.Abs.of_string_exn (Sys.getcwd ());
         environment = [];
-        adopt_session =
-          (fun _ ->
-            Error
-              (Mentat_protocol.Error.unavailable
-                 "this fixture adopts no session"));
         integrate_child = (fun ~child:_ -> `Unbound);
         fail_child = (fun ~child:_ ~message:_ -> ());
       }
@@ -2185,10 +2180,9 @@ let coverage_group =
 
 (* ---- W2: daemon discovery ---- *)
 
-let a_discovery ?web_url ?ingress ~socket ~pid () =
+let a_discovery ?web_url ?ingress ~pid () =
   {
-    Server.Discovery.socket;
-    pid;
+    Server.Discovery.pid;
     protocol = 1;
     binary = "0.1.0-test";
     config_home = "/home/u/.config/mentat";
@@ -2206,14 +2200,12 @@ let discovery_group =
   group "daemon discovery"
     [
       test "the discovery record round-trips through its codec" (fun () ->
-          let d = a_discovery ~socket:"/tmp/mtsrv/mentat.sock" ~pid:4242 () in
+          let d = a_discovery ~pid:4242 () in
           match
             Jsont_bytesrw.decode_string Server.Discovery.jsont
               (enc Server.Discovery.jsont d)
           with
           | Ok d' ->
-              equal string ~msg:"socket" d.Server.Discovery.socket
-                d'.Server.Discovery.socket;
               equal int ~msg:"pid" d.Server.Discovery.pid
                 d'.Server.Discovery.pid;
               equal int ~msg:"protocol" d.Server.Discovery.protocol
@@ -2226,7 +2218,7 @@ let discovery_group =
       test "the optional web_url round-trips when present (additive field)"
         (fun () ->
           let url = "http://127.0.0.1:8080/?t=deadbeef" in
-          let d = a_discovery ~web_url:url ~socket:"/s" ~pid:7 () in
+          let d = a_discovery ~web_url:url ~pid:7 () in
           match
             Jsont_bytesrw.decode_string Server.Discovery.jsont
               (enc Server.Discovery.jsont d)
@@ -2239,7 +2231,7 @@ let discovery_group =
           | Error message -> failf "decode: %s" message);
       test "the optional ingress address round-trips when present" (fun () ->
           let address = "127.0.0.1:53412" in
-          let d = a_discovery ~ingress:address ~socket:"/s" ~pid:7 () in
+          let d = a_discovery ~ingress:address ~pid:7 () in
           match
             Jsont_bytesrw.decode_string Server.Discovery.jsont
               (enc Server.Discovery.jsont d)
@@ -2257,11 +2249,32 @@ let discovery_group =
           with
           | Error _ -> ()
           | Ok _ -> fail "an unknown v must not decode");
+      test
+        "the historical socket member is tolerated on decode, never written"
+        (fun () ->
+          (match
+             Jsont_bytesrw.decode_string Server.Discovery.jsont
+               {|{"v":1,"socket":"/tmp/old/mentat.sock","pid":5,"protocol":1,"binary":"b","config_home":"/c","started_at":0}|}
+           with
+          | Ok d ->
+              equal int ~msg:"a pre-R4 record still reads (stop needs its pid)"
+                5 d.Server.Discovery.pid
+          | Error message -> failf "a pre-R4 record must decode: %s" message);
+          let fresh = enc Server.Discovery.jsont (a_discovery ~pid:5 ()) in
+          let contains hay needle =
+            let n = String.length needle and h = String.length hay in
+            let rec go i =
+              i + n <= h && (String.equal (String.sub hay i n) needle || go (i + 1))
+            in
+            go 0
+          in
+          is_false ~msg:"a fresh record carries no socket member"
+            (contains fresh "socket"));
       test "write is atomic: 0600 file under a 0700 dir, no tmp residue"
         (fun () ->
           let dir = fresh_daemon_dir () in
           let dir_s = Lpath.Abs.to_string dir in
-          let d = a_discovery ~socket:(dir_s ^ "/mentat.sock") ~pid:777 () in
+          let d = a_discovery ~pid:777 () in
           (match Server.Discovery.write ~dir d with
           | Ok () -> ()
           | Error message -> failf "write: %s" message);
@@ -2290,8 +2303,7 @@ let discovery_group =
           (match Server.Discovery.read ~dir with
           | `Foreign _ -> ()
           | _ -> fail "undecodable bytes are Foreign");
-          ignore
-            (Server.Discovery.write ~dir (a_discovery ~socket:"/s" ~pid:9 ()));
+          ignore (Server.Discovery.write ~dir (a_discovery ~pid:9 ()));
           match Server.Discovery.read ~dir with
           | `Found _ -> ()
           | _ -> fail "a valid file is Found");
@@ -2544,17 +2556,18 @@ let driver_for_group =
               equal int ~msg:"the one binding closed exactly once" 1 !closes));
     ]
 
-(* A composite driver in the shape the daemon's registry hands back: its
-   session-cone fields route by the payload's session id (session→instance),
-   independent of the connection's bound workspace. Here [possibly_mutating]
-   stands in for that routing probe. *)
+(* A driver that discriminates by the payload's session id, the way a
+   frontend's per-session router does: the wire must carry the session
+   identity on every session-cone call, independent of the connection's
+   bound workspace. Here [possibly_mutating] stands in for that routing
+   probe. *)
 let session_routing_group =
-  group "session→instance routing"
+  group "session routing"
     [
       test "a session-cone call routes by session id, not the bound workspace"
         (fun () ->
           let a_hits = ref 0 and b_hits = ref 0 in
-          (* The registry's session→instance resolution, as a map. *)
+          (* A per-session resolution, as a map. *)
           let route session =
             match Session.Id.to_string session with "s-in-b" -> `B | _ -> `A
           in

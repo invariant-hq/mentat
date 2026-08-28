@@ -4,7 +4,6 @@
  ---------------------------------------------------------------------------*)
 
 type t = {
-  socket : string;
   pid : int;
   protocol : int;
   binary : string;
@@ -20,14 +19,17 @@ let file_version = 1
 
 let jsont =
   Jsont.Object.map ~kind:"daemon discovery"
-    (fun v socket pid protocol binary config_home started_at web_url ingress ->
+    (fun v _socket pid protocol binary config_home started_at web_url ingress ->
       if not (Int.equal v file_version) then
         Jsont.Error.msg Jsont.Meta.none
           (Printf.sprintf "unsupported discovery file version %d (expected %d)"
              v file_version);
-      { socket; pid; protocol; binary; config_home; started_at; web_url; ingress })
+      { pid; protocol; binary; config_home; started_at; web_url; ingress })
   |> Jsont.Object.mem "v" Jsont.int ~enc:(fun _ -> file_version)
-  |> Jsont.Object.mem "socket" Jsont.string ~enc:(fun t -> t.socket)
+  (* Never written since the daemon stopped serving a wire socket; decoded
+     and discarded so a record a pre-R4 daemon wrote — one still running
+     across an upgrade, whose pid [stop] must read — is not foreign. *)
+  |> Jsont.Object.opt_mem "socket" Jsont.string ~enc:(fun _ -> None)
   |> Jsont.Object.mem "pid" Jsont.int ~enc:(fun t -> t.pid)
   |> Jsont.Object.mem "protocol" Jsont.int ~enc:(fun t -> t.protocol)
   |> Jsont.Object.mem "binary" Jsont.string ~enc:(fun t -> t.binary)

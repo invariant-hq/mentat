@@ -5,19 +5,18 @@
 
 (** The daemon discovery file and its claim lock.
 
-    A per-user daemon advertises itself through one small file so a client can
-    find it, health/version-check it, and reuse it — or spawn a fresh one. This
-    module owns the {b format and discipline} of that file (strict-decode JSON,
-    the credential-store atomic-write discipline against symlink planting) and
-    the {b claim lock} that serialises daemon starts; it owns no path policy and
-    no process spawning — the daemon binary decides {e where} the directory
-    lives and {e when} to spawn (the same lib-mechanics vs bin-paths split as
-    [credential_store] vs [user_dirs]). It links [unix], [jsont], and [lpath] —
-    never a store, engine, or provider transport. *)
+    A per-user daemon advertises itself through one small file — the record
+    its own [stop] verb reads for the pid to signal, and the re-entry point
+    for the browser URL and the ingress address. This module owns the
+    {b format and discipline} of that file (strict-decode JSON, the
+    credential-store atomic-write discipline against symlink planting) and
+    the {b claim lock} that serialises daemon starts; it owns no path policy
+    and no process spawning — the daemon binary decides {e where} the
+    directory lives (the same lib-mechanics vs bin-paths split as
+    [credential_store] vs [user_dirs]). It links [unix], [jsont], and
+    [lpath] — never a store, engine, or provider transport. *)
 
 type t = {
-  socket : string;
-      (** Absolute path of the unix socket the daemon listens on. *)
   pid : int;
       (** The daemon process id — diagnostic display and [--stop]'s target only;
           never a liveness probe (pid reuse lies). Liveness is the {!Claim}. *)
@@ -47,7 +46,10 @@ type t = {
 val jsont : t Jsont.t
 (** [jsont] maps the record to a JSON object with a required file-format version
     member ([v = 1]), strict-decoded: an unknown version or member is rejected
-    so a reader never mis-reads a foreign or future file as one of its own. *)
+    so a reader never mis-reads a foreign or future file as one of its own.
+    The one exception is the historical [socket] member — the wire socket a
+    pre-R4 daemon advertised — decoded and discarded so a running old
+    daemon's record still reads, and never written. *)
 
 val write : dir:Lpath.Abs.t -> t -> (unit, string) result
 (** [write ~dir t] writes [t] as [dir]/[daemon.json] with the credential-store

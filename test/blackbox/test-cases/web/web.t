@@ -85,11 +85,10 @@ command must not drive a shell-executing session.
   $ curl -sS -b jar -H 'Origin: http://evil.example.com' -X POST -o /dev/null -w '%{http_code}\n' "$BASE/sessions"
   403
 
-The daemon holds a live web-pinned instance, so a {e single} signal must settle
-it durable-first and exit: teardown resolves every booted instance's release
-(the boot fiber's one shutdown path) rather than calling shutdown around it —
-the first-signal wedge that needed a second Ctrl+C. [serve.t] owns the
-[mentatd stop] coverage; this pins the raw one-signal contract.
+The daemon holds no engine — every session is driven by its own agent — so a
+single signal stops it: clear the discovery file, stop the broker's fibers,
+release the claim, exit. [serve.t] owns the [mentatd stop] coverage; this
+pins the raw one-signal contract.
 
   $ kill -TERM $MENTAT_DAEMON_PID
   $ for _ in $(seq 1 100); do kill -0 $MENTAT_DAEMON_PID 2>/dev/null || break; sleep 0.1; done

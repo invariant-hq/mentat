@@ -1014,12 +1014,12 @@ let the_watch_reports_a_holder_death () =
   | Ok `Gone -> fail "the session exists"
   | Error `Timeout -> fail "the watch never fired")
 
-(* Boot rediscovery's leaf sweep claims a leaf for every stored session —
-   a live root activation (a routine run, a served root) binds its leaf in
-   the same tree as a delegated child, and the successor's boot must not
-   sever it. A leaf no session answers to is residue and is removed. *)
-let rediscovery_keeps_a_live_roots_leaf () =
-  with_broker "rediscover"
+(* The boot residue sweep claims a leaf for every stored session — a live
+   root agent (a routine run, a served root) binds its leaf in the same
+   tree as a delegated child, and a boot must not sever it. A leaf no
+   session answers to is residue and is removed. *)
+let sweep_keeps_a_stored_sessions_leaf () =
+  with_broker "sweep"
   @@ fun ~sw:_ ~base:_ ~clock:_ ~store ~broker ~socket_base ->
   create_root store ~id:"run";
   let leaf id = Broker.socket_dir ~base:socket_base ~session:id in
@@ -1031,8 +1031,7 @@ let rediscovery_keeps_a_live_roots_leaf () =
   in
   ensure_dir (leaf "run");
   ensure_dir (leaf "ghost");
-  Broker.rediscover broker ~engine_for:(fun ~root:_ ->
-      Error "the unit tier stages no engine");
+  Broker.sweep_endpoints broker;
   is_true ~msg:"the live root's endpoint leaf survives the sweep"
     (Sys.file_exists (leaf "run"));
   is_false ~msg:"a leaf no session answers to is removed as residue"
@@ -1110,9 +1109,9 @@ let () =
           test "the watch reports a missing session"
             the_watch_reports_a_missing_session;
         ];
-      group "rediscovery"
+      group "the residue sweep"
         [
-          test "a live root's endpoint leaf survives the sweep"
-            rediscovery_keeps_a_live_roots_leaf;
+          test "a stored session's endpoint leaf survives the sweep"
+            sweep_keeps_a_stored_sessions_leaf;
         ];
     ]

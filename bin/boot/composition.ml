@@ -645,11 +645,6 @@ let shutdown t =
   | Some broker -> Mentat_broker.stop broker
   | None -> ()
 
-let retained_hub_count t =
-  match t.engine with
-  | Some engine -> Engine.retained_hub_count engine
-  | None -> 0
-
 let with_base ~cwd ~overrides ?data_home ?review_base ?resolve_bin f =
   Eio_main.run @@ fun stdenv ->
   Eio.Switch.run @@ fun sw ->
@@ -3293,24 +3288,16 @@ let broker t =
 (* The broker's engine-reach seam for this instance: the workspace identity a
    child is spawned and dialed under, and the wrappers every brokered
    observation reports through. The closures dispatch through the instance's
-   cached engine rather than through {!adopt_session} and friends below:
+   cached engine rather than through {!integrate_child} and friends below:
    the record is handed to the engine at assembly, textually above those
-   wrappers, and it can only be reached — through the engine's own broker,
-   or through a booted daemon instance — after assembly has stored the
-   engine, so an absent engine is answered with each seam's null arm
-   instead of by forcing assembly from underneath it. *)
+   wrappers, and it can only be reached — through the engine's own broker —
+   after assembly has stored the engine, so an absent engine is answered
+   with each seam's null arm instead of by forcing assembly from underneath
+   it. *)
 let broker_engine t =
   {
     Mentat_broker.Engine.root = t.root;
     environment = t.ambient;
-    adopt_session =
-      (fun session ->
-        match t.engine with
-        | Some engine -> Engine.adopt engine session
-        | None ->
-            Error
-              (Mentat_protocol.Error.unavailable
-                 "the workspace instance has not assembled its engine"));
     integrate_child =
       (fun ~child ->
         match t.engine with
@@ -3476,12 +3463,6 @@ let daemon_cones t : (daemon_cones, Exit_status.t) result =
       workspace = workspace_cone t capability ~base_spec;
     }
 
-(* The child broker's reach into an instance's engine, as thin wrappers so the
-   daemon's broker never holds the engine value itself. The engine exists
-   whenever the broker can have been handed work — the ops record is consumed
-   only by an assembled engine — so the absent-engine arms are shutdown races,
-   answered honestly rather than raised. *)
-
 let adopt_session t session =
   match assemble t with
   | Error _ ->
@@ -3495,16 +3476,6 @@ let adopt_session t session =
           (* [build_driver] stores the engine before returning [Ok] and
              nothing unsets it, so an assembled instance always carries one. *)
           assert false)
-
-let integrate_child t ~child =
-  match t.engine with
-  | Some engine -> Engine.integrate_brokered_child engine ~child
-  | None -> `Unbound
-
-let fail_child t ~child ~message =
-  match t.engine with
-  | Some engine -> Engine.fail_brokered_child engine ~child ~message
-  | None -> ()
 
 (* The executable's half of the image-attach flow: it holds the file read, the
    platform downscale spawn, and the fence-free attachment store the pure App and

@@ -499,6 +499,30 @@
   eio_main
   unix))
 
+; The frontend's per-session router is a boot-library module; its suite
+; links the library exactly as test_serve_mount does. The composition is
+; staged for real over a hermetic temp home, and the one process-shaped
+; effect — the broker's spawn — is refused loudly through MENTAT_BIN, so
+; every start decision is visible without a process.
+
+(test
+ (name test_agent_client)
+ (modules test_agent_client)
+ (flags
+  (:standard -open Mentat_boot))
+ (libraries
+  windtrap
+  mentat_boot
+  mentat_client
+  mentat_diagnostic
+  mentat_protocol
+  mentat_server
+  mentat_session
+  lpath
+  eio
+  eio_main
+  unix))
+
 ; The routine store is a boot-library module too, so its suite links the
 ; library exactly as test_routine_fire does — no flat-directory copies.
 

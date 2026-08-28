@@ -335,11 +335,6 @@ let mk_engine ~sw ~store ~provider =
       {
         Mentat_broker.Engine.root = Lpath.Abs.of_string_exn (Sys.getcwd ());
         environment = [];
-        adopt_session =
-          (fun _ ->
-            Error
-              (Mentat_protocol.Error.unavailable
-                 "this fixture adopts no session"));
         integrate_child = (fun ~child:_ -> `Unbound);
         fail_child = (fun ~child:_ ~message:_ -> ());
       }

@@ -100,8 +100,6 @@ module Engine = struct
   type t = {
     root : Lpath.Abs.t;
     environment : (string * string) list;
-    adopt_session :
-      Mentat_session.Id.t -> (unit, Mentat_protocol.Error.t) result;
     integrate_child :
       child:Mentat_session.Id.t -> [ `Integrated | `Not_settled | `Unbound ];
     fail_child : child:Mentat_session.Id.t -> message:string -> unit;
@@ -1007,15 +1005,6 @@ let materialize t engine ~child =
   register t ~shape:(Delegated engine) ~budget:max_respawns ~child
     (fun entry -> launch t entry)
 
-(* Watch an already-running child this broker did not spawn (a previous node
-   life's server): register the entry and observe, deciding nothing else — on
-   its exit the ordinary policy integrates, re-drives shadowed messages, or
-   re-materializes. A child the ordinary materialize already registered is left
-   to it. *)
-let observe_running t engine ~child =
-  register t ~shape:(Delegated engine) ~budget:max_respawns ~child
-    (fun entry -> observe t entry)
-
 let cancel t ~child =
   match Hashtbl.find_opt t.entries (key child) with
   | None -> ()
@@ -1524,144 +1513,45 @@ let stop t =
   t.stopped <- true;
   ignore (Eio.Promise.try_resolve t.stop_resolver ())
 
-(* Node-boot rediscovery. Candidate enumeration and disposal live here; every
-   probe-and-spawn decision for a candidate that needs one is taken by the
-   ordinary materialize path, reached through the adopted parent's recovery —
-   one spawn path, probed once. *)
-
-let rediscover t ~engine_for =
-  let store = t.store in
+(* The boot residue sweep. A per-session endpoint directory whose session no
+   longer exists in the store is residue of a removed session — nothing will
+   ever rebind or clean it — so a boot removes it. The claim set is every
+   stored session, never a lineage subset: a routine run or a served root
+   binds a leaf in the same tree with no delegation backlink, and the sweep
+   must not sever a live root's endpoint. A digest leaf cannot be inverted,
+   so leaves resolve against the store's session index. Nothing running is
+   touched: a live agent holds its own fence and endpoint, a parent agent's
+   recovery re-drives its unfinished delegations, and a frontend's next dial
+   starts whatever is dormant. *)
+let sweep_endpoints t =
   let leaf_root = Filename.concat t.socket_base "s" in
   let leaves =
     match Sys.readdir leaf_root with
     | entries -> Array.to_list entries
     | exception Sys_error _ -> []
   in
-  match Mentat_store.Session.scan store with
-  | Error error ->
-      Eio.traceln "broker: orphan rediscovery skipped: %s"
-        (Mentat_store.Session.Error.message error)
-  | Ok (documents, _corrupt) ->
-      let sessions = Hashtbl.create 16 in
-      List.iter
-        (fun document ->
-          let session = Mentat_store.Session.Document.session document in
-          Hashtbl.replace sessions
-            (Mentat_session.Id.to_string (Mentat_session.id session))
-            session)
-        documents;
-      (* Delegated children, keyed by their derived endpoint leaf so a digest
-         leaf resolves without inversion. *)
-      let children =
-        Hashtbl.fold
-          (fun id session acc ->
-            match
-              Mentat_session.Metadata.delegated_from
-                (Mentat_session.metadata session)
-            with
-            | None -> acc
-            | Some lineage -> (id, session, lineage) :: acc)
-          sessions []
-      in
-      let leaf_of id = socket_leaf ~session:id in
-      let remove_leaf leaf =
-        Mentat_server.Bind.remove_endpoint
-          ~dir:(Lpath.Abs.of_string_exn (Filename.concat leaf_root leaf))
-      in
-      let leaf_set = Hashtbl.create 8 in
-      List.iter (fun leaf -> Hashtbl.replace leaf_set leaf ()) leaves;
-      let candidates =
-        List.filter
-          (fun (id, _, _) ->
-            Hashtbl.mem leaf_set (leaf_of id)
-            ||
-            match
-              Mentat_store.Run_lock.holder store
-                ~session:(Mentat_session.Id.of_string id)
-            with
-            | `Held _ -> true
-            | `Free | `Io _ -> false)
-          children
-      in
-      (* A leaf no stored session answers to is residue of a removed
-         session: remove it. The claim set is every session in the scan,
-         not just delegated children — a routine run or a served root binds
-         a leaf in the same tree with no delegation backlink, and a boot
-         must not sever a live root's endpoint. *)
-      let claimed = Hashtbl.create 8 in
-      Hashtbl.iter (fun id _ -> Hashtbl.replace claimed (leaf_of id) ()) sessions;
-      List.iter
-        (fun leaf -> if not (Hashtbl.mem claimed leaf) then remove_leaf leaf)
-        leaves;
-      List.iter
-        (fun (id, session, lineage) ->
-          let child = Mentat_session.Id.of_string id in
-          let fence =
-            match Mentat_store.Run_lock.holder store ~session:child with
-            | `Free -> `Free
-            | `Held _ -> `Held
-            | `Io _ -> `Io
-          in
-          let parent_id =
-            Mentat_session.Metadata.Delegated_from.parent lineage
-          in
-          let parent =
-            match
-              Hashtbl.find_opt sessions (Mentat_session.Id.to_string parent_id)
-            with
-            | None -> `Absent
-            | Some parent_session -> (
-                match head_of parent_session with
-                | `Unfinished when
-                    Mentat_session.State.turns
-                      (Mentat_session.state parent_session)
-                    <> [] ->
-                    `Waiting
-                | `Unfinished | `Terminal | `Absent -> `Idle)
-          in
-          let dispose () = remove_leaf (leaf_of id) in
-          (* [with_engine] stages the child's workspace, runs [act] on its
-             engine, and returns the lease; [~adopt] additionally attaches the
-             parent so recovery re-drives the edge and a settlement has a
-             waker. *)
-          let with_engine ~adopt act =
-            let root =
-              Lpath.Abs.to_string
-                (Mentat_session.Metadata.cwd
-                   (Mentat_session.metadata session))
-            in
-            match engine_for ~root with
-            | Error message ->
-                Eio.traceln
-                  "broker: orphan %s: its workspace %s did not stage: %s" id
-                  root message
-            | Ok (engine, release) ->
-                (if adopt then
-                   match engine.Engine.adopt_session parent_id with
-                   | Ok () -> ()
-                   | Error error ->
-                       Eio.traceln "broker: orphan %s: adopting its parent: %a"
-                         id Mentat_protocol.Error.pp error);
-                act engine;
-                release ()
-          in
-          match
-            Reconcile.boot_action ~fence ~head:(head_of session) ~parent
-          with
-          | `Adopt -> with_engine ~adopt:true (fun _ -> ())
-          | `Adopt_and_watch ->
-              with_engine ~adopt:true (fun engine ->
-                  observe_running t engine ~child)
-          | `Watch ->
-              with_engine ~adopt:false (fun engine ->
-                  observe_running t engine ~child)
-          | `Adopt_and_dispose ->
-              with_engine ~adopt:true (fun _ -> ());
-              dispose ()
-          | `Dispose -> dispose ()
-          | `Skip reason ->
-              Eio.traceln "broker: orphan %s left alone: %s" id reason)
-        candidates
+  if leaves <> [] then
+    match Mentat_store.Session.scan t.store with
+    | Error error ->
+        Eio.traceln "broker: endpoint residue sweep skipped: %s"
+          (Mentat_store.Session.Error.message error)
+    | Ok (documents, _corrupt) ->
+        let claimed = Hashtbl.create 16 in
+        List.iter
+          (fun document ->
+            let session = Mentat_store.Session.Document.session document in
+            Hashtbl.replace claimed
+              (socket_leaf
+                 ~session:
+                   (Mentat_session.Id.to_string (Mentat_session.id session)))
+              ())
+          documents;
+        List.iter
+          (fun leaf ->
+            if not (Hashtbl.mem claimed leaf) then
+              Mentat_server.Bind.remove_endpoint
+                ~dir:(Lpath.Abs.of_string_exn (Filename.concat leaf_root leaf)))
+          leaves
 
 (* The public surface. A broker is the real process broker, or the stub
    [for_tests] builds — the one test seam the engine's delegation tests mock:
@@ -1762,9 +1652,9 @@ let send t ?origin ?budget_s ~target ~id ~input () =
         (lock_for stub.locks (Mentat_session.Id.to_string target))
         (fun () -> stub.send ~origin ~target ~id ~input)
 
-let rediscover t ~engine_for =
+let sweep_endpoints t =
   match t with
-  | Real b -> rediscover b ~engine_for
-  | Stub _ -> no_processes "rediscover"
+  | Real b -> sweep_endpoints b
+  | Stub _ -> no_processes "sweep_endpoints"
 
 let stop t = match t with Real b -> stop b | Stub _ -> ()

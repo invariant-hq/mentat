@@ -225,9 +225,9 @@ let executable () =
   let exe = Sys.executable_name in
   if Filename.is_relative exe then Filename.concat (Sys.getcwd ()) exe else exe
 
-(* The spawned daemon's log, as [User_dirs.daemon_dir] documents its
-   contents: the service manager appends the daemon's standard output and
-   error to the same file the client's find-or-spawn path does. *)
+(* The service-managed daemon's log, as [User_dirs.daemon_dir] documents
+   its contents: the service manager appends the daemon's standard output
+   and error there. *)
 let log_path dirs = Filename.concat (User_dirs.daemon_dir dirs) "daemon.log"
 
 let prepared platform ~args =

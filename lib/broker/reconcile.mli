@@ -108,35 +108,3 @@ val supervise_action :
     caller's sink. [`Held_self] takes the [Hold] arm: whatever holds the
     fence, this table never rules a signal against a holder that is not a
     stale same-host child server. *)
-
-type boot =
-  [ `Adopt
-    (** The fence is free and work is outstanding: adopt the parent, whose
-        recovery re-drives the edge into the ordinary materialize. *)
-  | `Adopt_and_watch
-    (** A live child whose parent still waits: adopt the parent so its
-        settlement has a waker, and watch the child so its exit re-drives
-        anything its fence shadowed. *)
-  | `Watch
-    (** A live child nobody waits for: watch it without touching its idle
-        parent — adoption would pin a fence no one asked this node to hold. *)
-  | `Adopt_and_dispose
-    (** A settled child whose parent still waits: adopt the parent (the
-        buffered result wakes it) and remove the stale endpoint directory. *)
-  | `Dispose
-    (** A settled or vanished child nobody waits for: remove the stale
-        endpoint directory and nothing else. *)
-  | `Skip of string
-    (** Leave the candidate untouched for the stated reason. *) ]
-(** The type for the node-boot decision for one rediscovered candidate. *)
-
-val boot_action :
-  fence:[ `Free | `Held | `Io ] ->
-  head:head ->
-  parent:[ `Waiting | `Idle | `Absent ] ->
-  boot
-(** [boot_action ~fence ~head ~parent] is the rediscovery table. [parent]
-    summarizes the parent journal's head: [`Waiting] iff it holds an active
-    turn (its wait may be parked in it), [`Absent] when no parent document
-    resolves — an orphan with no parent integrates nowhere and is skipped
-    loudly rather than re-driven. *)

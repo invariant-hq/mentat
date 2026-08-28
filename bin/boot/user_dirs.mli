@@ -43,9 +43,10 @@ val trust_file : t -> string
 val daemon_dir : t -> string
 (** [daemon_dir t] is [data_home / "daemon"] — the per-user daemon's private
     directory: it holds the discovery file [daemon.json], the claim lock
-    [daemon.lock], and the spawned daemon's log [daemon.log]. Homed under the
-    data home so a [MENTAT_DATA_HOME] override isolates a daemon per store. The
-    socket does not live here — it lives under [/tmp] to fit [sun_path]. *)
+    [daemon.lock], and the service-managed daemon's log [daemon.log]. Homed
+    under the data home so a [MENTAT_DATA_HOME] override isolates a daemon per
+    store. Sockets do not live here — they live under [/tmp] to fit
+    [sun_path]. *)
 
 val routines_dir : t -> string
 (** [routines_dir t] is [config_home / "routines"] — the root under which each
@@ -80,16 +81,17 @@ val routine_runs_dir : t -> string -> string
     never here. *)
 
 val daemon_socket_dir : t -> string
-(** [daemon_socket_dir t] is [/tmp/mentat-<uid>-<key>], the directory the
-    per-user daemon binds its socket in — under [/tmp] so a deep checkout cannot
-    overflow [sun_path], keyed on the data home so a [MENTAT_DATA_HOME] override
-    isolates daemons.
+(** [daemon_socket_dir t] is [/tmp/mentat-<uid>-<key>], the per-user socket
+    base: the tree every session's agent derives its endpoint under
+    ({!child_socket_dir}) — under [/tmp] so a deep checkout cannot overflow
+    [sun_path], keyed on the data home so a [MENTAT_DATA_HOME] override
+    isolates stores.
 
-    Two callers need it and neither can see the other: the daemon binds it, and
-    the sandbox denies it. The denial is not optional. [/tmp] is granted
-    writable, and the socket authorizes any local peer without a token, so a
-    confined command able to reach it would be driving Mentat instead of being
-    confined by it. *)
+    Two sides need it and neither can see the other: agents bind beneath it,
+    and the sandbox denies it. The denial is not optional. [/tmp] is granted
+    writable, and a socket beneath it authorizes any local peer without a
+    token, so a confined command able to reach one would be driving Mentat
+    instead of being confined by it. *)
 
 val child_socket_dir : t -> session:string -> string
 (** [child_socket_dir t ~session] is the directory a per-session child server

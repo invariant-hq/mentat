@@ -16,8 +16,6 @@
   eio
   eio_main
   unix
-  lpath
-  mentat_agent
   mentat_boot
   mentat_broker
   mentat_routine

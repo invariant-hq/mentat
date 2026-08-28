@@ -687,12 +687,6 @@ let mk_engine ~sw ~store ?(script = default_script) ?(config = default_config)
     {
       Mentat_broker.Engine.root = Lpath.Abs.of_string_exn (Sys.getcwd ());
       environment = [];
-      adopt_session =
-        (fun session ->
-          match !engine_cell with
-          | Some engine -> Agent.adopt engine session
-          | None ->
-              Error (Protocol.Error.unavailable "the engine is not built yet"));
       integrate_child =
         (fun ~child ->
           match !engine_cell with

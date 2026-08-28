@@ -33,26 +33,6 @@ let action =
       | Reconcile.Fail _, Reconcile.Fail _ -> true
       | _ -> false)
 
-let boot =
-  Testable.make
-    ~pp:(fun ppf -> function
-      | `Adopt -> Format.pp_print_string ppf "Adopt"
-      | `Adopt_and_watch -> Format.pp_print_string ppf "Adopt_and_watch"
-      | `Watch -> Format.pp_print_string ppf "Watch"
-      | `Adopt_and_dispose -> Format.pp_print_string ppf "Adopt_and_dispose"
-      | `Dispose -> Format.pp_print_string ppf "Dispose"
-      | `Skip reason -> Format.fprintf ppf "Skip %S" reason)
-    ~equal:(fun (a : Reconcile.boot) (b : Reconcile.boot) ->
-      match (a, b) with
-      | `Adopt, `Adopt
-      | `Adopt_and_watch, `Adopt_and_watch
-      | `Watch, `Watch
-      | `Adopt_and_dispose, `Adopt_and_dispose
-      | `Dispose, `Dispose
-      | `Skip _, `Skip _ ->
-          true
-      | _ -> false)
-
 let never_reachable () : bool = fail "reachable must not be probed on this arm"
 let never_head () : Reconcile.head = fail "head must not be probed on this arm"
 
@@ -152,59 +132,9 @@ let supervise_table () =
     (Reconcile.Refuse "")
     (supervise ~head:(fun () -> `Absent) `Free)
 
-(* The node-boot table over its full domain. *)
-let boot_table () =
-  let all_heads = [ `Unfinished; `Terminal; `Absent ] in
-  let all_parents = [ `Waiting; `Idle; `Absent ] in
-  List.iter
-    (fun head ->
-      List.iter
-        (fun parent ->
-          equal boot ~msg:"an unprobeable fence skips the candidate"
-            (`Skip "")
-            (Reconcile.boot_action ~fence:`Io ~head ~parent))
-        all_parents)
-    all_heads;
-  List.iter
-    (fun head ->
-      equal boot ~msg:"a parentless orphan under a free fence is disposed"
-        `Dispose
-        (Reconcile.boot_action ~fence:`Free ~head ~parent:`Absent);
-      equal boot
-        ~msg:"a live parentless orphan is left alone, never re-driven"
-        (`Skip "")
-        (Reconcile.boot_action ~fence:`Held ~head ~parent:`Absent))
-    all_heads;
-  List.iter
-    (fun head ->
-      equal boot ~msg:"a live child with a waiting parent adopts and watches"
-        `Adopt_and_watch
-        (Reconcile.boot_action ~fence:`Held ~head ~parent:`Waiting);
-      equal boot
-        ~msg:"a live child nobody waits for is watched, its parent unpinned"
-        `Watch
-        (Reconcile.boot_action ~fence:`Held ~head ~parent:`Idle))
-    all_heads;
-  List.iter
-    (fun parent ->
-      equal boot ~msg:"outstanding work under a free fence adopts to re-drive"
-        `Adopt
-        (Reconcile.boot_action ~fence:`Free ~head:`Unfinished ~parent))
-    [ `Waiting; `Idle ];
-  List.iter
-    (fun head ->
-      equal boot
-        ~msg:"a settled child with a waiting parent adopts, then disposes"
-        `Adopt_and_dispose
-        (Reconcile.boot_action ~fence:`Free ~head ~parent:`Waiting);
-      equal boot ~msg:"a settled child nobody waits for is residue" `Dispose
-        (Reconcile.boot_action ~fence:`Free ~head ~parent:`Idle))
-    [ `Terminal; `Absent ]
-
 let () =
   run "mentat.reconcile"
     [
       test "the materialization table" materialize_table;
       test "the root-supervision table" supervise_table;
-      test "the node-boot table" boot_table;
     ]
