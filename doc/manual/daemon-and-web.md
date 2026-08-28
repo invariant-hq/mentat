@@ -4,7 +4,7 @@ Mentat runs its engine in the invoking process by default. The daemon is an
 opt-in local transport for sharing one store, provider runtime, and engine host
 across clients. The browser frontend is a second opt-in on that daemon; it is not
 a hosted service. The daemon also serves as the resident node for standing
-review grants — see [Charters](charters.md).
+review grants — see [Routines](routines.md).
 
 ## Daemon lifecycle
 

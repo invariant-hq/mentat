@@ -3,7 +3,7 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(** The resident charter node — the daemon-side consumer of the charter
+(** The resident routine node — the daemon-side consumer of the routine
     layer.
 
     One value, assembled once at daemon boot over the shared composition,
@@ -15,7 +15,7 @@
 
     {b The 202 contract.} The intake is split at the pipeline's durability
     point. {!val-ingress}'s [deliver] callback runs on the serving fiber
-    and performs only {!Charter_fire.admit_delivery} — the size fence, the
+    and performs only {!Routine_fire.admit_delivery} — the size fence, the
     narrow decode, and the durable delivery receipt — then hands the
     admitted event to the node's queue and answers accepted: the wire's
     [202] means the delivery receipt is on disk, never that a run was
@@ -33,14 +33,14 @@
     receipt is durable, the event is either disposed by the pump or — after
     a crash or a stop — owned by the boot reconcile and the sweep.
 
-    Charter state is never cached: the ingress resolver re-reads the
-    installed charters on every request, [deliver] re-loads the addressed
-    charter per delivery, and the repository connection is rebuilt per fire
+    Routine state is never cached: the ingress resolver re-reads the
+    installed routines on every request, [deliver] re-loads the addressed
+    routine per delivery, and the repository connection is rebuilt per fire
     with a fresh credential read — an owner's edit is in force at the next
     event. *)
 
 type t
-(** The type for resident charter nodes. *)
+(** The type for resident routine nodes. *)
 
 val create :
   Composition.shared ->
@@ -58,7 +58,7 @@ val create :
     supervising fire, and the seam's force arm never fires here — a second
     signal exits the process at the handler, and the boot reconcile settles
     whatever that leaves. Pipeline narration goes to the trace log, each
-    line prefixed with the charter it concerns.
+    line prefixed with the routine it concerns.
 
     [github_base_url] is the API base for every GitHub read and for the
     publication child — validated configuration from the daemon's own
@@ -69,55 +69,55 @@ val create :
     one validated host ({!child_environment}). [git_base] overrides the git
     host prefix every checkout's remote is derived from
     ([https://github.com] otherwise): the remote is
-    [<base>/<owner>/<repo>.git] per charter ({!checkout_url}), so one flag
-    serves charters over many repositories — the explicit-override seam,
+    [<base>/<owner>/<repo>.git] per routine ({!checkout_url}), so one flag
+    serves routines over many repositories — the explicit-override seam,
     never payload data. [Error message] when no [mentat] sibling binary
     resolves, so a node that could never spawn a run is refused at boot. *)
 
-val reconcile_env : t -> Charter_fire.env
+val reconcile_env : t -> Routine_fire.env
 (** [reconcile_env t] is the pipeline environment for the reconcile fold's
     drivers: the node's process-scoped effects with narration un-prefixed —
-    the fold speaks for many charters in one pass and prefixes each line
-    with the charter it concerns itself, exactly as {!val-env} would. *)
+    the fold speaks for many routines in one pass and prefixes each line
+    with the routine it concerns itself, exactly as {!val-env} would. *)
 
-val repo : t -> Charter_store.Loaded.t -> (Charter_fire.Repo.t, string) result
+val repo : t -> Routine_store.Loaded.t -> (Routine_fire.Repo.t, string) result
 (** [repo t loaded] is the per-fire connection to [loaded]'s repository:
-    the injected GitHub reads over a client holding the charter's read
+    the injected GitHub reads over a client holding the routine's read
     credential, and the fetch remote. Built fresh per fire — the credential
-    is re-read from the charter's [secrets/read-token] on every call, so a
+    is re-read from the routine's [secrets/read-token] on every call, so a
     rotated token is in force at the next event; nothing here retains a
     returned value, and no caller may either. [Error message] when the
-    charter holds no read credential or the client cannot be
+    routine holds no read credential or the client cannot be
     constructed. *)
 
 val ingress : t -> Mentat_server.Ingress.t
 (** [ingress t] is the webhook ingress the wire family routes through. Its
     callbacks keep the serving fiber prompt: [resolve] folds the installed
-    charters fresh per request and is side-effect minimal on that
-    unauthenticated input — a broken charter answers to no id, silently;
+    routines fresh per request and is side-effect minimal on that
+    unauthenticated input — a broken routine answers to no id, silently;
     the dashboard and the reconcile beat name it — while [deliver] re-loads
-    the addressed charter, routes the verified body ({!event_route}),
+    the addressed routine, routes the verified body ({!event_route}),
     admits the delivery, and hands the admitted event to the pump's queue,
     per the module's 202 contract. A recognizable ping, or a foreign-kind
     body under a foreign-kind header, is answered [202] and noted in the
-    trace log only — the receipt log speaks charter facts; a body the
+    trace log only — the receipt log speaks routine facts; a body the
     narrow decode refuses under a pull-request-claiming or absent header is
-    refused. A verified delivery for a disabled charter is admitted —
+    refused. A verified delivery for a disabled routine is admitted —
     arrival is a fact — then receipted skipped-disabled without reaching
     the queue. Deliveries rejected at the wire over their signature are
     counted and noted in the trace log. *)
 
-val pump : t -> after_reap:(Charter_store.Loaded.t -> unit) -> unit
+val pump : t -> after_reap:(Routine_store.Loaded.t -> unit) -> unit
 (** [pump t ~after_reap] consumes the queue and drives each admitted event
     to its disposition: the repository connection is rebuilt, then the
     pipeline's decision half runs with the current-head check on — one
     event at a time, in admission order, under the policy closure that
     admitted it, so a delivery's receipt, claim, and run carry one digest
-    even when the owner edits the charter while the event waits. A
+    even when the owner edits the routine while the event waits. A
     machinery failure is receipted refused and narrated; it never stops
     the pump. [after_reap loaded] runs on the pump's own fiber after any
     event whose dispose reaped a run child, unless a stop was requested
-    meanwhile — the caller wires it to the charter's reconcile re-entry,
+    meanwhile — the caller wires it to the routine's reconcile re-entry,
     so a publication that failed after the money was spent, or a delivery
     the full intake queue refused while the run held the pump, converges
     now rather than on the periodic beat. Its exceptions are caught and
@@ -135,7 +135,7 @@ val pump : t -> after_reap:(Charter_store.Loaded.t -> unit) -> unit
     unit testing. *)
 
 val resolution :
-  Charter_store.Binding.t list ->
+  Routine_store.Binding.t list ->
   ingress_id:string ->
   Mentat_server.Ingress.resolution
 (** [resolution bindings ~ingress_id] is the resolver's answer: the secret
@@ -152,13 +152,13 @@ val event_route :
     header claims, since the HMAC covers the body alone and a relabeled
     signed delivery must never turn a 202 into a silent drop. When the
     decode refuses: [`Ping] for a recognizable ping body
-    ({!Mentat_charter.Event.ping}); [`Foreign kind] when the header names a
+    ({!Mentat_routine.Event.ping}); [`Foreign kind] when the header names a
     non-pull-request kind the refusing body is consistent with; and
     [`Malformed reason] — a refusal — when the header claimed
     [pull_request] or was absent. *)
 
 val checkout_url : git_base:string option -> repo:string -> string
-(** [checkout_url ~git_base ~repo] is the remote a charter watching [repo]
+(** [checkout_url ~git_base ~repo] is the remote a routine watching [repo]
     fetches its checkout from: [<base>/<repo>.git], where the base is
     [git_base] (a trailing ['/'] tolerated) or [https://github.com] when
     none is configured. *)

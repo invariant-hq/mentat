@@ -6,11 +6,11 @@
 open! Cmdliner
 
 let serve socket stop spawned web web_port ingress_port github_base_url
-    charter_git_base =
+    routine_git_base =
   if stop then Daemon.stop ()
   else
     Daemon_server.serve ~socket_override:socket ~spawned ~web ~web_port
-      ~ingress_port ~github_base_url ~charter_git_base
+      ~ingress_port ~github_base_url ~routine_git_base
 
 (* TCP ports live in 0–65535. An out-of-range value would raise only at
    bind time — or persist a permanently failing service unit — so both
@@ -86,7 +86,7 @@ let ingress_port_opt =
            authenticated end-to-end by its HMAC signature, so any tunnel the \
            owner already trusts can point at it. Without this flag the \
            ingress family still rides the daemon's unix wire socket, and the \
-           reconcile sweep keeps webhook charters converging with no ingress \
+           reconcile sweep keeps webhook routines converging with no ingress \
            at all.")
 
 let github_base_url_opt =
@@ -95,7 +95,7 @@ let github_base_url_opt =
     & opt (some string) None
     & info [ "github-base-url" ] ~docv:"URL"
         ~doc:
-          "The GitHub API base for the charter node's reads and its \
+          "The GitHub API base for the routine node's reads and its \
            publication children — for GitHub Enterprise hosts and offline \
            test servers. Deliberately a flag, never the ambient \
            $(b,MENTAT_GITHUB_BASE_URL): an environment-writable API base \
@@ -103,17 +103,17 @@ let github_base_url_opt =
            variable from every child it spawns and substitutes this value \
            when given.")
 
-let charter_git_base_opt =
+let routine_git_base_opt =
   Arg.(
     value
     & opt (some string) None
-    & info [ "charter-git-base" ] ~docv:"BASE"
+    & info [ "routine-git-base" ] ~docv:"BASE"
         ~doc:
-          "Override the git host prefix charter checkouts fetch from: each \
-           charter's remote is $(docv)$(b,/<owner>/<repo>.git), derived from \
+          "Override the git host prefix routine checkouts fetch from: each \
+           routine's remote is $(docv)$(b,/<owner>/<repo>.git), derived from \
            the repository it watches ($(b,https://github.com) by default) — \
            for GitHub Enterprise hosts and offline test fixtures, and one \
-           flag serves charters over many repositories. A flag for the same \
+           flag serves routines over many repositories. A flag for the same \
            reason as $(b,--github-base-url): the node takes its remotes from \
            validated configuration, never from the environment.")
 
@@ -137,24 +137,24 @@ let man =
       "A first SIGTERM or SIGINT stops the daemon gracefully (it settles every \
        instance durable-first). Send the signal a second time to force an \
        immediate exit if a graceful teardown wedges.";
-    `S "CHARTERS";
+    `S "ROUTINES";
     `P
-      "The daemon is also the resident charter node: it serves the webhook \
-       ingress for every charter installed by $(b,mentatd charter add), drives \
-       admitted deliveries through the charter fire pipeline (each run is a \
+      "The daemon is also the resident routine node: it serves the webhook \
+       ingress for every routine installed by $(b,mentatd routine add), drives \
+       admitted deliveries through the routine fire pipeline (each run is a \
        spawned $(b,mentat) child, never in-process), and reconciles every \
-       charter's durable record — at boot, and on a periodic beat — so an \
+       routine's durable record — at boot, and on a periodic beat — so an \
        interrupted run is settled honestly and an interrupted publication is \
-       finished without a fresh run. Charters register by file: one installed \
+       finished without a fresh run. Routines register by file: one installed \
        or edited while the daemon runs is in force at its next event, with no \
        restart.";
     `P
       "$(b,--ingress-port) binds the loopback listener a webhook tunnel \
-       points at; $(b,--github-base-url) and $(b,--charter-git-base) override \
+       points at; $(b,--github-base-url) and $(b,--routine-git-base) override \
        the GitHub API base and the git host checkouts fetch from. All three \
        are flags on this daemon's own surface, deliberately never read from \
-       the environment. A daemon holding at least one enabled webhook charter \
-       never stops itself as idle — the charter is a standing commission, and \
+       the environment. A daemon holding at least one enabled webhook routine \
+       never stops itself as idle — the routine is a standing commission, and \
        the service manager restarts failures only, so a clean idle-stop would \
        leave later deliveries bouncing.";
     `S "ENVIRONMENT";
@@ -169,7 +169,7 @@ let envs =
     Cmd.Env.info "MENTAT_BIN"
       ~doc:
         "The $(b,mentat) binary spawned for children — the child broker's \
-         delegated sessions and the charter pipeline's run and publication \
+         delegated sessions and the routine pipeline's run and publication \
          children — overriding the resolution of the sibling of the \
          running executable, for layouts where the two binaries do not \
          share a directory (a build tree, a test harness).";
@@ -223,17 +223,17 @@ let install_github_base_url_opt =
     & info [ "github-base-url" ] ~docv:"URL"
         ~doc:
           "Bake $(b,--github-base-url)=$(docv) into the unit's exec line — \
-           the GitHub API base for the resident charter node's reads and \
+           the GitHub API base for the resident routine node's reads and \
            its publication children, for GitHub Enterprise hosts.")
 
-let install_charter_git_base_opt =
+let install_routine_git_base_opt =
   Arg.(
     value
     & opt (some string) None
-    & info [ "charter-git-base" ] ~docv:"BASE"
+    & info [ "routine-git-base" ] ~docv:"BASE"
         ~doc:
-          "Bake $(b,--charter-git-base)=$(docv) into the unit's exec line — \
-           the git host prefix charter checkouts fetch from, for GitHub \
+          "Bake $(b,--routine-git-base)=$(docv) into the unit's exec line — \
+           the git host prefix routine checkouts fetch from, for GitHub \
            Enterprise hosts whose repositories exist nowhere else.")
 
 let install_web_flag =
@@ -242,8 +242,8 @@ let install_web_flag =
     & info [ "web" ]
         ~doc:
           "Bake $(b,--web) into the unit's exec line, so the resident \
-           daemon serves the browser frontend — and the charters dashboard \
-           at $(b,/charters) — at every start. Only one daemon claims a \
+           daemon serves the browser frontend — and the routines dashboard \
+           at $(b,/routines) — at every start. Only one daemon claims a \
            store, so a service-managed daemon's dashboard exists only this \
            way. The URL to open, bootstrap token included, is recorded in \
            $(b,daemon.json), never printed to the service log.")
@@ -300,11 +300,11 @@ let install_cmd =
          command to run manually; the written unit stays in place.";
       `P
         "$(b,--ingress-port), $(b,--github-base-url), \
-         $(b,--charter-git-base), $(b,--web), and $(b,--web-port) are the \
+         $(b,--routine-git-base), $(b,--web), and $(b,--web-port) are the \
          daemon's own serve flags, baked into the unit's exec line so the \
          resident daemon starts with them at every boot — $(b,--web) is \
          the only way a service-managed daemon serves the browser frontend \
-         and the $(b,/charters) dashboard, since only one daemon claims a \
+         and the $(b,/routines) dashboard, since only one daemon claims a \
          store. Re-running $(b,mentatd install) with different flags \
          replaces the unit and restarts the service on the new exec line.";
     ]
@@ -314,12 +314,12 @@ let install_cmd =
     (Exit_status.term
        Term.(
          const
-           (fun print ingress_port github_base_url charter_git_base web
+           (fun print ingress_port github_base_url routine_git_base web
                 web_port ->
              Service.install ~print ~ingress_port ~github_base_url
-               ~charter_git_base ~web ~web_port)
+               ~routine_git_base ~web ~web_port)
          $ print_flag $ install_ingress_port_opt $ install_github_base_url_opt
-         $ install_charter_git_base_opt $ install_web_flag
+         $ install_routine_git_base_opt $ install_web_flag
          $ install_web_port_opt))
 
 let uninstall_cmd =
@@ -353,7 +353,7 @@ let root =
          Term.(
            const serve $ socket_opt $ stop_flag $ spawned_flag $ web_flag
            $ web_port_opt $ ingress_port_opt $ github_base_url_opt
-           $ charter_git_base_opt))
-    info [ stop_cmd; install_cmd; uninstall_cmd; Charter_cli.cmd ]
+           $ routine_git_base_opt))
+    info [ stop_cmd; install_cmd; uninstall_cmd; Routine_cli.cmd ]
 
 let () = Entry.run ~version:Daemon.binary_version root

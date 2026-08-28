@@ -33,13 +33,13 @@ daemon, which adopts them at its next boot.
   WantedBy=default.target
 
 The daemon's serve flags bake into the exec line: --ingress-port,
---github-base-url, --charter-git-base, --web, and --web-port ride
+--github-base-url, --routine-git-base, --web, and --web-port ride
 ExecStart as further quoted arguments, so the resident daemon starts with
 them at every boot — --web is the only way a service-managed daemon serves
-the charters dashboard, since only one daemon claims a store.
+the routines dashboard, since only one daemon claims a store.
 
-  $ mentatd install --print --ingress-port 8080 --github-base-url https://ghe.example.test/api/v3 --charter-git-base https://ghe.example.test --web --web-port 8081 | grep '^ExecStart=' | sed -E 's#^ExecStart="[^"]*"#ExecStart="MENTATD"#'
-  ExecStart="MENTATD" "--ingress-port=8080" "--github-base-url=https://ghe.example.test/api/v3" "--charter-git-base=https://ghe.example.test" "--web" "--web-port=8081"
+  $ mentatd install --print --ingress-port 8080 --github-base-url https://ghe.example.test/api/v3 --routine-git-base https://ghe.example.test --web --web-port 8081 | grep '^ExecStart=' | sed -E 's#^ExecStart="[^"]*"#ExecStart="MENTATD"#'
+  ExecStart="MENTATD" "--ingress-port=8080" "--github-base-url=https://ghe.example.test/api/v3" "--routine-git-base=https://ghe.example.test" "--web" "--web-port=8081"
 
 --print touched nothing: no unit directory, no daemon directory.
 

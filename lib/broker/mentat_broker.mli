@@ -18,7 +18,7 @@
     failure — a parked wait is never abandoned silently.
 
     {!val-supervise} is the same machinery with a root shape: a session with
-    no delegation edge — a charter run, any owned root — is made to run and
+    no delegation edge — a routine run, any owned root — is made to run and
     observed to its conclusion, and the outcome lands in the caller's own
     sinks instead of an engine seam. {!val-watch} observes a session without
     owning it, and {!val-children} is the supervised table as data.

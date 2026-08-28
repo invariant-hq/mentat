@@ -392,7 +392,7 @@ let unsupported =
    unit in [--flag=value] form so the resident daemon starts with them at
    every boot. Re-running install with different flags renders different
    bytes, which the standing classifies as replaceable. *)
-let exec_args ~ingress_port ~github_base_url ~charter_git_base ~web ~web_port
+let exec_args ~ingress_port ~github_base_url ~routine_git_base ~web ~web_port
     =
   (match ingress_port with
   | Some port -> [ Printf.sprintf "--ingress-port=%d" port ]
@@ -400,8 +400,8 @@ let exec_args ~ingress_port ~github_base_url ~charter_git_base ~web ~web_port
   @ (match github_base_url with
     | Some url -> [ "--github-base-url=" ^ url ]
     | None -> [])
-  @ (match charter_git_base with
-    | Some base -> [ "--charter-git-base=" ^ base ]
+  @ (match routine_git_base with
+    | Some base -> [ "--routine-git-base=" ^ base ]
     | None -> [])
   @ (if web then [ "--web" ] else [])
   @
@@ -409,10 +409,10 @@ let exec_args ~ingress_port ~github_base_url ~charter_git_base ~web ~web_port
   | Some port -> [ Printf.sprintf "--web-port=%d" port ]
   | None -> []
 
-let install ~print ~ingress_port ~github_base_url ~charter_git_base ~web
+let install ~print ~ingress_port ~github_base_url ~routine_git_base ~web
     ~web_port =
   let args =
-    exec_args ~ingress_port ~github_base_url ~charter_git_base ~web ~web_port
+    exec_args ~ingress_port ~github_base_url ~routine_git_base ~web ~web_port
   in
   match Platform.detect () with
   | None -> Exit_status.runtime unsupported

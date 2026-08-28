@@ -1,0 +1,4 @@
+(library
+ (name mentat_routine)
+ (modules routine receipt event gate fence record run_id)
+ (libraries jsont jsont.bytesrw mentat_digest mentat_json))

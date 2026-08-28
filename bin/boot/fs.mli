@@ -5,7 +5,7 @@
 
 (** Executable-private filesystem primitives.
 
-    The charter assigns file location, byte-capped reads, atomic writes,
+    The routine assigns file location, byte-capped reads, atomic writes,
     parent-directory creation, and cross-process locks to the executable — not
     to [mentat.config] (its pure core only parses and plans) and not to
     [mentat.store] (its lock is session-document-keyed by contract and

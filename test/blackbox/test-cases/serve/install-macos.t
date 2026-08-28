@@ -39,17 +39,17 @@ daemon, which adopts them at its next boot.
   </plist>
 
 The daemon's serve flags bake into the exec line: --ingress-port,
---github-base-url, --charter-git-base, --web, and --web-port render as
+--github-base-url, --routine-git-base, --web, and --web-port render as
 further ProgramArguments entries, so the resident daemon starts with them
 at every boot — --web is the only way a service-managed daemon serves the
-charters dashboard, since only one daemon claims a store.
+routines dashboard, since only one daemon claims a store.
 
-  $ mentatd install --print --ingress-port 8080 --github-base-url https://ghe.example.test/api/v3 --charter-git-base https://ghe.example.test --web --web-port 8081 | sed -n '/<array>/,/<\/array>/p' | sed -E 's#<string>/[^<]*mentatd</string>#<string>MENTATD</string>#'
+  $ mentatd install --print --ingress-port 8080 --github-base-url https://ghe.example.test/api/v3 --routine-git-base https://ghe.example.test --web --web-port 8081 | sed -n '/<array>/,/<\/array>/p' | sed -E 's#<string>/[^<]*mentatd</string>#<string>MENTATD</string>#'
     <array>
       <string>MENTATD</string>
       <string>--ingress-port=8080</string>
       <string>--github-base-url=https://ghe.example.test/api/v3</string>
-      <string>--charter-git-base=https://ghe.example.test</string>
+      <string>--routine-git-base=https://ghe.example.test</string>
       <string>--web</string>
       <string>--web-port=8081</string>
     </array>

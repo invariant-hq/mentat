@@ -3,7 +3,7 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(** The charter pipeline's three GitHub reads, over the first-party client.
+(** The routine pipeline's three GitHub reads, over the first-party client.
 
     One owner for the read-side conventions every invoker of the fire
     pipeline must agree on: how the open-PR listing's pages flatten into
@@ -56,4 +56,4 @@ val posted :
     marker presence alone
     is forgeable, so the author predicate is what makes a comment ours.
     Assumes the read and write credentials share the owner's posting
-    identity, which single-owner charters do. *)
+    identity, which single-owner routines do. *)

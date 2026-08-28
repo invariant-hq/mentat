@@ -3,7 +3,7 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(* Unit suite for [Node], the resident charter node's pure decision folds —
+(* Unit suite for [Node], the resident routine node's pure decision folds —
    the ingress resolution, the delivery route, and the child-environment
    scrub — driven with no daemon, wire, or store behind them. The module
    lives in [bin/mentatd] and is not library-linkable, so its source is
@@ -43,7 +43,7 @@ let route =
       | _ -> false)
 
 let binding name id secret enabled =
-  { Charter_store.Binding.name; id; secret; enabled }
+  { Routine_store.Binding.name; id; secret; enabled }
 
 let resolution_table () =
   let bindings =
@@ -55,13 +55,13 @@ let resolution_table () =
   equal resolution ~msg:"a minted id resolves to its snapshot"
     (Mentat_server.Ingress.Resolved { secret = "secret-alpha"; enabled = true })
     (Node.resolution bindings ~ingress_id:"aaaa");
-  equal resolution ~msg:"a disabled charter still resolves, snapshot carried"
+  equal resolution ~msg:"a disabled routine still resolves, snapshot carried"
     (Mentat_server.Ingress.Resolved { secret = "secret-beta"; enabled = false })
     (Node.resolution bindings ~ingress_id:"bbbb");
   equal resolution ~msg:"an unminted id answers to nothing"
     Mentat_server.Ingress.Unknown
     (Node.resolution bindings ~ingress_id:"cccc");
-  equal resolution ~msg:"no charters, no answers" Mentat_server.Ingress.Unknown
+  equal resolution ~msg:"no routines, no answers" Mentat_server.Ingress.Unknown
     (Node.resolution [] ~ingress_id:"aaaa")
 
 (* A minimal body the narrow decode admits. *)

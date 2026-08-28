@@ -145,7 +145,7 @@ module Marker : sig
       lowercase letters, digits, and [-] becomes [-] — [:] included, since
       it is a composer's separator, never the folded name's. The result is
       empty exactly when [name] is; a composer prefixing its own non-empty
-      token (["charter:" ^ ...]) always builds a valid origin. *)
+      token (["routine:" ^ ...]) always builds a valid origin. *)
 
   val marks : string -> bool
   (** [marks body] is [true] iff [body] carries a marker of this grammar —

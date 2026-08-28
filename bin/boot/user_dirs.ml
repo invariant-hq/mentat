@@ -59,22 +59,22 @@ let config_file t = Filename.concat t.config_home "config.json"
 let auth_file t = Filename.concat t.config_home "auth.json"
 let trust_file t = Filename.concat t.config_home "trust.json"
 let daemon_dir t = Filename.concat t.data_home "daemon"
-let charters_dir t = Filename.concat t.config_home "charters"
-let charter_dir t name = Filename.concat (charters_dir t) name
+let routines_dir t = Filename.concat t.config_home "routines"
+let routine_dir t name = Filename.concat (routines_dir t) name
 
-let charter_state_dir t name =
-  Filename.concat (Filename.concat t.state_home "charters") name
+let routine_state_dir t name =
+  Filename.concat (Filename.concat t.state_home "routines") name
 
 (* Run roots live under the cache home, not the state home, because every
    other home is denied to sandboxed runs as one of Mentat's own directories
    — a workspace root inside a denied tree is refused at resolve — and that
-   denial is what keeps the auth store and charter secrets out of a run
+   denial is what keeps the auth store and routine secrets out of a run
    child's reach. The cache home is deliberately not a denied directory: it
    holds exactly these disposable checkouts, re-materializable from the
    remote, and nothing that authenticates. *)
-let charter_runs_dir t name =
+let routine_runs_dir t name =
   Filename.concat
-    (Filename.concat (Filename.concat t.cache_home "charters") name)
+    (Filename.concat (Filename.concat t.cache_home "routines") name)
     "runs"
 
 (* The socket lives under literal [/tmp], not the daemon dir, so a deep checkout

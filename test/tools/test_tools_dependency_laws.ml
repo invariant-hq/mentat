@@ -878,7 +878,7 @@ let%test
   assert_exact_names ~boundary:"mentat_digest" ~expected:[ "jsont" ]
     (dune_library_dependencies "lib/digest/dune" "mentat_digest")
 
-(* The otherlibs/ charter: otherlibs/ holds standalone, release-ready
+(* The otherlibs/ contract: otherlibs/ holds standalone, release-ready
    libraries. Its load-bearing conjunct is STANDALONE — a member's [libraries]
    field names only third-party opam packages and, at most, another library
    defined under that same member's own directory tree: never a mentat_* library
@@ -889,12 +889,12 @@ let%test
    (dune-rpc/dune-rpc-lwt, tls/tls-eio): oauth2 carries its Eio transport as the
    co-located oauth2_eio sublibrary, so the scan reads every dune under a
    member's tree and treats an edge to a same-tree library as internal. This is
-   the law behind the charter's teeth: a "no core dep" convention rots silently,
+   the law behind the contract's teeth: a "no core dep" convention rots silently,
    a checked one does not. The scan enumerates members from the directory
    listing so a new member is audited the moment its dune lands. The member-set
    assertion is the one deliberate hand-maintained line — growing otherlibs/ is
    a conscious act, so adding a directory must also update this list, which
-   re-affirms the charter.
+   re-affirms the contract.
 
    Two more clauses are checked here. First, every library a member defines
    carries NO mentat_ prefix: the bare rename is pulled forward from release, so

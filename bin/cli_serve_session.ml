@@ -40,7 +40,7 @@ type shape =
    re-derives the same overrides from the document alone. The admission half
    (mode, output schema) is the driver's to read at each queue admission.
    The lowering itself is [Run_policy_overlay] — one home, shared with the
-   charter fire's pre-flight — and a member the configuration layer refuses
+   routine fire's pre-flight — and a member the configuration layer refuses
    (an unknown sandbox spelling, a malformed selector) refuses the boot
    loudly rather than serving the session under defaults the grant never
    named. A load failure lowers nothing: the instance stages plainly and

@@ -1424,7 +1424,7 @@ let rediscover t ~engine_for =
       in
       (* A leaf no stored session answers to is residue of a removed
          session: remove it. The claim set is every session in the scan,
-         not just delegated children — a charter run or a served root binds
+         not just delegated children — a routine run or a served root binds
          a leaf in the same tree with no delegation backlink, and a boot
          must not sever a live root's endpoint. *)
       let claimed = Hashtbl.create 8 in

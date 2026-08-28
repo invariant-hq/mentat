@@ -212,7 +212,7 @@ wait_captured () { mentat_cram wait-file "capture/request-$1.json"; }
 # Reap $1 and echo its exit code.
 wait_exit () { wait "$1"; echo $?; }
 
-# --- charter fixtures ----------------------------------------------------------
+# --- routine fixtures ----------------------------------------------------------
 
 # The shared pull-request repository fixture: a base branch, a feature head,
 # and a bare remote carrying refs/pull/7/head — what the derived https remote
@@ -236,15 +236,15 @@ make_pr_fixture () {
   git -C "$remote" update-ref refs/pull/7/head "$HEAD_SHA"
 }
 
-# Install the standard pr-review charter (webhook + cli arms over
+# Install the standard pr-review routine (webhook + cli arms over
 # acme/widgets, wall clock $1, default 5m) with both credentials in place.
 # Exports CDIR. Proposals that differ from this shape stay inline in their
 # .t — the divergence is the test's own meaning.
-install_review_charter () {
+install_review_routine () {
   local wall_clock="${1:-5m}"
   mkdir -p proposal
-  cat > proposal/charter.json <<EOF
-{ "charter": 1, "name": "pr-review",
+  cat > proposal/routine.json <<EOF
+{ "routine": 1, "name": "pr-review",
   "workspace": { "repo": "acme/widgets" },
   "trigger": [
     { "kind": "github_webhook", "events": ["pull_request.opened"] },
@@ -256,8 +256,8 @@ install_review_charter () {
 EOF
   printf 'Review the diff for defects.\n' > proposal/prompt.md
   printf '{"type":"object"}\n' > proposal/findings.schema.json
-  mentatd charter add proposal >/dev/null
-  CDIR="$PWD/config/mentat/charters/pr-review"
+  mentatd routine add proposal >/dev/null
+  CDIR="$PWD/config/mentat/routines/pr-review"
   printf 'test-read-token\n' > "$CDIR/secrets/read-token"
   chmod 600 "$CDIR/secrets/read-token"
   printf 'test-write-token\n' > "$CDIR/secrets/write-token"

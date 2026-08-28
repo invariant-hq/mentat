@@ -581,17 +581,17 @@ let web_cwd_root () =
    the daemon logs it and lets the stream end, so the browser's [EventSource]
    re-attaches and catches up from [Last-Event-ID]; no frame is fabricated.
 
-   The charters dashboard is the daemon's own page, routed before the
+   The routines dashboard is the daemon's own page, routed before the
    library's table: its inputs — the roster, the receipt logs, the run
    fences — live outside the one client [mentat.web] is allowed to reach. *)
-let web_handler ~charters env : Server.Web.handler =
+let web_handler ~routines env : Server.Web.handler =
   {
     Server.Web.respond =
       (fun ~meth ~path ~query ~body ->
         let response =
           match (meth, path) with
-          | ("GET" | "HEAD"), [ "charters" ] ->
-              Mentat_web.Routes.Html (charters ())
+          | ("GET" | "HEAD"), [ "routines" ] ->
+              Mentat_web.Routes.Html (routines ())
           | _ -> Mentat_web.Routes.handle env ~meth ~path ~query ~body
         in
         let { Mentat_web.Routes.Http.status; headers; body } =
@@ -623,7 +623,7 @@ let web_handler ~charters env : Server.Web.handler =
    daemon's life so the eviction sweep never pulls it out from under the web
    client, and the loopback origins the edge allow-lists are derived from the
    bound port. *)
-let start_web registry ~sw ~net ~clock ~web_port ~token ~charters =
+let start_web registry ~sw ~net ~clock ~web_port ~token ~routines =
   let root = web_cwd_root () in
   match get_or_boot registry ~root () with
   | Error status -> Error (exit_message status)
@@ -667,7 +667,7 @@ let start_web registry ~sw ~net ~clock ~web_port ~token ~charters =
         Server.Web.serve ~sw ~clock ~token
           ~on_rotate:(fun successor -> on_url (url_of successor))
           ~origins
-          (web_handler ~charters env)
+          (web_handler ~routines env)
           listener
       in
       Ok (branch, url_of token)
@@ -683,26 +683,26 @@ let max_idle_seconds environment =
     (List.assoc_opt "MENTAT_DAEMON_MAX_IDLE" environment)
     float_of_string_opt
 
-(* An enabled webhook charter is a standing commission: its node must stay
+(* An enabled webhook routine is a standing commission: its node must stay
    resident to answer deliveries, and an idle-stop would be a clean exit —
    which the service manager never restarts — so every later webhook would
    bounce until the owner intervened. Ingress traffic deliberately does not
    refresh the idle clock: a quiet repository is exactly when the commission
    still stands. Consulted only at the stop threshold, so the roster fold
-   costs one read per idle window; a charterless daemon keeps the
-   backstop. *)
-let charter_resident dirs () =
-  match Charter_store.ingress_index dirs with
+   costs one read per idle window; a daemon with no routines keeps
+   the backstop. *)
+let routine_resident dirs () =
+  match Routine_store.ingress_index dirs with
   | Error e ->
       (* An unreadable roster must fail safe for a stop decision: stopping
-         a daemon that may hold an enabled webhook charter bounces every
+         a daemon that may hold an enabled webhook routine bounces every
          later delivery, and the manager never restarts a clean exit. *)
       Eio.traceln "mentatd: idle stop deferred, the roster is unreadable: %s"
-        (Charter_store.Error.message e);
+        (Routine_store.Error.message e);
       true
   | Ok (bindings, _failures) ->
       List.exists
-        (fun (b : Charter_store.Binding.t) -> b.Charter_store.Binding.enabled)
+        (fun (b : Routine_store.Binding.t) -> b.Routine_store.Binding.enabled)
         bindings
 
 let idle_watchdog clock ~max_idle ~resident registry stop =
@@ -717,24 +717,24 @@ let idle_watchdog clock ~max_idle ~resident registry stop =
   in
   loop ()
 
-(* The charter node is always assembled — charters register by file, so one
+(* The routine node is always assembled — routines register by file, so one
    installed while the daemon runs is in force at its next delivery without
    a restart, and an empty roster costs nothing (the resolver and the
    reconcile passes re-read it per event). A daemon that cannot resolve its
    [mentat] sibling serves without the node — loudly, since installed
-   charters will not run — unless the webhook ingress was explicitly
+   routines will not run — unless the webhook ingress was explicitly
    requested, which it could never honor. *)
-let stage_node shared ~broker ~stop ~github_base_url ~charter_git_base
+let stage_node shared ~broker ~stop ~github_base_url ~routine_git_base
     ~ingress_port =
   match
     Node.create shared ~broker ~stop ?github_base_url
-      ?git_base:charter_git_base ()
+      ?git_base:routine_git_base ()
   with
   | Ok node -> Ok (Some node)
   | Error message when Option.is_some ingress_port ->
       Error (Printf.sprintf "cannot serve the webhook ingress: %s" message)
   | Error message ->
-      Eio.traceln "mentatd: charters will not run: %s" message;
+      Eio.traceln "mentatd: routines will not run: %s" message;
       Ok None
 
 (* The tunnel-facing ingress bind: loopback only — the owner points whatever
@@ -775,7 +775,7 @@ let serve_branches ~sw ~clock ~registry ~stop ~dirs ~environment ~listener
       | Some max_idle ->
           [
             (fun () ->
-              idle_watchdog clock ~max_idle ~resident:(charter_resident dirs)
+              idle_watchdog clock ~max_idle ~resident:(routine_resident dirs)
                 registry stop);
           ]
       | None -> []);
@@ -792,11 +792,11 @@ let serve_branches ~sw ~clock ~registry ~stop ~dirs ~environment ~listener
           ]
       | _ -> []);
       (* The node's two fibers: the pump drives admitted deliveries to
-         their dispositions — re-entering the reaped charter's reconcile
-         over a fresh load of the charter by name, so a disable or edit
+         their dispositions — re-entering the reaped routine's reconcile
+         over a fresh load of the routine by name, so a disable or edit
          during the run governs the new work the re-entry can commit,
          while the admitted event itself ran under its admission-time
-         closure — and the reconcile beat keeps every charter's record
+         closure — and the reconcile beat keeps every routine's record
          converging. The re-entry yields to a pass holding the fold's
          one-pass gate rather than parking the pump behind it. Both fibers
          are cancellable at any instant — anything caught between receipt
@@ -807,19 +807,19 @@ let serve_branches ~sw ~clock ~registry ~stop ~dirs ~environment ~listener
             (fun () ->
               Node.pump node
                 ~after_reap:(fun loaded ->
-                  let name = loaded.Charter_store.Loaded.name in
-                  match Charter_store.load dirs ~name with
+                  let name = loaded.Routine_store.Loaded.name in
+                  match Routine_store.load dirs ~name with
                   | Ok fresh ->
-                      Charter_reconcile.reconcile (Node.reconcile_env node)
+                      Routine_reconcile.reconcile (Node.reconcile_env node)
                         ~repo_for:(Node.repo node) fresh
                   | Error e ->
                       Eio.traceln
-                        "mentatd: charter %s: skipping the after-reap \
+                        "mentatd: routine %s: skipping the after-reap \
                          re-entry: %s"
                         name
-                        (Charter_store.Error.message e)));
+                        (Routine_store.Error.message e)));
             (fun () ->
-              Charter_reconcile.loop (Node.reconcile_env node)
+              Routine_reconcile.loop (Node.reconcile_env node)
                 ~repo_for:(Node.repo node));
           ]
       | None -> []);
@@ -832,7 +832,7 @@ let serve_branches ~sw ~clock ~registry ~stop ~dirs ~environment ~listener
     ]
 
 let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
-    ~github_base_url ~charter_git_base =
+    ~github_base_url ~routine_git_base =
   Eio_main.run @@ fun stdenv ->
   Eio.Switch.run @@ fun sw ->
   match Composition.stage_shared ~stdenv ~sw () with
@@ -893,13 +893,13 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
               in
               let registry = make_registry ~shared ~parent_sw:sw ~broker in
               (* The stop seam is created before the branches so the resident
-                 charter node can thread it into its pipeline; the signal
+                 routine node can thread it into its pipeline; the signal
                  handlers are installed further down, around the serve
                  races. *)
               let stop = Stop_signal.create () in
               match
                 stage_node shared ~broker ~stop ~github_base_url
-                  ~charter_git_base ~ingress_port
+                  ~routine_git_base ~ingress_port
               with
               | Error message -> Exit_status.runtime message
               | Ok node ->
@@ -913,12 +913,12 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                    write so its URL is recorded in daemon.json, which is where every
                    client reads it from. *)
                 (* The dashboard's reads happen per request inside the
-                   closure — never here — so a charter installed while the
+                   closure — never here — so a routine installed while the
                    daemon runs renders at its next request. *)
-                let charters_page () =
-                  Charter_dashboard.page ~now:(Unix.gettimeofday ())
+                let routines_page () =
+                  Routine_dashboard.page ~now:(Unix.gettimeofday ())
                     ~ingress:(Option.map snd ingress_listener)
-                    (Charter_dashboard.observe ~dirs
+                    (Routine_dashboard.observe ~dirs
                        ~store:shared.Composition.store)
                 in
                 let web_branch, web_url =
@@ -926,7 +926,7 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                     let token = Server.Token.generate () in
                     match
                       start_web registry ~sw ~net ~clock ~web_port ~token
-                        ~charters:charters_page
+                        ~routines:routines_page
                     with
                     | Ok (branch, url) ->
                         (* Only a foreground daemon has a reader. A spawned
@@ -1018,7 +1018,7 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                        fiber, behind the serve races. *)
                     (match node with
                     | Some node ->
-                        Charter_reconcile.pass_settle (Node.reconcile_env node)
+                        Routine_reconcile.pass_settle (Node.reconcile_env node)
                     | None -> ());
                     Eio.Fiber.any
                       (serve_branches ~sw ~clock ~registry ~stop ~dirs

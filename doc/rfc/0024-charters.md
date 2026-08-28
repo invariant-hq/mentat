@@ -11,6 +11,8 @@
   in the journal, the publisher's end state is in-process — under the
   standing directive that the RFC carries the right design and stages
   migrations as migrations, never as destinations.)
+- Vocabulary note (2026-08-28): "charter" was renamed "routine"
+  product-wide; this document keeps its original spelling.
 - Audience: Mentat maintainers; the architecture (RFC 0000), server
   (RFC 0017), subagent-process (RFC 0018), and GitHub connector
   (RFC 0019/0020) authors

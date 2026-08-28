@@ -4,9 +4,9 @@
  (package mentat)
  (flags (:standard -open Mentat_boot))
  (modules
-  charter_cli
-  charter_dashboard
-  charter_reconcile
+  routine_cli
+  routine_dashboard
+  routine_reconcile
   daemon_server
   main
   node
@@ -20,7 +20,7 @@
   mentat_agent
   mentat_boot
   mentat_broker
-  mentat_charter
+  mentat_routine
   mentat_client
   mentat_github
   mentat_protocol

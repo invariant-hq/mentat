@@ -6,7 +6,7 @@
 - Amends: RFC 0018 (subagent processes — resolves its open question 1
   on the broker's placement, revises L9 as stated in the supervisor
   section, and executes the `In_process` deletion whose trigger RFC
-  0024 §13 carries), RFC 0024 §9 (charter runs become served sessions)
+  0024 §13 carries), RFC 0024 §9 (routine runs become served sessions)
   and its repo-layout ruling (lib/ gains one library, ruled below),
   RFC 0000 §3 (the process model)
 
@@ -24,7 +24,7 @@ socket when a driver serves it, by a brief labeled fence-held append
 when it is dormant. There is no registry, no routing layer, no new wire
 command, and no second mailbox. Today's parent-to-child delivery
 becomes the send's first caller; the in-process subagent backend, the
-daemon's engine hosting, and the charter one-shot spawn are deleted.
+daemon's engine hosting, and the routine one-shot spawn are deleted.
 
 ## Motivation
 
@@ -32,7 +32,7 @@ The consolidation audit (2026-08-27) found ten kinds of process where
 the product's own laws admit four, eight signal-escalation ladders, six
 exit policies, two supervisors sharing five copied primitives, and four
 run shapes of which one can serve a socket and three are deaf. Subagents
-are OS processes in exactly one of four cases. Charter runs cannot be
+are OS processes in exactly one of four cases. Routine runs cannot be
 watched, attached, or messaged, and if their spawning process dies,
 nobody enforces their budget. Parent-to-child messages ride a five-arm
 liveness ladder with a documented silent-drop window.
@@ -65,11 +65,11 @@ id: its journal (the truth), its socket path (the door), its run fence
 (one driver at a time). When a session needs to run, some process spawns
 `mentat serve-session --session ID --cwd DIR` and watches the pid. That
 is the only way any agent runs — your interactive session, a subagent,
-a charter's PR review. The process exits when the session is idle; the
+a routine's PR review. The process exits when the session is idle; the
 session remains, durable, addressable, resumable.
 
 **You never think about which binary hosts what.** `mentat` spawns and
-dials the session you are driving. mentatd spawns charter runs when
+dials the session you are driving. mentatd spawns routine runs when
 webhooks arrive and re-adopts survivors after a restart. The web page
 dials the same socket the TUI dials. If mentatd restarts, your sessions
 keep running; if your terminal closes, your session's process notices
@@ -92,11 +92,11 @@ starts a process by itself.
 
 **Waking is separate from sending, on purpose.** "Do this now" is two
 acts: send the message, then ensure the target's process is running. A
-parent may wake its own children. mentatd may wake a charter session
+parent may wake its own children. mentatd may wake a routine session
 inside its budget. Nobody else's mail can make your agent spend money.
 
 **The human uses the same primitives.** `mentat session send ID "…"`
-mails any session you own. Attaching your TUI to a running charter
+mails any session you own. Attaching your TUI to a running routine
 review — including one parked on a question — is dialing its socket,
 which exists because every run serves one.
 
@@ -112,7 +112,7 @@ the shape —
   deterministic first turn from it, confine the socket's session cone
   to the delegation subtree (today's behavior, byte-for-byte; the
   `--interrupted` carry stays with this shape);
-- a charter-born session → apply the charter's recorded run policy —
+- a routine-born session → apply the routine's recorded run policy —
   mode, sandbox, step cap, output schema, and the model, reasoning,
   and permission spellings — from the store; the wall clock is not
   recorded: it is the supervising fire's deadline (§ the supervisor —
@@ -122,7 +122,7 @@ the shape —
 
 **Every shape attaches its driver at boot.** Attach runs the driver's
 queue admission, so mail already in the journal starts the first turn —
-this is the seam by which send-then-supervise runs a charter's trigger
+this is the seam by which send-then-supervise runs a routine's trigger
 prompt, and what makes "booting" a true word in the serving law.
 Delegation already satisfies the rule through its first-turn submit.
 
@@ -183,7 +183,7 @@ val supervise :
     activation; a free fence with a terminal head and an empty queue
     calls [on_settled] directly; a preemptable stale holder is
     laddered, then respawned. Respawns are bounded (default 2 for
-    delegation children, 0 for charter runs); exhaustion fires
+    delegation children, 0 for routine runs); exhaustion fires
     [on_failure]. *)
 
 val cancel : t -> Mentat_session.Id.t -> unit
@@ -202,7 +202,7 @@ observes a session *without* owning it — the fence, its owner label,
 and the journal head, until the head is terminal — the monitor to
 `supervise`'s link, in OTP terms (exact signature at contact). It
 unifies three hand-rolled copies of the same probe loop: the broker's
-own internal foreign watch, charter reconcile's pending-run probes,
+own internal foreign watch, routine reconcile's pending-run probes,
 and the dashboard's fence probes. `Broker.children` is the matching
 introspection query — the supervised set as (session, pid, state).
 Both are built at the rung reconcile consumes them (R2–R3), not
@@ -233,7 +233,7 @@ settling the delegation against the pre-mail result.
 
 The deadline has one home: the supervisor's ladder fires at it. An
 orphan whose supervisor died is not deadline-enforced until re-adopted;
-its backstops are its own idle exit and, for charter runs, the
+its backstops are its own idle exit and, for routine runs, the
 reconcile fold at the node's next pass. (The earlier draft claimed
 child-side self-enforcement; one budget must not have two clocks.)
 
@@ -303,19 +303,19 @@ against an idle session starts a turn through the ordinary loop. A
 dormant session's mail waits. Waking a dormant session is `supervise` —
 a distinct act by whoever holds supervision authority: the parent for
 its children (`follow_up` means send **then** supervise), mentatd for
-charter sessions whose charter declares the `agent_message` trigger,
+routine sessions whose routine declares the `agent_message` trigger,
 the human for anything. mentatd's wake scan is the node's existing
-sweep: it enumerates charter-born sessions whose charter declares the
+sweep: it enumerates routine-born sessions whose routine declares the
 trigger, reads unconsumed origin-bearing entries fence-free (the
 observation posture), and fires through the ordinary budget-fenced
-path — a wake bought by mail spends the charter's fire limits exactly
+path — a wake bought by mail spends the routine's fire limits exactly
 as a webhook fire does; mail can never buy more runs than the trigger
 policy allows.
 
 **Trigger provenance reaches the turn.** Queue admission carries the
 entry's origin into the turn it starts: an entry with a `Trigger`
 origin mints the turn as `Triggered` (recording the entry id), and a
-charter-born session's admission applies the charter's recorded
+routine-born session's admission applies the routine's recorded
 contract — mode and output schema at admission, the step cap through
 the boot's overlay — never the plain Build defaults. This is the
 second journal-encoding change (§ wire and store) and what keeps
@@ -336,10 +336,10 @@ prompt-vs-queue delivery ladder, the busy-fallback, the in-process
 attach fallback and its silent-drop window, and the broker's
 gone-means-my-table-forgot arm.
 
-**The second caller.** A charter fire becomes: create the run session,
+**The second caller.** A routine fire becomes: create the run session,
 `send` the trigger prompt (`Trigger` origin, entry id derived from the
 trigger identity so a double fire dedupes), `supervise` with the
-charter's wall clock and a zero respawn budget, fold the receipt in
+routine's wall clock and a zero respawn budget, fold the receipt in
 the sinks. The one-shot spawn — prompt over stdin, jsonl capture, no
 socket, no setsid — is deleted; a parked run is attachable and a live
 run is followable.
@@ -362,7 +362,7 @@ wake authority upward; the reply is mail.
   the CLI prints it and exits nonzero; nothing pretends otherwise.
 - *Trigger sends*: a fresh run session's fence is free by
   construction, so the append arm applies; an undelivered trigger send
-  is a race residue covered by the fire's receipt and the charter's
+  is a race residue covered by the fire's receipt and the routine's
   next fire, which dedupes into the same entry id.
 
 ### Addressing and authority
@@ -391,7 +391,7 @@ delivery loop.
 
 **The accept gate** admits an entry whose origin is the target's
 parent, one of its own children, the owner (an absent origin), its own
-charter, or a grant-named session; anything else commits a durable
+routine, or a grant-named session; anything else commits a durable
 refusal fact and the content never reaches the model's context. The
 gate runs in whichever process performs the admission: the target's
 driver on the wire arm (a structured refusal for a rejected
@@ -420,7 +420,7 @@ entry's type.
   stated rather than engineered.
 - **Backpressure**: a per-(target, origin) cap of **unconsumed**
   entries — deliberately a backlog bound, where today's per-edge cap
-  was a lifetime bound; the rate law for paid wakes is the charter
+  was a lifetime bound; the rate law for paid wakes is the routine
   fire limit above, and the count runs at admission, under the
   target's fence, in both arms — which is what makes it race-safe. A
   full mailbox is a loud send failure. Entry size rides the existing
@@ -440,7 +440,7 @@ new settlement kinds:
 | Failure | Outcome | Durable trace |
 |---|---|---|
 | activation crashes | reaper observes; respawn within budget re-serves the same session; `recover` settles open claims | child journal |
-| respawn budget exhausted | the named sink: delegation → parent settlement; root/charter → receipt + alert | parent journal / receipts |
+| respawn budget exhausted | the named sink: delegation → parent settlement; root/routine → receipt + alert | parent journal / receipts |
 | parent process dies | children finish, self-idle, self-exit; mail and results wait durably; a dead run is folded at the node's next pass — a live orphan's deadline is not re-armed (the supervisor section's admitted residue) | child journals |
 | mentatd dies | roots keep running and self-terminate on idle; boot rediscovery adopts live roots, folds exited ones | receipts, endpoint tree |
 | send to unknown session | loud error / failed tool call | sender transcript |
@@ -503,7 +503,7 @@ and orphaned look identical" — are structurally impossible: every
 - **L-B6 — One send, no wake.** The messaging primitive is the queue
   entry; delivery never activates a dormant session. Waking is a
   supervision act by an authorized supervisor, and a wake bought by
-  mail spends the target's charter fire limits. *Prevents:* mail as an
+  mail spends the target's routine fire limits. *Prevents:* mail as an
   execution vector, and mail as an unmetered budget drain.
 - **L-B7 — Durable before delivered; the target's journal is the
   proof** (0024 N3's barrier, at the send edge). *Prevents:* delivery
@@ -564,7 +564,7 @@ daemon in front.
 
 **Messages wake their targets.** Rejected: waking is execution;
 execution has owners, budgets, and sandboxes. A message that spawns is
-a prompt-injection amplifier and an unbudgeted cost. The charter's
+a prompt-injection amplifier and an unbudgeted cost. The routine's
 `agent_message` trigger is the governed exception that proves the
 rule.
 
@@ -637,13 +637,13 @@ intensity bound.
 
 **Out of scope (tiered to their own work):**
 7. The web frontend's dialing path (the eviction campaign's wave D).
-8. The charter dashboard's mail view.
+8. The routine dashboard's mail view.
 
 ## Future possibilities
 
 *The anti-ratchet rule: nothing here is a reason to accept this RFC,
 nor a later one.* A mid-turn "check mail" tool; an
-`agent_message`-triggered charter answering its own PR comments; a
+`agent_message`-triggered routine answering its own PR comments; a
 mail view in the TUI side pane; remote delivery over the fleet relay
 riding the same entry shape. A delayed send (`send_after`, "wake me
 at T") is RFC 0024's `schedule` and `self_schedule` trigger arms
@@ -660,7 +660,7 @@ without it; this RFC only sequences it: the daemon's engine hosting
 and routing proxy (~300), `find_or_spawn` and mentat's daemon
 knowledge (~200, the separation ruling's bill), the in-process fiber
 backend (~150 direct, ~250 with ripple — the deletion RFC 0024 §13's
-trigger already carries), the charter one-shot spawn (~250, the
+trigger already carries), the routine one-shot spawn (~250, the
 one-process-kind ruling's bill). Against it, the eviction campaign's
 own additions (its ledger: roughly −270/+380 — a surface-and-residency
 win, not a line win).
@@ -694,7 +694,7 @@ this RFC implies nothing about priority or scheduling.
   target's own recorded children; `Trigger` refused) lands at this
   rung in both admissions: one judgment in the session library, run
   by the target's driver on the wire arm and by the sender's broker
-  on the append arm — the charter arm arrives with R3, the grant arm
+  on the append arm — the routine arm arrives with R3, the grant arm
   with R5. Holds: parent transcripts. Changes, named: the wire corpus
   extends for `Queue_next`'s optional origin member; child journals
   gain the origin member; messaging crams lose the fallback arms.
@@ -714,19 +714,19 @@ this RFC implies nothing about priority or scheduling.
   mail can accumulate — and the sender-name prompt framing from the
   typed origin, which has no reader before foreign senders exist.
 - **R2 — one boot. LANDED 2026-08-28.** Shape-reading serve-session
-  with the attach-at-boot rule; charter and root sessions servable.
+  with the attach-at-boot rule; routine and root sessions servable.
   Held: the delegated arm byte-for-byte. Landed adjudication: the
   boot derives two shapes, not three — a root attaches its driver at
   boot so journal mail starts the first turn and exits on idle by the
-  finished judgment; the charter-born shape is honestly that root
+  finished judgment; the routine-born shape is honestly that root
   attach plus contract staging, which waited for R3's recording.
-- **R3 — charter runs as sessions. LANDED 2026-08-28** (supervise,
+- **R3 — routine runs as sessions. LANDED 2026-08-28** (supervise,
   watch, children first; then the fire). Fire = create + send +
   supervise; the one-shot deleted; runs attachable; trigger
   provenance through queue admission. R3 also builds `Broker.watch`
   and `Broker.children` — the observation seam reconcile consumes,
   retiring its hand-rolled fence probes (the dashboard later). Held:
-  receipts, the fold, run ids. Changed, named: the charter crams that
+  receipts, the fold, run ids. Changed, named: the routine crams that
   pinned the one-shot. Landed adjudications: the recorded contract
   lives in session metadata — trigger provenance
   (`Metadata.Triggered_from`) beside the run knobs

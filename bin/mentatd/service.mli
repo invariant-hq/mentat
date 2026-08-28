@@ -105,20 +105,20 @@ val install :
   print:bool ->
   ingress_port:int option ->
   github_base_url:string option ->
-  charter_git_base:string option ->
+  routine_git_base:string option ->
   web:bool ->
   web_port:int option ->
   Exit_status.t
-(** [install ~print ~ingress_port ~github_base_url ~charter_git_base ~web
+(** [install ~print ~ingress_port ~github_base_url ~routine_git_base ~web
     ~web_port] resolves the unit for this host and, when [print] is false,
     writes it (0644, atomically) and hands it to the service manager:
     [launchctl bootout]/[bootstrap] into the user's [gui] domain on macOS,
     [systemctl --user daemon-reload]/[enable]/[restart] on Linux.
-    [ingress_port], [github_base_url], [charter_git_base], and the web
+    [ingress_port], [github_base_url], [routine_git_base], and the web
     pair ([web] bakes [--web], [web_port] bakes [--web-port]) are baked
     into the unit's exec line as the daemon's own serve flags, so the
     resident daemon starts with them at every boot — a service-managed
-    daemon's browser frontend and charters dashboard exist only this way,
+    daemon's browser frontend and routines dashboard exist only this way,
     since only one daemon claims a store;
     re-running install with different flags renders different bytes and
     replaces the unit. An unchanged, already-loaded unit is a

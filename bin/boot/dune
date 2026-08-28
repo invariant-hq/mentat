@@ -27,7 +27,7 @@
   mentat_prompts
   mentat_agent
   mentat_broker
-  mentat_charter
+  mentat_routine
   mentat_client
   mentat_connector
   mentat_json

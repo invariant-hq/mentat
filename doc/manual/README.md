@@ -33,8 +33,8 @@ internal notes, see the rest of [`doc/`](../).
   images, output schemas, JSONL events, exit codes, and continuation.
 - [GitHub review](github-review.md) — the two-half review pipeline: producing
   a findings document, rendering it into GitHub API requests, and posting.
-- [Charters](charters.md) — standing, unattended pull-request review: the
-  charter directory, credentials, crontab or resident deployment, budgets,
+- [Routines](routines.md) — standing, unattended pull-request review: the
+  routine directory, credentials, crontab or resident deployment, budgets,
   and the durable record.
 - [Daemon and web](daemon-and-web.md) — opt-in `--attach`, daemon lifecycle and
   local socket trust, plus the authenticated loopback browser frontend.

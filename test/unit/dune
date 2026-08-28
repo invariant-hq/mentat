@@ -447,23 +447,23 @@
  (libraries windtrap mentat_connector jsont jsont.bytesrw))
 
 (test
- (name test_charter)
- (modules test_charter)
- (libraries windtrap mentat_charter jsont jsont.bytesrw))
+ (name test_routine)
+ (modules test_routine)
+ (libraries windtrap mentat_routine jsont jsont.bytesrw))
 
 ; The fire pipeline is a boot-library module (both binaries invoke it), so
 ; its pure folds are driven through the linked library rather than a
 ; flat-directory copy — its effectful spine composes half of boot.
 
 (test
- (name test_charter_fire)
- (modules test_charter_fire)
+ (name test_routine_fire)
+ (modules test_routine_fire)
  (flags
   (:standard -open Mentat_boot))
  (libraries
   windtrap
   mentat_boot
-  mentat_charter
+  mentat_routine
   mentat_digest
   mentat_llm
   mentat_permission
@@ -474,18 +474,18 @@
   jsont
   jsont.bytesrw))
 
-; The charter store is a boot-library module too, so its suite links the
-; library exactly as test_charter_fire does — no flat-directory copies.
+; The routine store is a boot-library module too, so its suite links the
+; library exactly as test_routine_fire does — no flat-directory copies.
 
 (test
- (name test_charter_store)
- (modules test_charter_store)
+ (name test_routine_store)
+ (modules test_routine_store)
  (flags
   (:standard -open Mentat_boot))
  (libraries
   windtrap
   mentat_boot
-  mentat_charter
+  mentat_routine
   eio
   eio.unix
   eio_main
@@ -670,7 +670,7 @@
 ; service; its source is copied in like reconcile's, and only the pure half
 ; (rendering, paths, standing) is driven — the effectful verbs need a service
 ; manager. The copy compiles whole, so the stanza links mentat_boot under the
-; executable's own -open, as test_charter_fire does.
+; executable's own -open, as test_routine_fire does.
 
 (copy_files
  (files ../../bin/mentatd/service.{ml,mli}))
@@ -682,7 +682,7 @@
   (:standard -open Mentat_boot))
  (libraries windtrap mentat_boot unix))
 
-; The resident charter node lives in bin/mentatd as the module node; its
+; The resident routine node lives in bin/mentatd as the module node; its
 ; source is copied in like service's, and only the pure folds (ingress
 ; resolution, the delivery route, the child-environment scrub) are driven —
 ; the effectful surfaces need a daemon behind them. The copy compiles whole,
@@ -700,33 +700,33 @@
   windtrap
   mentat_boot
   mentat_broker
-  mentat_charter
+  mentat_routine
   mentat_github
   mentat_provider_runtime
   mentat_server
   eio
   unix))
 
-; The node's charter reconcile drivers live in bin/mentatd as the module
-; charter_reconcile; its source is copied in like reconcile's and the
-; drivers are exercised over a temporary charter estate (the pure tables
-; they interpret live in mentat_charter and are tested with that library).
+; The node's routine reconcile drivers live in bin/mentatd as the module
+; routine_reconcile; its source is copied in like reconcile's and the
+; drivers are exercised over a temporary routine estate (the pure tables
+; they interpret live in mentat_routine and are tested with that library).
 ; The copy compiles whole, so the stanza links the drivers' libraries under
 ; the executable's own -open.
 
 (copy_files
- (files ../../bin/mentatd/charter_reconcile.{ml,mli}))
+ (files ../../bin/mentatd/routine_reconcile.{ml,mli}))
 
 (test
- (name test_charter_reconcile)
- (modules test_charter_reconcile charter_reconcile)
+ (name test_routine_reconcile)
+ (modules test_routine_reconcile routine_reconcile)
  (flags
   (:standard -open Mentat_boot))
  (libraries
   windtrap
   mentat_boot
   mentat_broker
-  mentat_charter
+  mentat_routine
   mentat_digest
   mentat_llm
   mentat_permission
@@ -741,23 +741,23 @@
   eio_main
   unix))
 
-; The daemon's charters dashboard lives in bin/mentatd as the module
-; charter_dashboard; its source is copied in and only the pure projection
+; The daemon's routines dashboard lives in bin/mentatd as the module
+; routine_dashboard; its source is copied in and only the pure projection
 ; is driven — the effectful observation needs a daemon estate behind it,
 ; which the web blackbox family exercises end to end.
 
 (copy_files
- (files ../../bin/mentatd/charter_dashboard.{ml,mli}))
+ (files ../../bin/mentatd/routine_dashboard.{ml,mli}))
 
 (test
- (name test_charter_dashboard)
- (modules test_charter_dashboard charter_dashboard)
+ (name test_routine_dashboard)
+ (modules test_routine_dashboard routine_dashboard)
  (flags
   (:standard -open Mentat_boot))
  (libraries
   windtrap
   mentat_boot
-  mentat_charter
+  mentat_routine
   mentat_session
   mentat_store
   mentat_web

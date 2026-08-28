@@ -3,7 +3,7 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-open Mentat_charter
+open Mentat_routine
 open Mentat_github
 
 (* The admission bound on the delivery queue. Overflow refuses at the wire
@@ -16,16 +16,16 @@ open Mentat_github
 let queue_cap = 64
 
 type t = {
-  env : Charter_fire.env;
+  env : Routine_fire.env;
   stop : Stop_signal.t;
   github_base_url : string option;
   git_base : string option;
-  queue : (Charter_store.Loaded.t * Event.Pull_request.t) Eio.Stream.t;
+  queue : (Routine_store.Loaded.t * Event.Pull_request.t) Eio.Stream.t;
   rejected : int ref;
 }
 
-let dirs t = t.env.Charter_fire.dirs
-let say t line = t.env.Charter_fire.say line
+let dirs t = t.env.Routine_fire.dirs
+let say t line = t.env.Routine_fire.say line
 
 (* Display hygiene for header values reaching the trace log: control bytes
    blanked, length bounded. *)
@@ -52,9 +52,9 @@ let child_environment base ~github_base_url =
   | None -> base
   | Some url -> base @ [ ("MENTAT_GITHUB_BASE_URL", url) ]
 
-(* The checkout remote, derived per charter: the base names the git host
+(* The checkout remote, derived per routine: the base names the git host
    prefix, the watched repository names the path — one flag serves a node
-   holding charters over many repositories, and an Enterprise base carries
+   holding routines over many repositories, and an Enterprise base carries
    its checkouts along with its API reads. *)
 let checkout_url ~git_base ~repo =
   let base =
@@ -76,7 +76,7 @@ let create (shared : Composition.shared) ~broker ~stop ?github_base_url
   | Ok mentat_bin ->
       let env =
         {
-          Charter_fire.dirs = shared.Composition.dirs;
+          Routine_fire.dirs = shared.Composition.dirs;
           store = shared.Composition.store;
           catalog = Mentat_provider_runtime.catalog shared.Composition.runtime;
           stdenv = shared.Composition.stdenv;
@@ -99,33 +99,33 @@ let create (shared : Composition.shared) ~broker ~stop ?github_base_url
           rejected = ref 0;
         }
 
-let env t ~name = Charter_fire.named_env t.env ~name
+let env t ~name = Routine_fire.named_env t.env ~name
 let reconcile_env t = t.env
 
-let repo t (loaded : Charter_store.Loaded.t) =
-  let watched = loaded.Charter_store.Loaded.charter.Charter.repo in
-  match Charter_store.read_secret loaded ~file:"read-token" with
-  | Error e -> Error (Charter_store.Error.message e)
+let repo t (loaded : Routine_store.Loaded.t) =
+  let watched = loaded.Routine_store.Loaded.routine.Routine.repo in
+  match Routine_store.read_secret loaded ~file:"read-token" with
+  | Error e -> Error (Routine_store.Error.message e)
   | Ok None ->
       Error
         (Printf.sprintf
-           "charter %s has no GitHub read credential at %s (a fine-grained \
+           "routine %s has no GitHub read credential at %s (a fine-grained \
             PAT with read access to %s)"
-           loaded.Charter_store.Loaded.name
+           loaded.Routine_store.Loaded.name
            (Filename.concat
-              (Filename.concat loaded.Charter_store.Loaded.dir "secrets")
+              (Filename.concat loaded.Routine_store.Loaded.dir "secrets")
               "read-token")
            watched)
   | Ok (Some token) -> (
       match
         Github_api.make ?base_url:t.github_base_url ~token
-          (Eio.Stdenv.net t.env.Charter_fire.stdenv)
+          (Eio.Stdenv.net t.env.Routine_fire.stdenv)
       with
       | Error e -> Error (Github_api.Error.message e)
       | Ok api ->
           let github =
             {
-              Charter_fire.Github.current_head =
+              Routine_fire.Github.current_head =
                 (fun ~number ->
                   Github_reads.current_head api ~repo:watched ~number);
               open_prs =
@@ -133,7 +133,7 @@ let repo t (loaded : Charter_store.Loaded.t) =
                   Result.map
                     (List.map (fun (pr : Github_reads.Open_pr.t) ->
                          {
-                           Charter_fire.Github.number =
+                           Routine_fire.Github.number =
                              pr.Github_reads.Open_pr.number;
                            head_sha = pr.Github_reads.Open_pr.head_sha;
                            base_ref = pr.Github_reads.Open_pr.base_ref;
@@ -147,22 +147,22 @@ let repo t (loaded : Charter_store.Loaded.t) =
             }
           in
           let git_url = checkout_url ~git_base:t.git_base ~repo:watched in
-          Ok { Charter_fire.Repo.git_url; github })
+          Ok { Routine_fire.Repo.git_url; github })
 
 (* Ingress. *)
 
 let resolution bindings ~ingress_id =
   match
     List.find_opt
-      (fun (b : Charter_store.Binding.t) ->
-        String.equal b.Charter_store.Binding.id ingress_id)
+      (fun (b : Routine_store.Binding.t) ->
+        String.equal b.Routine_store.Binding.id ingress_id)
       bindings
   with
   | Some b ->
       Mentat_server.Ingress.Resolved
         {
-          secret = b.Charter_store.Binding.secret;
-          enabled = b.Charter_store.Binding.enabled;
+          secret = b.Routine_store.Binding.secret;
+          enabled = b.Routine_store.Binding.enabled;
         }
   | None -> Mentat_server.Ingress.Unknown
 
@@ -190,79 +190,79 @@ let event_route event ~body =
    custody re-reads — the file is the registration, so the name is looked up
    again rather than remembered across the verification. *)
 let binding_name t ~ingress_id =
-  match Charter_store.ingress_index (dirs t) with
-  | Error e -> Error (Charter_store.Error.message e)
+  match Routine_store.ingress_index (dirs t) with
+  | Error e -> Error (Routine_store.Error.message e)
   | Ok (bindings, _failures) -> (
       match
         List.find_opt
-          (fun (b : Charter_store.Binding.t) ->
-            String.equal b.Charter_store.Binding.id ingress_id)
+          (fun (b : Routine_store.Binding.t) ->
+            String.equal b.Routine_store.Binding.id ingress_id)
           bindings
       with
-      | Some b -> Ok b.Charter_store.Binding.name
-      | None -> Error "the ingress id no longer resolves to a charter")
+      | Some b -> Ok b.Routine_store.Binding.name
+      | None -> Error "the ingress id no longer resolves to a routine")
 
 let receipt_now ~identity ~digest kind =
   { Receipt.at = Unix.gettimeofday (); identity; digest; kind }
 
-let skip_disabled t (loaded : Charter_store.Loaded.t) event =
+let skip_disabled t (loaded : Routine_store.Loaded.t) event =
   let identity =
     Event.Identity.to_string (Event.Identity.of_pull_request event)
   in
   let receipt =
-    receipt_now ~identity ~digest:loaded.Charter_store.Loaded.digest
+    receipt_now ~identity ~digest:loaded.Routine_store.Loaded.digest
       (Receipt.Kind.Disposition (Receipt.Disposition.Skipped "disabled"))
   in
   match
-    Charter_store.append_receipt (dirs t)
-      ~name:loaded.Charter_store.Loaded.name receipt
+    Routine_store.append_receipt (dirs t)
+      ~name:loaded.Routine_store.Loaded.name receipt
   with
   | Ok () -> Ok identity
-  | Error e -> Error (Charter_store.Error.message e)
+  | Error e -> Error (Routine_store.Error.message e)
 
 let deliver t ~ingress_id ~enabled ~event ~delivery_id ~body =
   match binding_name t ~ingress_id with
   | Error reason -> `Refused reason
   | Ok name -> (
-      match Charter_store.load (dirs t) ~name with
-      | Error e -> `Refused (Charter_store.Error.message e)
+      match Routine_store.load (dirs t) ~name with
+      | Error e -> `Refused (Routine_store.Error.message e)
       | Ok loaded -> (
           match event_route event ~body with
           | `Ping ->
               say t
-                (Printf.sprintf "charter %s: ignoring ping delivery%s" name
+                (Printf.sprintf "routine %s: ignoring ping delivery%s" name
                    (delivery_suffix delivery_id));
               `Accepted
           | `Foreign kind ->
               say t
-                (Printf.sprintf "charter %s: ignoring %s delivery%s" name
+                (Printf.sprintf "routine %s: ignoring %s delivery%s" name
                    (clean kind)
                    (delivery_suffix delivery_id));
               `Accepted
           | `Malformed reason ->
-              `Refused (Printf.sprintf "charter %s: event: %s" name reason)
+              `Refused (Printf.sprintf "routine %s: event: %s" name reason)
           | `Admit ->
               if enabled && Eio.Stream.length t.queue >= queue_cap then
                 `Refused
-                  (Printf.sprintf "charter %s: the delivery queue is full" name)
+                  (Printf.sprintf "routine %s: the delivery queue is full" name)
               else (
-                match Charter_fire.admit_delivery (env t ~name) loaded ~body with
+                match Routine_fire.admit_delivery (env t ~name) loaded ~body with
                 | Error reason ->
-                    `Refused (Printf.sprintf "charter %s: %s" name reason)
+                    `Refused (Printf.sprintf "routine %s: %s" name reason)
                 | Ok ev ->
                     if not enabled then (
                       match skip_disabled t loaded ev with
                       | Error reason ->
-                          `Refused (Printf.sprintf "charter %s: %s" name reason)
+                          `Refused (Printf.sprintf "routine %s: %s" name reason)
                       | Ok identity ->
                           say t
-                            (Printf.sprintf "charter %s: skipped %s: disabled"
+                            (Printf.sprintf "routine %s: skipped %s: disabled"
                                name identity);
                           `Accepted)
                     else (
                       Eio.Stream.add t.queue (loaded, ev);
                       say t
-                        (Printf.sprintf "charter %s: queued %s%s" name
+                        (Printf.sprintf "routine %s: queued %s%s" name
                            (Event.Identity.to_string
                               (Event.Identity.of_pull_request ev))
                            (delivery_suffix delivery_id));
@@ -271,18 +271,18 @@ let deliver t ~ingress_id ~enabled ~event ~delivery_id ~body =
 let ingress t =
   {
     (* The resolver runs on unauthenticated input, so it is side-effect
-       minimal: a broken charter is not narrated here — one line per broken
-       charter per request would let any sender with the URL spend log
+       minimal: a broken routine is not narrated here — one line per broken
+       routine per request would let any sender with the URL spend log
        I/O — but on the cookie-gated dashboard and the reconcile beat,
        which read the same roster. The one narrated failure is the roster
        itself being unreadable, a host fault no request rate amplifies
        beyond the log's own line. *)
     Mentat_server.Ingress.resolve =
       (fun ~ingress_id ->
-        match Charter_store.ingress_index (dirs t) with
+        match Routine_store.ingress_index (dirs t) with
         | Error e ->
             say t
-              (Printf.sprintf "ingress: %s" (Charter_store.Error.message e));
+              (Printf.sprintf "ingress: %s" (Routine_store.Error.message e));
             Mentat_server.Ingress.Unknown
         | Ok (bindings, _failures) -> resolution bindings ~ingress_id);
     deliver =
@@ -305,8 +305,8 @@ let ingress t =
    after-reap re-entry then, and the durable receipt — not the pipeline's
    return, which a failed publication turns into [Error] after the money
    is already spent — is what the signal rides. *)
-let drive t (loaded : Charter_store.Loaded.t) event =
-  let name = loaded.Charter_store.Loaded.name in
+let drive t (loaded : Routine_store.Loaded.t) event =
+  let name = loaded.Routine_store.Loaded.name in
   let env = env t ~name in
   match repo t loaded with
   | Error reason ->
@@ -316,32 +316,32 @@ let drive t (loaded : Charter_store.Loaded.t) event =
         Event.Identity.to_string (Event.Identity.of_pull_request event)
       in
       let receipt =
-        receipt_now ~identity ~digest:loaded.Charter_store.Loaded.digest
+        receipt_now ~identity ~digest:loaded.Routine_store.Loaded.digest
           (Receipt.Kind.Disposition (Receipt.Disposition.Refused reason))
       in
-      (match Charter_store.append_receipt (dirs t) ~name receipt with
+      (match Routine_store.append_receipt (dirs t) ~name receipt with
       | Ok () -> ()
-      | Error e -> env.Charter_fire.say (Charter_store.Error.message e));
-      env.Charter_fire.say (Printf.sprintf "refused %s: %s" identity reason);
+      | Error e -> env.Routine_fire.say (Routine_store.Error.message e));
+      env.Routine_fire.say (Printf.sprintf "refused %s: %s" identity reason);
       false
   | Ok repo ->
       let reaped = ref false in
       (match
-         Charter_fire.dispose env ~repo
+         Routine_fire.dispose env ~repo
            ~on_reap:(fun () -> reaped := true)
            loaded ~event ~check_head:true
        with
-      | Ok Charter_fire.Disposed | Ok Charter_fire.Interrupted -> ()
-      | Error message -> env.Charter_fire.say message);
+      | Ok Routine_fire.Disposed | Ok Routine_fire.Interrupted -> ()
+      | Error message -> env.Routine_fire.say message);
       !reaped
 
 let pump t ~after_reap =
   let rec loop () =
     let loaded, event = Eio.Stream.take t.queue in
-    let name = loaded.Charter_store.Loaded.name in
+    let name = loaded.Routine_store.Loaded.name in
     (if Stop_signal.requested t.stop then
        say t
-         (Printf.sprintf "charter %s: stop requested; leaving %s to a later \
+         (Printf.sprintf "routine %s: stop requested; leaving %s to a later \
                           pass"
             name
             (Event.Identity.to_string (Event.Identity.of_pull_request event)))
@@ -353,7 +353,7 @@ let pump t ~after_reap =
        | Eio.Cancel.Cancelled _ as e -> raise e
        | e ->
            say t
-             (Printf.sprintf "charter %s: pump: %s" name
+             (Printf.sprintf "routine %s: pump: %s" name
                 (Printexc.to_string e)));
     loop ()
   in

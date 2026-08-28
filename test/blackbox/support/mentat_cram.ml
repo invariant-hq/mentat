@@ -255,7 +255,7 @@ let cmd_stat args =
 
 (* hmac-sha256. Sign a webhook delivery body the way GitHub does — the
    lowercase hex HMAC-SHA256 over the file's exact bytes — so a cram mints
-   X-Hub-Signature-256 headers against a charter's minted secret without an
+   X-Hub-Signature-256 headers against a routine's minted secret without an
    ambient openssl. The key is taken as an argument: crams read it with
    $(cat secrets/webhook), whose trailing-newline strip matches the
    listener's trim of the stored secret. *)

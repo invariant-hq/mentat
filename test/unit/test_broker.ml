@@ -709,7 +709,7 @@ let the_watch_reports_a_holder_death () =
   | Error `Timeout -> fail "the watch never fired")
 
 (* Boot rediscovery's leaf sweep claims a leaf for every stored session —
-   a live root activation (a charter run, a served root) binds its leaf in
+   a live root activation (a routine run, a served root) binds its leaf in
    the same tree as a delegated child, and the successor's boot must not
    sever it. A leaf no session answers to is residue and is removed. *)
 let rediscovery_keeps_a_live_roots_leaf () =

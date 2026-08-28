@@ -932,15 +932,15 @@ let marker_predicates () =
     (Publication.Marker.marks
        ("before " ^ Publication.Marker.finding ~origin:"ci" fp ^ " after"));
   is_true ~msg:"a summary marker marks"
-    (Publication.Marker.marks (Publication.Marker.summary ~origin:"charter:x"));
+    (Publication.Marker.marks (Publication.Marker.summary ~origin:"routine:x"));
   is_false ~msg:"plain prose does not mark"
     (Publication.Marker.marks "an ordinary comment, <!-- but not ours -->");
   equal string ~msg:"origin folding lowercases and dashes foreign bytes"
     "my-review--v2" (Publication.Marker.origin_of_name "My_Review!.v2");
   equal string ~msg:"a folded name composes into a valid origin"
-    "<!-- mentat-review origin=charter:pr-review -->"
+    "<!-- mentat-review origin=routine:pr-review -->"
     (Publication.Marker.summary
-       ~origin:("charter:" ^ Publication.Marker.origin_of_name "PR-Review"))
+       ~origin:("routine:" ^ Publication.Marker.origin_of_name "PR-Review"))
 
 let () =
   run "mentat.publication"

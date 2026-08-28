@@ -1,4 +1,0 @@
-(library
- (name mentat_charter)
- (modules charter receipt event gate fence record run_id)
- (libraries jsont jsont.bytesrw mentat_digest mentat_json))

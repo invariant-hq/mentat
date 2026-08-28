@@ -55,7 +55,7 @@ val with_base :
 
     [resolve_bin] resolves the activation binary this process's {!val-broker}
     spawns — a staging fact, passed by a caller that supervises sessions (the
-    charter fire). Absent, the broker can send but refuses to spawn. *)
+    routine fire). Absent, the broker can send but refuses to spawn. *)
 
 (** {1:daemon Daemon composition}
 

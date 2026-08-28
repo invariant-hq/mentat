@@ -8,7 +8,7 @@
     A trigger-born session's document records the run contract its creator
     granted. Two consumers share this lowering: the serving boot lowers the
     members onto its configuration overlay before the engine is built, and
-    the charter fire runs the same lowering against an empty configuration
+    the routine fire runs the same lowering against an empty configuration
     as a pre-flight, so a contract no activation could serve refuses before
     the identity is claimed or anything is spent. One home, because a
     fire-side copy would drift from the boot it predicts. *)

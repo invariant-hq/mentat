@@ -53,9 +53,9 @@ let review_behavior = function
            other)
 
 (* Trigger provenance, parsed strictly from <source>@<digest>:<key>: the
-   trigger source a token — the charter name as mentatd mints it — the digest
-   the 16 lowercase hex characters of the charter policy digest
-   ([Mentat_charter.Charter.policy_digest] renders exactly 16; the two
+   trigger source a token — the routine name as mentatd mints it — the digest
+   the 16 lowercase hex characters of the routine policy digest
+   ([Mentat_routine.Routine.policy_digest] renders exactly 16; the two
    lengths move together), the key non-empty. A key may itself contain '@' or
    ':', so the first '@' and the first ':' after it are the delimiters. The
    flag is minted by trigger hosts; a sloppy value means the host is
@@ -88,12 +88,12 @@ let triggered raw =
           then malformed ()
           else Ok { Mentat_protocol.Command.source; digest; key })
 
-let charter_name raw =
-  if String.length raw = 0 then usage "charter name must not be empty"
+let routine_name raw =
+  if String.length raw = 0 then usage "routine name must not be empty"
   else if not (String.for_all id_char raw) then
-    usage "charter name must contain only letters, digits, '.', '_', or '-'"
+    usage "routine name must contain only letters, digits, '.', '_', or '-'"
   else if Char.equal raw.[0] '.' then
-    usage "charter name must not open with a dot"
+    usage "routine name must not open with a dot"
   else Ok raw
 
 let config_key raw =

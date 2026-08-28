@@ -141,7 +141,7 @@ let renders =
             [
               "--ingress-port=8080";
               "--github-base-url=https://ghe.example.test/api/v3";
-              "--charter-git-base=https://ghe.example.test";
+              "--routine-git-base=https://ghe.example.test";
               "--web";
               "--web-port=8081";
             ]
@@ -152,7 +152,7 @@ let renders =
               "    <string>/usr/local/bin/mentatd</string>\n\
               \    <string>--ingress-port=8080</string>\n\
               \    <string>--github-base-url=https://ghe.example.test/api/v3</string>\n\
-              \    <string>--charter-git-base=https://ghe.example.test</string>\n\
+              \    <string>--routine-git-base=https://ghe.example.test</string>\n\
               \    <string>--web</string>\n\
               \    <string>--web-port=8081</string>"
             plist;
@@ -161,7 +161,7 @@ let renders =
             ~sub:
               "ExecStart=\"/usr/local/bin/mentatd\" \"--ingress-port=8080\" \
                \"--github-base-url=https://ghe.example.test/api/v3\" \
-               \"--charter-git-base=https://ghe.example.test\" \"--web\" \
+               \"--routine-git-base=https://ghe.example.test\" \"--web\" \
                \"--web-port=8081\"\n"
             unit);
       test "arguments walk the same refusals as paths" (fun () ->

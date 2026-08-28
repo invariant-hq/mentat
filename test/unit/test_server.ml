@@ -3121,7 +3121,7 @@ let hex_of_raw s =
   Buffer.contents buffer
 
 let ingress_secret = "It's a Secret to Everybody"
-let ingress_path = "/ingress/github/charter-1"
+let ingress_path = "/ingress/github/routine-1"
 
 let signature_of ~secret body =
   "sha256=" ^ hex_of_raw (hmac_sha256 ~key:secret body)
@@ -3267,9 +3267,9 @@ let ingress_group =
                  verifies against the post-body resolution, so a rotation
                  cannot race an in-flight delivery. *)
               equal (list string) ~msg:"the resolver saw the path token twice"
-                [ "charter-1"; "charter-1" ] !resolved;
+                [ "routine-1"; "routine-1" ] !resolved;
               let id, enabled, body = one_delivery ~msg:"accepted" deliveries in
-              equal string ~msg:"the callback saw the path token" "charter-1"
+              equal string ~msg:"the callback saw the path token" "routine-1"
                 id;
               is_true ~msg:"the resolver's enabled snapshot rode through"
                 enabled;
@@ -3361,10 +3361,10 @@ let ingress_group =
               equal int ~msg:"an unresolvable id is 404" 404 status;
               equal string ~msg:"the 404 is content-free" "" rbody;
               equal (list string) ~msg:"the resolver was asked"
-                [ "charter-1" ] !resolved;
+                [ "routine-1" ] !resolved;
               equal int ~msg:"custody was never offered" 0
                 (List.length !deliveries)));
-      test "a disabled charter verifies, then informs the callback" (fun () ->
+      test "a disabled routine verifies, then informs the callback" (fun () ->
           let ingress, _, deliveries =
             scripted_ingress ~enabled:false ~secret:ingress_secret ()
           in
@@ -3389,7 +3389,7 @@ let ingress_group =
               equal int ~msg:"verified custody still answers 202" 202 status;
               equal string ~msg:"content-free" "" rbody;
               let _, enabled, _ = one_delivery ~msg:"disabled" deliveries in
-              is_false ~msg:"the callback was told the charter is disabled"
+              is_false ~msg:"the callback was told the routine is disabled"
                 enabled));
       test "a body over the 1 MiB cap is a content-free 413" (fun () ->
           let cap = 1024 * 1024 in
@@ -3501,7 +3501,7 @@ let ingress_group =
               in
               equal int ~msg:"forged is 401" 401 status;
               equal (list string) ~msg:"the hook saw the refused id"
-                [ "charter-1" ] !rejections;
+                [ "routine-1" ] !rejections;
               (* An oversized body is a 413, never a rejection. *)
               let over = String.make ((1024 * 1024) + 1) 'x' in
               let status, _ =
@@ -3518,7 +3518,7 @@ let ingress_group =
               in
               equal int ~msg:"verified is 202" 202 status;
               equal (list string) ~msg:"the 413 and the 202 fired nothing"
-                [ "charter-1" ] !rejections);
+                [ "routine-1" ] !rejections);
           (* An unknown id is a 404, never a rejection. *)
           let ingress, _, _ =
             scripted_ingress ~known:false ~on_rejected ~secret:ingress_secret
@@ -3606,7 +3606,7 @@ let ingress_group =
               equal int ~msg:"custody was never offered" 0
                 (List.length !deliveries);
               equal (list string) ~msg:"the rejection observer fired"
-                [ "charter-1" ] !rejections;
+                [ "routine-1" ] !rejections;
               (* A delivery signed with the rotated key verifies end to
                  end against the fresh resolution. *)
               let status, _ =
@@ -3640,7 +3640,7 @@ let ingress_group =
               refuse ~msg:"an unknown provider segment"
                 (ingress_post ~net ~dir ~sw
                    ~headers:(signed_headers "{}")
-                   "/ingress/gitlab/charter-1" "{}");
+                   "/ingress/gitlab/routine-1" "{}");
               equal int ~msg:"custody was never offered" 0
                 (List.length !deliveries)));
       test "the family and the bearer surface grant each other nothing"

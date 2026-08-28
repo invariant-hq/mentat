@@ -47,25 +47,25 @@ val daemon_dir : t -> string
     data home so a [MENTAT_DATA_HOME] override isolates a daemon per store. The
     socket does not live here — it lives under [/tmp] to fit [sun_path]. *)
 
-val charters_dir : t -> string
-(** [charters_dir t] is [config_home / "charters"] — the root under which each
-    charter owns one directory. Homed under the config home because a charter
+val routines_dir : t -> string
+(** [routines_dir t] is [config_home / "routines"] — the root under which each
+    routine owns one directory. Homed under the config home because a routine
     is owner-written policy, never workspace or session state. *)
 
-val charter_dir : t -> string -> string
-(** [charter_dir t name] is [charters_dir / name] — the directory holding
-    [name]'s [charter.json], prompt and schema files, [ingress.id], and
+val routine_dir : t -> string -> string
+(** [routine_dir t name] is [routines_dir / name] — the directory holding
+    [name]'s [routine.json], prompt and schema files, [ingress.id], and
     [secrets/]. *)
 
-val charter_state_dir : t -> string -> string
-(** [charter_state_dir t name] is [state_home / "charters" / name] — the
-    charter's durable record: its receipt log and its per-event-identity
+val routine_state_dir : t -> string -> string
+(** [routine_state_dir t name] is [state_home / "routines" / name] — the
+    routine's durable record: its receipt log and its per-event-identity
     claim markers. Homed under the state home, apart from the config-home
-    policy, so removing a charter's configuration can leave its audit trail
+    policy, so removing a routine's configuration can leave its audit trail
     in place. *)
 
-val charter_runs_dir : t -> string -> string
-(** [charter_runs_dir t name] is [cache_home / "charters" / name / "runs"] —
+val routine_runs_dir : t -> string -> string
+(** [routine_runs_dir t name] is [cache_home / "routines" / name / "runs"] —
     the directory whose per-session subdirectories are [name]'s run roots:
     each holds one ephemeral checkout, the reviewed diff, the run prompt,
     and the run log, and is the run child's workspace root. The cache home

@@ -17,7 +17,7 @@ active on mentat's own repository); this page shows
 the underlying commands so you can wire your own CI, a cron job, or a local
 script the same way. To have mentat run the whole pipeline itself as a
 standing, unattended grant — checkout, run, and posting included — see
-[Charters](charters.md).
+[Routines](routines.md).
 
 ## Producing the findings
 

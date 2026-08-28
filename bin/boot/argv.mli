@@ -63,16 +63,16 @@ val triggered :
   string -> (Mentat_protocol.Command.triggered, Exit_status.t) result
 (** [triggered raw] parses the [run start] [--triggered] value as
     [<source>@<digest>:<key>]: a trigger source of letters, digits, ['.'],
-    ['_'], or ['-'] (the charter name, as mentatd mints it); the charter
+    ['_'], or ['-'] (the routine name, as mentatd mints it); the routine
     policy digest — exactly 16 lowercase hexadecimal characters, the length
-    {!Mentat_charter.Charter.policy_digest} renders (the two must move
+    {!Mentat_routine.Routine.policy_digest} renders (the two must move
     together); and a non-empty trigger key. The key may itself contain ['@']
     or [':'] — the first ['@'] and the first [':'] after it delimit the
     parts. Anything else is a {!Exit_status.Usage_error} naming the
     grammar. *)
 
-val charter_name : string -> (string, Exit_status.t) result
-(** [charter_name raw] validates [raw] as an installed charter's name:
+val routine_name : string -> (string, Exit_status.t) result
+(** [routine_name raw] validates [raw] as an installed routine's name:
     non-empty, only letters, digits, ['.'], ['_'], ['-'], and not opening
     with a dot — so a name is always a plain directory component, never a
     path. Returns [raw]. *)
