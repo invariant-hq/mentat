@@ -270,8 +270,8 @@ EOF
 # Under the cram harness that resolution is platform-dependent (Linux resolves
 # the install-tree symlink into the build tree, where mentatd is not a
 # sibling), so the daemon binary is named explicitly from PATH. The daemon's
-# child broker resolves mentat the same sibling way for its serve-session
-# spawns, so the mirror export covers the reverse direction.
+# child broker resolves mentat the same sibling way for its serve spawns,
+# so the mirror export covers the reverse direction.
 export MENTATD_BIN="$(command -v mentatd)"
 export MENTAT_BIN="$(command -v mentat)"
 

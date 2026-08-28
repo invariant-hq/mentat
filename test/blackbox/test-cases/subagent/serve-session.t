@@ -1,4 +1,4 @@
-The child-serve boot, blackbox through the binary: `mentat serve-session` is a
+The child-serve boot, blackbox through the binary: `mentat serve` is a
 process serving exactly one delegated session — its own. Booted by hand on a
 child document with no turns (the state the parent-side create leaves behind),
 it re-reads the task from the durable delegation edge, mints the same
@@ -9,7 +9,7 @@ daemon-brokered materialization of the same task, and its first-turn id is
 byte-identical: the cross-backend golden any child backend must pass
 unchanged (the golden bytes predate the brokered backend and pin the
 in-process materialization too). A second
-serve-session on the settled child is an idempotent no-op — it re-attaches,
+serve on the settled child is an idempotent no-op — it re-attaches,
 mints nothing, and exits 0 with the journal untouched.
 
 The sessions work in a workspace subdirectory so the fixture and capture files
@@ -86,7 +86,7 @@ to settlement, lingers idle, and exits 0 on its own.
   > {"expect":{"body_contains":["child works"]},"response":{"id":"rc2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"CHILD_DONE"}]}]}}
   > JSONL
   $ start_fake_openai stage2.jsonl capture2 port2
-  $ mentat serve-session --session "$CHILD" --cwd "$PWD/work" >serve1.out 2>serve1.err
+  $ mentat serve --session "$CHILD" --cwd "$PWD/work" >serve1.out 2>serve1.err
   $ wait_fake_server
   $ cat serve1.err
 
@@ -94,7 +94,7 @@ The endpoint was derived from the session id under the daemon's denied socket
 tree, stayed inside the unix-socket path budget, and was removed on the clean
 exit.
 
-  $ SOCK=$(sed -n 's/^mentat serve-session: serving .* at //p' serve1.out)
+  $ SOCK=$(sed -n 's/^mentat serve: serving .* at //p' serve1.out)
   $ echo "$SOCK" | grep -c '/s/'
   1
   $ [ "${#SOCK}" -lt 104 ] && echo within-sun-path-budget
@@ -124,7 +124,7 @@ re-attaches, mints nothing, and exits 0 after the linger. The provider base
 URL still names stage 2's now-dead server, so any wrongly re-issued request
 would fail the turn and break the transcript diff below.
 
-  $ mentat serve-session --session "$CHILD" --cwd "$PWD/work" >serve2.out 2>serve2.err
+  $ mentat serve --session "$CHILD" --cwd "$PWD/work" >serve2.out 2>serve2.err
   $ cat serve2.err
   $ mentat session export "$CHILD" --format text --cwd "$PWD/work" | censor >child3.transcript
   $ diff child1.transcript child3.transcript && echo idempotent-no-op

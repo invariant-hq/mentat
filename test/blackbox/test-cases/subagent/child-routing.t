@@ -3,7 +3,7 @@ derived endpoint answers gets its session cone proxied to the live driver in
 its own server, so a follow-up submitted against the child by id reaches the
 child server instead of the root-keyed frozen view (whose attach could only
 answer Busy against the fence that server holds). The fence's owner pid
-proves the route: the same serve-session process that ran the task turn runs
+proves the route: the same serve process that ran the task turn runs
 the follow-up. A child killed mid-follow surfaces as a clean error on the
 following client, never a hang, and the broker's respawn then completes the
 interrupted turn.
@@ -63,7 +63,7 @@ It reaches the live driver and streams the child's turn back to the caller.
   {"schema_version":1,"type":"turn.text.delta","session_id":"sub-CHILD","turn_id":"t-TURN","text":"WER"}
   {"schema_version":1,"type":"turn.finished","session_id":"sub-CHILD","outcome":"completed","text":"SECOND_ANSWER"}
 
-The same serve-session process that ran the task turn ran the follow-up: the
+The same serve process that ran the task turn ran the follow-up: the
 fence's owner pid is unchanged, so the turn was driven in the child's own
 server, not by an in-process attach in the daemon.
 

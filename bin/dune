@@ -18,7 +18,7 @@
   cli_auth
   cli_session
   cli_run
-  cli_serve_session
+  cli_serve
   cli_github
   cli_skills
   cli_commands
@@ -55,13 +55,13 @@
   mentat_context
   mentat_prompts
   mentat_agent
-  ; mentat_broker: the serving fence label cli_serve_session acquires under is
+  ; mentat_broker: the serving fence label cli_serve acquires under is
   ; the broker layer's shared vocabulary.
   mentat_broker
   mentat_client
   mentat_connector
   mentat_github
-  ; mentat_server: consumed by cli_serve_session's per-session child server —
+  ; mentat_server: consumed by cli_serve's per-session child server —
   ; the one serve boot in this binary; the daemon's serve boot lives in mentatd.
   mentat_server
   mentat_provider_runtime

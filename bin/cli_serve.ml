@@ -230,16 +230,15 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
                   in
                   bound_socket_dir := Some socket_dir;
                   if not spawned then
-                    Printf.printf "mentat serve-session: serving %s at %s\n%!"
+                    Printf.printf "mentat serve: serving %s at %s\n%!"
                       session
                       (Server.Bind.socket_path
                          ~dir:(Lpath.Abs.of_string_exn socket_dir));
                   (* Every shape attaches its driver at boot, and the fence
                      is taken lazily inside that attach — never pre-acquired.
                      A delegated child attaches through its deterministic
-                     first-turn submit, relocated from the runtime's
-                     in-process materialization: the turn id is derived from
-                     the durable edge and the task submitted byte-identically.
+                     first-turn submit: the turn id is derived from the
+                     durable edge and the task submitted byte-identically.
                      The driver's own prompt admission is the started guard: a
                      prompt whose turn already exists with equal input settles
                      [Ok] without a new fact, so a re-spawn of a running or
@@ -368,7 +367,7 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
 
 let serve ~session ~socket_dir_override ~spawned ~interrupted ~cwd =
   if String.length session = 0 then
-    Exit_status.usage "serve-session requires a non-empty --session id"
+    Exit_status.usage "serve requires a non-empty --session id"
   else (
     let bound_socket_dir = ref None in
     let status =
@@ -422,7 +421,7 @@ let man =
     `S "DESCRIPTION";
     `P
       "Internal: launched by the broker; not for direct use. $(b,mentat \
-       serve-session) serves exactly one session — its own — over the same \
+       serve) serves exactly one session — its own — over the same \
        wire the daemon speaks, on a per-session unix socket derived from the \
        session id. It takes no mode flags: the boot reads the durable \
        session document and derives its shape from the recorded lineage.";
@@ -449,7 +448,7 @@ let man =
 let cmd =
   let doc = "Serve one session over its per-session socket (internal)." in
   Cmd.v
-    (Cmd.info "serve-session" ~doc ~man ~exits:Cli_common.exits)
+    (Cmd.info "serve" ~doc ~man ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const (fun session socket_dir_override spawned interrupted cwd ->

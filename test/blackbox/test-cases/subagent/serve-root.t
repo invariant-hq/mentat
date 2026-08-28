@@ -1,4 +1,4 @@
-A root session served by hand: `mentat serve-session` booted on a session
+A root session served by hand: `mentat serve` booted on a session
 with no delegation lineage. The boot takes no mode flags — it derives its
 shape from the session document, and a document without a delegation
 backlink is a root, served plainly. Nothing is minted at boot; the attach
@@ -39,7 +39,7 @@ session lingers idle.
   > {"expect":{"body_contains":["root errand by mail"]},"response":{"id":"r1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ROOT_MAIL_DONE"}]}]}}
   > JSONL
   $ start_fake_openai mail.jsonl capture port
-  $ mentat serve-session --session root-mail --cwd "$PWD/work" >serve1.out 2>serve1.err
+  $ mentat serve --session root-mail --cwd "$PWD/work" >serve1.out 2>serve1.err
   $ wait_fake_server
   $ cat serve1.err
 
@@ -68,7 +68,7 @@ transcript normalizes it beyond what censor's digest markers cover.
 The endpoint was announced, derived from the session id under the denied
 socket tree, and removed on the clean exit.
 
-  $ SOCK=$(sed -n 's/^mentat serve-session: serving .* at //p' serve1.out)
+  $ SOCK=$(sed -n 's/^mentat serve: serving .* at //p' serve1.out)
   $ echo "$SOCK" | grep -c '/s/'
   1
   $ test ! -e "$SOCK" && echo socket-removed
@@ -82,7 +82,7 @@ delegated child — no new fact, no provider request (the base URL still
 names the now-dead fixture server, so any wrongly issued request would
 fault the journal and break the diff).
 
-  $ mentat serve-session --session root-mail --cwd "$PWD/work" >serve2.out 2>serve2.err
+  $ mentat serve --session root-mail --cwd "$PWD/work" >serve2.out 2>serve2.err
   $ cat serve2.err
   $ mentat session export root-mail --format text --cwd "$PWD/work" | censor | normalize_entry >root2.transcript
   $ diff root1.transcript root2.transcript && echo idempotent-no-op
@@ -92,7 +92,7 @@ The interrupt carry belongs to the delegated shape — it is the broker's
 re-materialization of a cancelled child, and a root session has no parent
 whose interrupt it could carry. On a root it is refused loudly.
 
-  $ mentat serve-session --session root-mail --interrupted --cwd "$PWD/work"
+  $ mentat serve --session root-mail --interrupted --cwd "$PWD/work"
   mentat: session root-mail has no delegation lineage; --interrupted applies only to a delegated child
   [1]
 
@@ -107,6 +107,6 @@ a creating host would have recorded it.
   $ V=$(mentat_cram json .version "$BAD")
   $ M=$(mentat_cram json .metadata "$BAD" | sed 's/}$/,"run_policy":{"sandbox":"bogus-spelling"}}/')
   $ printf '{"version":%s,"id":"bad-policy","metadata":%s,"events":[]}' "$V" "$M" > "$BAD"
-  $ mentat serve-session --session bad-policy --cwd "$PWD/work"
+  $ mentat serve --session bad-policy --cwd "$PWD/work"
   mentat: session bad-policy: recorded run policy: sandbox: unknown sandbox mode: bogus-spelling
   [1]

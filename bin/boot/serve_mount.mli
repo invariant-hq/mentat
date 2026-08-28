@@ -13,7 +13,7 @@
     in-process driver binds the driven session's derived socket and serves
     the confined cone while it drives, so another process's send reaches the
     session over the wire instead of spending its budget against the held
-    fence. The per-session child server ([mentat serve-session]) consumes the
+    fence. The per-session child server ([mentat serve]) consumes the
     shared pieces directly and owns its own boot, idle watchdog, and exit. *)
 
 (** One cached, stamp-elided store of durable-head summaries, shared by every

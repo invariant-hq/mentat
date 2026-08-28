@@ -24,7 +24,7 @@ let spawn ~resolve_bin ~log_dir ~leaf ~environment ~session ~interrupted ~cwd =
       let argv =
         [
           "mentat";
-          "serve-session";
+          "serve";
           "--session";
           session;
           "--cwd";

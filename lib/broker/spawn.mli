@@ -4,7 +4,7 @@
  ---------------------------------------------------------------------------*)
 
 (** The brokered child materializer's spawn half: launch one detached
-    [mentat serve-session] process for a recorded delegation.
+    [mentat serve] process for a recorded delegation.
 
     Identity only crosses the spawn — the session id and workspace root on
     argv, the instance's environment snapshot as the child environment; the
@@ -24,7 +24,7 @@ val spawn :
   cwd:Lpath.Abs.t ->
   (int, string) result
 (** [spawn ~resolve_bin ~log_dir ~leaf ~environment ~session ~interrupted
-    ~cwd] launches [mentat serve-session] for the delegated child [session]
+    ~cwd] launches [mentat serve] for the delegated child [session]
     recorded under the workspace root [cwd], with [environment] as its whole
     environment, and returns the child pid. [resolve_bin] is the caller's
     executable resolution, consulted here so a spawn that could never
@@ -36,6 +36,6 @@ val spawn :
     submits an interrupt right after its idempotent first-turn submit, so a
     cancelled child killed at the escalation's final rung ends in its own
     terminal interrupted fact instead of resuming the cancelled work.
-    Spawning carries no idempotence of its own; the serve-session boot
+    Spawning carries no idempotence of its own; the serve boot
     supplies it (a child that already ran is re-attached and mints nothing),
     so a redundant spawn converges to a clean exit. *)

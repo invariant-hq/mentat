@@ -47,33 +47,53 @@ let envs =
          state home so logging does not corrupt the screen.";
   ]
 
-let root =
+let advertised =
+  [
+    Cli_config.cmd;
+    Cli_permission.cmd;
+    Cli_models.cmd;
+    Cli_auth.cmd;
+    Cli_trust.trust_cmd;
+    Cli_trust.untrust_cmd;
+    Cli_session.cmd;
+    Cli_run.cmd;
+    Cli_github.cmd;
+    Cli_tui.resume_cmd ~version;
+    Cli_tui.review_cmd ~version;
+    Cli_sandbox.cmd;
+    Cli_doctor.cmd;
+    Cli_skills.cmd;
+    Cli_commands.cmd;
+    Cli_debug.cmd;
+    Cli_report.cmd ~version;
+    Cli_completion.cmd;
+  ]
+
+(* cmdliner lists every registered subcommand in the parent's help and in
+   completion, with no way to register one unlisted — so the internal [serve]
+   verb (the broker-launched per-session server) lives outside the advertised
+   group, and evaluation widens to include it only when the first subcommand
+   token names it. It stays runnable, keeps its own man page (marked
+   internal), and is legible in ps; it is absent from every advertised
+   surface. Tokens before the verb can only be options ([-v] and friends), so
+   the scan skips option-shaped tokens and stops at [--]. *)
+let internal_verbs = [ "serve" ]
+
+let names_internal_verb argv =
+  let rec scan = function
+    | [] | "--" :: _ -> false
+    | token :: rest ->
+        if String.length token > 0 && Char.equal token.[0] '-' then scan rest
+        else List.mem token internal_verbs
+  in
+  match Array.to_list argv with [] -> false | _exe :: rest -> scan rest
+
+let root cmds =
   let info =
     Cmd.info "mentat" ~version ~doc:"The OCaml coding agent." ~man ~envs
       ~exits:Cli_common.exits
   in
-  Cmd.group ~default:default_term info
-    [
-      Cli_config.cmd;
-      Cli_permission.cmd;
-      Cli_models.cmd;
-      Cli_auth.cmd;
-      Cli_trust.trust_cmd;
-      Cli_trust.untrust_cmd;
-      Cli_session.cmd;
-      Cli_run.cmd;
-      Cli_serve_session.cmd;
-      Cli_github.cmd;
-      Cli_tui.resume_cmd ~version;
-      Cli_tui.review_cmd ~version;
-      Cli_sandbox.cmd;
-      Cli_doctor.cmd;
-      Cli_skills.cmd;
-      Cli_commands.cmd;
-      Cli_debug.cmd;
-      Cli_report.cmd ~version;
-      Cli_completion.cmd;
-    ]
+  Cmd.group ~default:default_term info cmds
 
 (* cmdliner resolves the first token after [run] as a subcommand and does not
    fall back to the group's default term for a bare positional, so a bare
@@ -99,4 +119,9 @@ let rewrite_run_prompt argv =
       Array.of_list (exe :: "run" :: "start" :: token :: rest)
   | _ -> argv
 
-let () = Entry.run ~version ~rewrite_argv:rewrite_run_prompt root
+let () =
+  let cmds =
+    if names_internal_verb Sys.argv then advertised @ [ Cli_serve.cmd ]
+    else advertised
+  in
+  Entry.run ~version ~rewrite_argv:rewrite_run_prompt (root cmds)

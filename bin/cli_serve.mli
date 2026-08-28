@@ -3,7 +3,7 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(** The [serve-session] activation: one process serving exactly one session —
+(** The [serve] activation: one process serving exactly one session —
     its own — over the daemon's wire, on a per-session unix socket derived
     from the session id. Internal: launched by the broker; not for direct
     use. The boot takes no mode flags — it derives its shape from the
