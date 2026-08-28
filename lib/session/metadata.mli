@@ -111,6 +111,141 @@ module Delegated_from : sig
   (** [jsont] maps delegation lineage to JSON values. *)
 end
 
+module Triggered_from : sig
+  (** Durable trigger provenance.
+
+      A session created by a trigger host on a standing grant records the
+      trigger's identity here: [source] names the trigger as the scheduling
+      host defines it, [digest] seals the policy content it fired under, and
+      [key] names the event it fired on — the same three members an
+      {!Origin.Trigger} queue entry carries, which is what lets mail
+      admission ({!Mentat_session.admits_mail}) prove "this session's own
+      trigger" from the session's recorded facts alone. Provenance is
+      attribution, never authority. *)
+
+  type t = private { source : string; digest : string; key : string }
+
+  val make : source:string -> digest:string -> key:string -> t
+  (** [make ~source ~digest ~key] is trigger provenance with every member
+      checked non-empty.
+
+      Raises [Invalid_argument] if any member is empty. *)
+
+  val source : t -> string
+  (** [source t] is the trigger's name. *)
+
+  val digest : t -> string
+  (** [digest t] is the policy digest the trigger fired under. *)
+
+  val key : t -> string
+  (** [key t] is the event the trigger fired on. *)
+
+  val equal : t -> t -> bool
+  (** [equal a b] is [true] iff [a] and [b] are the same provenance. *)
+
+  val pp : Format.formatter -> t -> unit
+  (** [pp] formats provenance for diagnostics. *)
+
+  val jsont : t Jsont.t
+  (** [jsont] maps provenance to JSON values. Decoding validates the same
+      non-empty invariants as {!make}. *)
+end
+
+module Run_policy : sig
+  (** The recorded run contract a session was created under.
+
+      A session created for a standing, unattended run records the run knobs
+      its creator granted, so every process that later serves it — the first
+      activation and any successor — applies the same contract without
+      re-consulting the grant that has since moved on. Two consumers split
+      the members: queue admission reads [mode] and [output_schema] to seal
+      each admitted turn (never the plain Build defaults), and the serving
+      boot lowers the rest onto its configuration overlay before the engine
+      is built. The lowered members hold the run surface's own textual
+      spellings — [sandbox] a sandbox-mode token, [model] a provider/model
+      selector, [reasoning] a reasoning effort, [unattended] an unattended
+      permission policy — validated by the configuration layer that applies
+      them, so an unknown spelling refuses the boot loudly rather than
+      running under defaults the grant never named. *)
+
+  type t = private {
+    mode : Contract.Mode.t option;
+        (** The product mode admitted turns seal; absent means Build. *)
+    output_schema : Jsont.json option;
+        (** The structured-output schema admitted turns run under. *)
+    max_steps : int option;  (** The per-turn step bound; positive. *)
+    sandbox : string option;  (** The sandbox-mode spelling to apply. *)
+    require_sandbox : bool;
+        (** Whether the run must refuse to start without an enforceable or
+            external sandbox. *)
+    model : string option;  (** A provider/model selector override. *)
+    reasoning : string option;  (** A reasoning-effort spelling. *)
+    unattended : string option;
+        (** An unattended permission-policy spelling. *)
+    project_instructions : bool option;
+        (** Force project instruction files on or off; absent uses the
+            default. *)
+  }
+
+  val make :
+    ?mode:Contract.Mode.t ->
+    ?output_schema:Jsont.json ->
+    ?max_steps:int ->
+    ?sandbox:string ->
+    ?require_sandbox:bool ->
+    ?model:string ->
+    ?reasoning:string ->
+    ?unattended:string ->
+    ?project_instructions:bool ->
+    unit ->
+    t
+  (** [make ()] is a recorded run policy; every member is optional and
+      [require_sandbox] defaults to [false].
+
+      Raises [Invalid_argument] if [max_steps] is not positive or a textual
+      member is empty. *)
+
+  val mode : t -> Contract.Mode.t option
+  (** [mode t] is the recorded product mode. *)
+
+  val output_schema : t -> Jsont.json option
+  (** [output_schema t] is the recorded structured-output schema. *)
+
+  val max_steps : t -> int option
+  (** [max_steps t] is the recorded per-turn step bound. *)
+
+  val sandbox : t -> string option
+  (** [sandbox t] is the recorded sandbox-mode spelling. *)
+
+  val require_sandbox : t -> bool
+  (** [require_sandbox t] is whether the run requires an enforceable or
+      external sandbox. *)
+
+  val model : t -> string option
+  (** [model t] is the recorded model selector. *)
+
+  val reasoning : t -> string option
+  (** [reasoning t] is the recorded reasoning-effort spelling. *)
+
+  val unattended : t -> string option
+  (** [unattended t] is the recorded unattended permission-policy spelling. *)
+
+  val project_instructions : t -> bool option
+  (** [project_instructions t] is the recorded project-instructions toggle. *)
+
+  val equal : t -> t -> bool
+  (** [equal a b] is [true] iff [a] and [b] record the same policy. Schemas
+      compare over their JSON values, so a decoded policy equals an
+      otherwise-identical constructed one. *)
+
+  val pp : Format.formatter -> t -> unit
+  (** [pp] formats a policy for diagnostics. The schema is elided. *)
+
+  val jsont : t Jsont.t
+  (** [jsont] maps policies to JSON values. Decoding validates the same
+      invariants as {!make}. *)
+end
+
 type t = private {
   title : string option;  (** Optional non-empty user-facing title. *)
   status : Status.t;  (** Saved lifecycle status. *)
@@ -118,6 +253,10 @@ type t = private {
       (** Fork lineage, if this document was created from another session. *)
   delegated_from : Delegated_from.t option;
       (** Delegation lineage, if this document is a subagent session. *)
+  triggered_from : Triggered_from.t option;
+      (** Trigger provenance, if a trigger host created this session. *)
+  run_policy : Run_policy.t option;
+      (** The recorded run contract, if the session was created under one. *)
   root : Mentat_workspace.Root.t;
       (** The workspace the session was created under. {!Mentat_workspace.Root}
           is the one owner of a session's workspace identity; the absolute
@@ -134,30 +273,33 @@ type t = private {
 }
 (** The type for durable session metadata.
 
-    [updated_at] is always greater than or equal to [created_at]. Fork and
-    delegation lineage are mutually exclusive: a session has at most one
-    creation origin. *)
+    [updated_at] is always greater than or equal to [created_at]. Fork,
+    delegation, and trigger lineage are mutually exclusive: a session has at
+    most one creation origin. *)
 
 val make :
   ?title:string ->
   ?status:Status.t ->
   ?forked_from:Forked_from.t ->
   ?delegated_from:Delegated_from.t ->
+  ?triggered_from:Triggered_from.t ->
+  ?run_policy:Run_policy.t ->
   cwd:Lpath.Abs.t ->
   created_at:Time.t ->
   updated_at:Time.t ->
   unit ->
   t
-(** [make ?title ?status ?forked_from ?delegated_from ~cwd ~created_at
-     ~updated_at ()] is metadata whose workspace identity is
-    {!Mentat_workspace.Root.of_dir} [cwd] — the v1 injective minting of a
-    directory into a durable root.
+(** [make ?title ?status ?forked_from ?delegated_from ?triggered_from
+     ?run_policy ~cwd ~created_at ~updated_at ()] is metadata whose workspace
+    identity is {!Mentat_workspace.Root.of_dir} [cwd] — the v1 injective
+    minting of a directory into a durable root.
 
     [status] defaults to {!Status.Active}. [title], when present, must be a
     non-empty display title; no trimming or normalization is performed.
 
     Raises [Invalid_argument] if [title] is empty, [updated_at] is before
-    [created_at], or both [forked_from] and [delegated_from] are supplied. *)
+    [created_at], or more than one of [forked_from], [delegated_from], and
+    [triggered_from] is supplied. *)
 
 val title : t -> string option
 (** [title t] is [t]'s optional user-facing title. *)
@@ -173,6 +315,14 @@ val delegated_from : t -> Delegated_from.t option
 (** [delegated_from t] is [t]'s delegation lineage, if it is a subagent session.
     Lineage is fixed at construction ([make ?delegated_from]) and never updated.
 *)
+
+val triggered_from : t -> Triggered_from.t option
+(** [triggered_from t] is [t]'s trigger provenance, if a trigger host created
+    it. Fixed at construction and never updated. *)
+
+val run_policy : t -> Run_policy.t option
+(** [run_policy t] is [t]'s recorded run contract, if it was created under
+    one. Fixed at construction and never updated. *)
 
 val root : t -> Mentat_workspace.Root.t
 (** [root t] is the workspace [t] was created under — the owner of [t]'s

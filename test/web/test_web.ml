@@ -161,6 +161,7 @@ let turn_family_tests =
                            source = "nightly-review";
                            digest = "0123456789abcdef";
                            key = "2026-08-25T06:00";
+                           entry = None;
                          })
                     ~input:Session.Turn.Input.continue ()))
           in

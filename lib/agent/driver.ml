@@ -547,6 +547,38 @@ and start_build_turn t cfg ~input ~origin =
     ~max_steps:None ~id:(mint_turn_id t) ~input ~origin ~output_schema:None
     ~ack:ignore
 
+(* Queued admission on a session with a recorded run policy seals the turn
+   under it — the recorded mode and output schema, never the plain Build
+   defaults — and a trigger-origin entry mints the turn as [Triggered],
+   recording the consumed entry, so trigger provenance delivered as mail
+   reaches the turn exactly as a prompt-carried provenance would. *)
+and start_queued_turn t cfg entry =
+  let policy =
+    Mentat_session.Metadata.run_policy (Mentat_session.metadata t.session)
+  in
+  let mode =
+    match Option.bind policy Mentat_session.Metadata.Run_policy.mode with
+    | Some mode -> mode
+    | None -> Mentat_session.Contract.Mode.Build
+  in
+  let output_schema =
+    Option.bind policy Mentat_session.Metadata.Run_policy.output_schema
+  in
+  let entry_id = Mentat_session.Queue.Entry.id entry in
+  let origin =
+    match Mentat_session.Queue.Entry.origin entry with
+    | Some (Mentat_session.Origin.Trigger { source; digest; key }) ->
+        Mentat_session.Turn.Origin.triggered ~entry:entry_id ~source ~digest
+          ~key ()
+    | Some (Mentat_session.Origin.Agent _) | None ->
+        Mentat_session.Turn.Origin.Queued entry_id
+  in
+  start_turn t cfg ~mode ~options:None ~max_steps:None ~id:(mint_turn_id t)
+    ~input:
+      (Mentat_session.Turn.Input.user
+         (Mentat_agent_step.queued_input t.session entry))
+    ~origin ~output_schema ~ack:ignore
+
 and admission t =
   if t.stopping then begin
     t.execution <- None;
@@ -570,13 +602,7 @@ and admission t =
                    the sender named from this session's own recorded facts,
                    the body fenced as sender material; an owner entry is its
                    content verbatim. *)
-                start_build_turn t cfg
-                  ~input:
-                    (Mentat_session.Turn.Input.user
-                       (Mentat_agent_step.queued_input t.session entry))
-                  ~origin:
-                    (Mentat_session.Turn.Origin.Queued
-                       (Mentat_session.Queue.Entry.id entry))
+                start_queued_turn t cfg entry
             | Mentat_agent_step.Admission.Step_limit_wind_down input ->
                 start_build_turn t cfg ~input
                   ~origin:Mentat_session.Turn.Origin.Step_limit_wind_down
@@ -1313,7 +1339,7 @@ and prompt t ~turn ~input ~options ~mode ~max_steps ~triggered ~output_schema
                       | None -> Mentat_session.Turn.Origin.User
                       | Some { Mentat_protocol.Command.source; digest; key } ->
                           Mentat_session.Turn.Origin.triggered ~source ~digest
-                            ~key
+                            ~key ()
                     in
                     start_turn t cfg
                       ~mode:

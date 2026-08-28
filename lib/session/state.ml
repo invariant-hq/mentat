@@ -661,6 +661,22 @@ let apply_turn_started turn t =
           | Turn.Input.User _ -> Some (Transcript.length t.full)
           | Turn.Input.Continue | Turn.Input.Plan_build _ -> None
         in
+        let consume_entry t entry =
+          if
+            List.exists
+              (fun e -> Queue.Id.equal (Queue.Entry.id e) entry)
+              t.queue
+          then
+            Ok
+              {
+                t with
+                queue =
+                  List.filter
+                    (fun e -> not (Queue.Id.equal (Queue.Entry.id e) entry))
+                    t.queue;
+              }
+          else turn_error (Error.Turn.Unknown_queue_entry entry)
+        in
         let handle_origin t =
           match (Turn.origin turn, Turn.input turn) with
           | Turn.Origin.Plan_build, Turn.Input.Plan_build approval -> (
@@ -679,21 +695,11 @@ let apply_turn_started turn t =
               turn_error (Error.Turn.Unexpected_compaction_input id)
           | Turn.Origin.Queued entry, (Turn.Input.User _ | Turn.Input.Continue)
             ->
-              if
-                List.exists
-                  (fun e -> Queue.Id.equal (Queue.Entry.id e) entry)
-                  t.queue
-              then
-                Ok
-                  {
-                    t with
-                    queue =
-                      List.filter
-                        (fun e -> not (Queue.Id.equal (Queue.Entry.id e) entry))
-                        t.queue;
-                  }
-              else turn_error (Error.Turn.Unknown_queue_entry entry)
-          | ( ( Turn.Origin.User | Turn.Origin.Triggered _
+              consume_entry t entry
+          | ( Turn.Origin.Triggered { entry = Some entry; _ },
+              (Turn.Input.User _ | Turn.Input.Continue) ) ->
+              consume_entry t entry
+          | ( ( Turn.Origin.User | Turn.Origin.Triggered { entry = None; _ }
               | Turn.Origin.Step_limit_wind_down ),
               (Turn.Input.User _ | Turn.Input.Continue) ) ->
               Ok t

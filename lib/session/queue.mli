@@ -10,8 +10,9 @@
     an input delivered on another agent's behalf is the same kind of entry,
     carrying its sender as an {!Origin} member. The queue's mutations are
     durable facts ({!Update.t}); {e admission} is not a fact but a derived
-    read: a {!Turn.t} whose origin is {!Turn.Origin.Queued} consumes the named
-    entry. An interrupted turn preserves the pending queue for immediate
+    read: a {!Turn.t} whose origin is {!Turn.Origin.Queued} — or
+    {!Turn.Origin.Triggered} carrying an entry — consumes the named entry. An
+    interrupted turn preserves the pending queue for immediate
     correction admission; a failed turn empties it because failure does not
     establish a safe handoff boundary.
 

@@ -561,7 +561,7 @@ let journey () =
     turn ~id:"turn-2"
       ~origin:
         (Session.Turn.Origin.triggered ~source:"nightly" ~digest:"d0"
-           ~key:"k0")
+           ~key:"k0" ())
       ~input:Session.Turn.Input.continue
       ~contract:(make_contract ~declarations ())
       ()
@@ -2700,6 +2700,22 @@ let variant_shapes =
                      source = "nightly-review";
                      digest = "0f9a4c1d2e3b4a5f";
                      key = "delivery-42";
+                     entry = None;
+                   })
+              ())) );
+    (* Trigger mail admitted as a turn: the origin records the consumed
+       queue entry. *)
+    ( "fact.turn.started.triggered.entry",
+      canonical Protocol.Fact.jsont
+        (Protocol.Fact.Turn_started
+           (turn ~id:"turn-c"
+              ~origin:
+                (Session.Turn.Origin.Triggered
+                   {
+                     source = "nightly-review";
+                     digest = "0f9a4c1d2e3b4a5f";
+                     key = "delivery-42";
+                     entry = Some (Session.Queue.Id.of_string "q-trigger-1");
                    })
               ())) );
     (* Turn outcomes: completed rides the base fact.turn.finished. *)

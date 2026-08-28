@@ -59,15 +59,25 @@ module Origin : sig
     | User  (** A user prompt started the turn. *)
     | Queued of Queue.Id.t
         (** The turn admits queued entry [id]; admission consumes it. *)
-    | Triggered of { source : string; digest : string; key : string }
+    | Triggered of {
+        source : string;
+        digest : string;
+        key : string;
+        entry : Queue.Id.t option;
+      }
         (** A trigger host admitted the turn on behalf of trigger [source] —
             the trigger's identity as the scheduling host defines it. [digest]
             seals the policy content the trigger fired under; [key] names the
-            event it fired on. Provenance is attribution, never authority: the
-            origin records who admitted the prompt and grants nothing — the turn
-            executes under its sealed contract exactly as a {!User} turn does,
-            and a forged provenance misleads only its own journal. All members
-            are non-empty. *)
+            event it fired on. [entry], when present, is the queue entry the
+            admission consumed: trigger mail delivered as a queue entry starts
+            its turn through queue admission, and the turn consumes the named
+            entry exactly as a {!Queued} turn does; an absent [entry] is a
+            trigger prompt admitted directly, consuming nothing. Provenance is
+            attribution, never authority: the origin records who admitted the
+            prompt and grants nothing — the turn executes under its sealed
+            contract exactly as a {!User} turn does, and a forged provenance
+            misleads only its own journal. [source], [digest], and [key] are
+            non-empty. *)
     | Plan_build  (** The Build turn a plan approval admits. *)
     | Compaction
         (** A user-requested manual compaction. The turn accepts only
@@ -83,13 +93,17 @@ module Origin : sig
             and state where the work stands. A turn carrying this origin never
             admits another wind-down, so the mechanism cannot repeat. *)
 
-  val triggered : source:string -> digest:string -> key:string -> t
-  (** [triggered ~source ~digest ~key] is {!Triggered} with every member
-      checked non-empty — the one construction that validates, and the path
-      the codec decodes through, so a producer that minted through it can
-      never write a [Triggered] origin its own replay rejects.
+  val triggered :
+    ?entry:Queue.Id.t -> source:string -> digest:string -> key:string ->
+    unit -> t
+  (** [triggered ?entry ~source ~digest ~key ()] is {!Triggered} with every
+      string member checked non-empty — the one construction that validates,
+      and the path the codec decodes through, so a producer that minted
+      through it can never write a [Triggered] origin its own replay rejects.
+      [entry] names the queue entry the admission consumes; absent, the turn
+      consumes nothing.
 
-      Raises [Invalid_argument] if any member is empty. *)
+      Raises [Invalid_argument] if any string member is empty. *)
 
   val equal : t -> t -> bool
   (** [equal a b] is [true] iff [a] and [b] are the same origin. *)

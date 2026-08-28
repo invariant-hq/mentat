@@ -369,44 +369,50 @@ let settled_message session event =
 let queued_input session entry =
   match Mentat_session.Queue.Entry.origin entry with
   | None -> Mentat_session.Queue.Entry.input entry
-  | Some origin ->
+  | Some (Mentat_session.Origin.Trigger { source; _ }) ->
+      (* A trigger entry is admitted only when it is the session's own
+         recorded trigger, so its body is the owner's standing instruction —
+         named, never disowned; the instruction fences its own material. *)
+      Mentat_llm.Content.text
+        (Printf.sprintf
+           "This turn was triggered by %s. The message that follows is the \
+            standing instruction this session was created to run."
+           source)
+      :: Mentat_session.Queue.Entry.input entry
+  | Some (Mentat_session.Origin.Agent sender) ->
       let sender =
-        match origin with
-        | Mentat_session.Origin.Trigger { source; _ } ->
-            Printf.sprintf "trigger %s" source
-        | Mentat_session.Origin.Agent sender -> (
-            let is_parent =
-              match
-                Mentat_session.Metadata.delegated_from
-                  (Mentat_session.metadata session)
-              with
-              | None -> false
-              | Some lineage ->
-                  Mentat_session.Id.equal
-                    (Mentat_session.Metadata.Delegated_from.parent lineage)
-                    sender
-            in
-            if is_parent then
-              Printf.sprintf "your parent (session %s)"
+        let is_parent =
+          match
+            Mentat_session.Metadata.delegated_from
+              (Mentat_session.metadata session)
+          with
+          | None -> false
+          | Some lineage ->
+              Mentat_session.Id.equal
+                (Mentat_session.Metadata.Delegated_from.parent lineage)
+                sender
+        in
+        if is_parent then
+          Printf.sprintf "your parent (session %s)"
+            (Mentat_session.Id.to_string sender)
+        else
+          match
+            List.find_opt
+              (fun edge ->
+                Mentat_session.Id.equal
+                  (Mentat_session.Delegation.child edge)
+                  sender)
+              (Mentat_session.State.delegations
+                 (Mentat_session.state session))
+          with
+          | Some edge ->
+              Printf.sprintf "your child %s (session %s)"
+                (Mentat_session.Delegation.Id.to_string
+                   (Mentat_session.Delegation.id edge))
                 (Mentat_session.Id.to_string sender)
-            else
-              match
-                List.find_opt
-                  (fun edge ->
-                    Mentat_session.Id.equal
-                      (Mentat_session.Delegation.child edge)
-                      sender)
-                  (Mentat_session.State.delegations
-                     (Mentat_session.state session))
-              with
-              | Some edge ->
-                  Printf.sprintf "your child %s (session %s)"
-                    (Mentat_session.Delegation.Id.to_string
-                       (Mentat_session.Delegation.id edge))
-                    (Mentat_session.Id.to_string sender)
-              | None ->
-                  Printf.sprintf "session %s"
-                    (Mentat_session.Id.to_string sender))
+          | None ->
+              Printf.sprintf "session %s"
+                (Mentat_session.Id.to_string sender)
       in
       Mentat_llm.Content.text
         (Printf.sprintf

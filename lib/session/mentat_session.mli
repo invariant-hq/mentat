@@ -159,15 +159,23 @@ val create :
   id:Id.t ->
   ?title:string ->
   ?delegated_from:Metadata.Delegated_from.t ->
+  ?triggered_from:Metadata.Triggered_from.t ->
+  ?run_policy:Metadata.Run_policy.t ->
   cwd:Lpath.Abs.t ->
   created_at:Time.t ->
   unit ->
   t
-(** [create ~id ?title ?delegated_from ~cwd ~created_at ()] is a new active
-    session with no semantic events. [delegated_from] records the parent edge an
-    independently attached subagent must verify before execution.
+(** [create ~id ?title ?delegated_from ?triggered_from ?run_policy ~cwd
+     ~created_at ()] is a new active session with no semantic events.
+    [delegated_from] records the parent edge an independently attached
+    subagent must verify before execution. [triggered_from] records the
+    trigger a scheduling host created the session for, and [run_policy] the
+    run contract it was created under; the two are how a trigger-born
+    session's mail admission and serving boot re-derive their shape from the
+    document alone.
 
-    Raises [Invalid_argument] if [title] is empty. *)
+    Raises [Invalid_argument] if [title] is empty or both [delegated_from]
+    and [triggered_from] are supplied. *)
 
 val make :
   id:Id.t -> metadata:Metadata.t -> events:Event.t list -> (t, Error.t) result
@@ -206,12 +214,14 @@ val admits_mail :
     admits the entry or a sender appends it to [t]'s dormant journal under
     the run fence, so the admissions cannot drift. The owner (an absent
     origin, {!Origin}) is always [`Admitted]. [t]'s recorded delegation
-    parent and [t]'s own recorded delegation children are [`Admitted] while
-    fewer than {!mail_backlog_cap} of the sender's entries are still
-    unconsumed, [`Refused_backlog] at the cap. Any other sender — a
-    {!Origin.Trigger} origin included — is [`Refused_sender]. Admission gates
-    delivery only — an admitted origin remains attribution, never
-    authority. *)
+    parent, [t]'s own recorded delegation children, and — for a
+    trigger-born session — [t]'s own trigger (an {!Origin.Trigger} whose
+    source and digest match [t]'s recorded {!Metadata.Triggered_from}) are
+    [`Admitted] while fewer than {!mail_backlog_cap} of the sender's entries
+    are still unconsumed, [`Refused_backlog] at the cap (a trigger's backlog
+    counts its entries across event keys). Any other sender is
+    [`Refused_sender]. Admission gates delivery only — an admitted origin
+    remains attribution, never authority. *)
 
 val media_refs : t -> Mentat_digest.Content_ref.t list
 (** [media_refs t] is the content references of every model-visible media block

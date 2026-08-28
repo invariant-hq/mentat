@@ -158,12 +158,13 @@ let make ~id ~metadata ~events =
           | Error _ as error -> error
           | Ok () -> Ok { id; metadata; events_rev = List.rev events; state }))
 
-let create ~id ?title ?delegated_from ~cwd ~created_at () =
+let create ~id ?title ?delegated_from ?triggered_from ?run_policy ~cwd
+    ~created_at () =
   {
     id;
     metadata =
-      Metadata.make ?title ?delegated_from ~cwd ~created_at
-        ~updated_at:created_at ();
+      Metadata.make ?title ?delegated_from ?triggered_from ?run_policy ~cwd
+        ~created_at ~updated_at:created_at ();
     events_rev = [];
     state = State.empty;
   }
@@ -182,9 +183,38 @@ let state t = t.state
 let mail_backlog_cap = 8
 
 let admits_mail ~origin t =
+  let backlog_admits counts =
+    let backlog =
+      List.length
+        (List.filter
+           (fun entry ->
+             match Queue.Entry.origin entry with
+             | Some o -> counts o
+             | None -> false)
+           (State.pending_queue t.state))
+    in
+    if backlog >= mail_backlog_cap then `Refused_backlog else `Admitted
+  in
   match origin with
   | None -> `Admitted
-  | Some (Origin.Trigger _) -> `Refused_sender
+  | Some (Origin.Trigger { source; digest; key = _ }) -> (
+      (* The session's own trigger, proved from its recorded provenance:
+         source and digest must both match — a policy edit moves the digest
+         and mints a fresh run session, so a stale trigger never mails a
+         newer policy's run. The backlog counts the trigger's unconsumed
+         entries whatever event keys they carry: the (target, origin) bound
+         is per trigger, not per event. *)
+      match Metadata.triggered_from t.metadata with
+      | Some provenance
+        when String.equal (Metadata.Triggered_from.source provenance) source
+             && String.equal
+                  (Metadata.Triggered_from.digest provenance)
+                  digest ->
+          backlog_admits (function
+            | Origin.Trigger o ->
+                String.equal o.source source && String.equal o.digest digest
+            | Origin.Agent _ -> false)
+      | Some _ | None -> `Refused_sender)
   | Some (Origin.Agent sender as sender_origin) ->
       let is_parent =
         match Metadata.delegated_from t.metadata with
@@ -199,17 +229,7 @@ let admits_mail ~origin t =
              (State.delegations t.state)
       in
       if not is_kin then `Refused_sender
-      else
-        let backlog =
-          List.length
-            (List.filter
-               (fun entry ->
-                 match Queue.Entry.origin entry with
-                 | Some o -> Origin.equal o sender_origin
-                 | None -> false)
-               (State.pending_queue t.state))
-        in
-        if backlog >= mail_backlog_cap then `Refused_backlog else `Admitted
+      else backlog_admits (Origin.equal sender_origin)
 
 let require_not_deleted t =
   if Metadata.is_deleted t.metadata then Error Error.Deleted else Ok ()

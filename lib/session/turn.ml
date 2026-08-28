@@ -24,12 +24,17 @@ module Origin = struct
   type t =
     | User
     | Queued of Queue.Id.t
-    | Triggered of { source : string; digest : string; key : string }
+    | Triggered of {
+        source : string;
+        digest : string;
+        key : string;
+        entry : Queue.Id.t option;
+      }
     | Plan_build
     | Compaction
     | Step_limit_wind_down
 
-  let triggered ~source ~digest ~key =
+  let triggered ?entry ~source ~digest ~key () =
     let reject field value =
       if String.is_empty value then
         invalid "Origin.triggered" (field ^ " must not be empty")
@@ -37,7 +42,7 @@ module Origin = struct
     reject "source" source;
     reject "digest" digest;
     reject "key" key;
-    Triggered { source; digest; key }
+    Triggered { source; digest; key; entry }
 
   let equal a b =
     match (a, b) with
@@ -47,6 +52,7 @@ module Origin = struct
         String.equal a.source b.source
         && String.equal a.digest b.digest
         && String.equal a.key b.key
+        && Option.equal Queue.Id.equal a.entry b.entry
     | Plan_build, Plan_build -> true
     | Compaction, Compaction -> true
     | Step_limit_wind_down, Step_limit_wind_down -> true
@@ -58,7 +64,7 @@ module Origin = struct
   let pp ppf = function
     | User -> Format.pp_print_string ppf "user"
     | Queued id -> Format.fprintf ppf "queued(%a)" Queue.Id.pp id
-    | Triggered { source; digest; key } ->
+    | Triggered { source; digest; key; entry = _ } ->
         Format.fprintf ppf "triggered(%s@%s:%s)" source digest key
     | Plan_build -> Format.pp_print_string ppf "plan-build"
     | Compaction -> Format.pp_print_string ppf "compaction"
@@ -80,8 +86,8 @@ module Origin = struct
       |> Jsont.Object.Case.map "queued" ~dec:Fun.id
     in
     let triggered_case =
-      Jsont.Object.map ~kind:"triggered origin" (fun source digest key ->
-          decode_invalid_arg (fun () -> triggered ~source ~digest ~key))
+      Jsont.Object.map ~kind:"triggered origin" (fun source digest key entry ->
+          decode_invalid_arg (fun () -> triggered ?entry ~source ~digest ~key ()))
       |> Jsont.Object.mem "source" Jsont.string ~enc:(function
         | Triggered { source; _ } -> source
         | User | Queued _ | Plan_build | Compaction | Step_limit_wind_down ->
@@ -92,6 +98,10 @@ module Origin = struct
             assert false)
       |> Jsont.Object.mem "key" Jsont.string ~enc:(function
         | Triggered { key; _ } -> key
+        | User | Queued _ | Plan_build | Compaction | Step_limit_wind_down ->
+            assert false)
+      |> Jsont.Object.opt_mem "entry" Queue.Id.jsont ~enc:(function
+        | Triggered { entry; _ } -> entry
         | User | Queued _ | Plan_build | Compaction | Step_limit_wind_down ->
             assert false)
       |> Jsont.Object.error_unknown |> Jsont.Object.finish

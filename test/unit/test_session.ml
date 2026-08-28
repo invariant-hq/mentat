@@ -584,7 +584,7 @@ let journal () =
     turn ~id:"turn-2"
       ~origin:
         (Session.Turn.Origin.triggered ~source:"nightly" ~digest:"d0"
-           ~key:"k0")
+           ~key:"k0" ())
       ~input:Session.Turn.Input.continue
       ~contract:(make_contract ~declarations ())
       ()
@@ -759,7 +759,14 @@ let origin_gen =
       Gen.map (fun s -> Session.Turn.Origin.Queued (queue_id s)) ident_gen;
       Gen.(
         let+ source = ident_gen and+ digest = ident_gen and+ key = ident_gen in
-        Session.Turn.Origin.Triggered { source; digest; key });
+        Session.Turn.Origin.Triggered { source; digest; key; entry = None });
+      Gen.(
+        let+ source = ident_gen
+        and+ digest = ident_gen
+        and+ key = ident_gen
+        and+ entry = ident_gen in
+        Session.Turn.Origin.Triggered
+          { source; digest; key; entry = Some (queue_id entry) });
       Gen.pure Session.Turn.Origin.Plan_build;
       Gen.pure Session.Turn.Origin.Compaction;
       Gen.pure Session.Turn.Origin.Step_limit_wind_down;
@@ -1202,6 +1209,7 @@ let turn_group =
                   source = "nightly-review";
                   digest = "0f9a4c1d2e3b4a5f";
                   key = "delivery-42";
+                  entry = None;
                 };
               Session.Turn.Origin.Plan_build;
               Session.Turn.Origin.Compaction;
@@ -1585,6 +1593,7 @@ let turn_replay_group =
                 source = "nightly-review";
                 digest = "0f9a4c1d2e3b4a5f";
                 key = "delivery-42";
+                entry = None;
               }
           in
           let admitted = turn ~id:"turn-trig" ~origin () in
