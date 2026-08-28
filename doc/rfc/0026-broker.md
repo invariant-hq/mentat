@@ -618,6 +618,12 @@ intensity bound.
 5. The handle grammar for granted contacts (`contact:<name>`?).
 6. The custodial label's interaction with rediscovery's residue
    sweep — a `send`-labeled fence must read as transient there too.
+9. The document-version gap the mail vocabulary opened: R1's origin
+   member and R3's provenance, contract, and entry members are all
+   additive optionals landed without a version bump (R1's precedent),
+   so an old binary reading a trigger-born document fails on member
+   decode instead of a clean unsupported-version refusal. Adjudicate
+   once, for the whole vocabulary, before it widens further at R5.
 
 **Out of scope (tiered to their own work):**
 7. The web frontend's dialing path (the eviction campaign's wave D).
@@ -697,16 +703,37 @@ this RFC implies nothing about priority or scheduling.
   per-(target, origin) backlog cap — the first rung where non-kin
   mail can accumulate — and the sender-name prompt framing from the
   typed origin, which has no reader before foreign senders exist.
-- **R2 — one boot.** Shape-reading serve-session with the
-  attach-at-boot rule; charter and root sessions servable. Holds: the
-  delegated arm byte-for-byte.
-- **R3 — charter runs as sessions.** Fire = create + send + supervise;
-  the one-shot deleted; runs attachable; trigger provenance through
-  queue admission. R3 also builds `Broker.watch` and
-  `Broker.children` — the observation seam reconcile and the dashboard
-  consume, retiring their hand-rolled fence probes. Holds: receipts,
-  the fold, run ids. Changes, named: the charter crams that pinned the
-  one-shot.
+- **R2 — one boot. LANDED 2026-08-28.** Shape-reading serve-session
+  with the attach-at-boot rule; charter and root sessions servable.
+  Held: the delegated arm byte-for-byte. Landed adjudication: the
+  boot derives two shapes, not three — a root attaches its driver at
+  boot so journal mail starts the first turn and exits on idle by the
+  finished judgment; the charter-born shape is honestly that root
+  attach plus contract staging, which waited for R3's recording.
+- **R3 — charter runs as sessions. LANDED 2026-08-28** (supervise,
+  watch, children first; then the fire). Fire = create + send +
+  supervise; the one-shot deleted; runs attachable; trigger
+  provenance through queue admission. R3 also builds `Broker.watch`
+  and `Broker.children` — the observation seam reconcile consumes,
+  retiring its hand-rolled fence probes (the dashboard later). Held:
+  receipts, the fold, run ids. Changed, named: the charter crams that
+  pinned the one-shot. Landed adjudications: the recorded contract
+  lives in session metadata — trigger provenance
+  (`Metadata.Triggered_from`) beside the run knobs
+  (`Metadata.Run_policy`), named members rather than an open field
+  list, so the recorded envelope is exactly as wide as the grant;
+  mail admission proves "its own trigger" from the recorded source
+  and digest, so a policy edit strands no stale mail on the new run;
+  a Triggered turn names the queue entry it consumed; a re-fired
+  trigger with matching provenance adopts its run — the redrive law's
+  fire arm; findings are read from the run's journal, never a
+  captured stream; a bad output schema refuses before any spend; a
+  parked run alerts at its wall clock, staying alive and answerable
+  until then; a watch's `Gone settles recovered rather than skipping,
+  because only a reaped line closes a pending record; and the
+  reconcile settle is asynchronous — the boot-fold window between a
+  watch's arming and its first poll is covered by the run-claim's dup
+  authority, not by a synchronous settle.
 - **R4 — recursion and eviction, gated.** Before this rung:
   measure activation spawn-to-socket and spawn-to-first-token, and
   run the process-heavy suites repeatedly; the RFC's gate is that the
