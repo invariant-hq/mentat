@@ -261,6 +261,33 @@ module Login : sig
       returned value attests the local settlement. *)
 end
 
+(** The one-shot loopback listener, published narrowly for flows outside
+    the provider login that need a browser round-trip — the GitHub
+    app-manifest setup is the consumer. The full OAuth interpreter stays
+    private; this facade carries exactly the callback await. *)
+module Loopback : sig
+  val await_once :
+    stdenv:Eio_unix.Stdenv.base ->
+    ?provider:string ->
+    ?on_ready:(unit -> unit) ->
+    ?accept:(Uri.t -> bool) ->
+    ?serve:(path:string -> string option) ->
+    redirect_uri:Uri.t ->
+    timeout_s:float ->
+    unit ->
+    (Uri.t, string) result
+  (** [await_once ~stdenv ~redirect_uri ~timeout_s ()] binds the loopback
+      address and port of [redirect_uri] and waits for the first request on
+      its path that [accept] admits, returning the absolute callback URI —
+      secret-bearing, since it carries the flow's one-time code. Stray or
+      unaccepted requests are answered and never consume the shot;
+      [serve ~path] may hand the browser an entry page for a request off
+      the callback path ([Some page] answers 200 as HTML); [on_ready]
+      fires once the socket listens; the wait expires loudly after
+      [timeout_s]. [Error message] is display-safe: the timeout, a bind
+      failure, or a malformed redirect URI. *)
+end
+
 (** {1 Local model artifacts (local providers only)} *)
 
 module Local : sig

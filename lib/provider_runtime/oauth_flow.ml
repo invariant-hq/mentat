@@ -383,7 +383,8 @@ module Local_callback = struct
     loop [] false hosts
 
   let await_once ~stdenv ?provider ?(on_ready = fun () -> ())
-      ?(accept = fun _ -> true) ~redirect_uri ~timeout_s () =
+      ?(accept = fun _ -> true) ?(serve = fun ~path:_ -> None) ~redirect_uri
+      ~timeout_s () =
     let* hosts = callback_hosts redirect_uri in
     let* port = callback_port redirect_uri in
     Eio.Switch.run ~name:"oauth2-local-callback" @@ fun sw ->
@@ -404,6 +405,13 @@ module Local_callback = struct
     let accept callback =
       match accept callback with
       | accepted -> accepted
+      | exception exn ->
+          let backtrace = Printexc.get_raw_backtrace () in
+          raise (Callback_failed (exn, backtrace))
+    in
+    let serve ~path =
+      match serve ~path with
+      | page -> page
       | exception exn ->
           let backtrace = Printexc.get_raw_backtrace () in
           raise (Callback_failed (exn, backtrace))
@@ -436,7 +444,10 @@ module Local_callback = struct
                   respond_html ~status:`OK (html_success ~provider ()))
             else
               respond_html ~status:`Bad_request (html_unverified ~provider ())
-          else respond_html ~status:`Not_found (html_not_found ()))
+          else
+            match serve ~path:(Uri.path request_uri) with
+            | Some page -> respond_html ~status:`OK page
+            | None -> respond_html ~status:`Not_found (html_not_found ()))
         ()
     in
     let* sockets = listen_all stdenv sw hosts port in

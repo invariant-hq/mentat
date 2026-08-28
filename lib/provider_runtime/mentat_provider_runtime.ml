@@ -155,6 +155,14 @@ let listings = Account_ops.listings
 
 module Login = Login_flow
 
+module Loopback = struct
+  let await_once ~stdenv ?provider ?on_ready ?accept ?serve ~redirect_uri
+      ~timeout_s () =
+    Result.map_error Oauth_flow.Error.message
+      (Oauth_flow.Local_callback.await_once ~stdenv ?provider ?on_ready
+         ?accept ?serve ~redirect_uri ~timeout_s ())
+end
+
 module Local = struct
   let status t model =
     match Runtime.registration_for t (Mentat_llm.Model.provider model) with

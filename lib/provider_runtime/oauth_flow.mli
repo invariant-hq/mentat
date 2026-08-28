@@ -67,6 +67,7 @@ module Local_callback : sig
     ?provider:string ->
     ?on_ready:(unit -> unit) ->
     ?accept:(Uri.t -> bool) ->
+    ?serve:(path:string -> string option) ->
     redirect_uri:Uri.t ->
     timeout_s:float ->
     unit ->
@@ -79,8 +80,15 @@ module Local_callback : sig
       [Error (Timeout _)] when no accepted request arrives within [timeout_s];
       [Error (Invalid_request _)] when [redirect_uri] lacks an explicit loopback
       host or port. Fiber cancellation is re-raised rather than reported as a
-      failure. Exceptions raised by [on_ready] or [accept] are likewise
-      re-raised as caller faults.
+      failure. Exceptions raised by [on_ready], [accept], or [serve] are
+      likewise re-raised as caller faults.
+
+      [serve ~path] lets a flow hand the browser an entry page from the same
+      one-shot listener: consulted for a request off the callback path, its
+      [Some page] is answered [200] as HTML, its [None] falls through to the
+      branded not-found page. Serving never consumes the shot. The GitHub
+      app-manifest flow uses it to serve the auto-submitting create-page
+      form; plain OAuth flows leave it absent.
 
       [provider] is the human-readable provider name woven into the branded HTML
       the browser is served on success, denial, or a stray callback. It is
