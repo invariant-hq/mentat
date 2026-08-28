@@ -12,8 +12,8 @@
 type fence =
   [ `Free  (** No process holds the child's run fence. *)
   | `Held_self
-    (** This process holds it — an in-process driver is the materialization;
-        the broker stands down. *)
+    (** This process holds it — its own served session's driver is the
+        materialization; the broker stands down. *)
   | `Held of int option
     (** Another process holds it; [Some pid] iff the owner line names a
         same-host per-session child server the escalation ladder may signal.

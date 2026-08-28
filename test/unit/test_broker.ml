@@ -284,7 +284,9 @@ let an_unlabeled_holder_bounds_the_send () =
       ~input:(text "never lands") ()
   with
   | `Delivered -> fail "an unlabeled holder must not be dialed or preempted"
-  | `Undelivered _ -> (
+  | `Undelivered reason -> (
+      is_true ~msg:"the refusal names the holder"
+        (String.starts_with ~prefix:"the target's fence is held by pid" reason);
       match pending store ~id:"child" with
       | [] -> ()
       | _ -> fail "nothing may land while a foreign driver holds the fence")

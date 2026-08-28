@@ -225,6 +225,33 @@ let the_cached_driver_survives_generations () =
   reached ~msg:"the successor generation answers through the same client"
     (Mentat_client.tail client session)
 
+(* Only the serve boot may enter a serving label: an offline attach's owner
+   line must stay unlabeled, or interactive holds would read as dialable
+   servers — and become preemptable past the boot wait. *)
+let an_offline_attach_is_unlabeled () =
+  with_client "unlabeled" @@ fun ~t ~client ->
+  let session = sid "ac-plain" in
+  (match Mentat_client.create client ~id:session () with
+  | Ok () -> ()
+  | Error error -> failf "create: %a" Mentat_protocol.Error.pp error);
+  (match Composition.adopt_session t session with
+  | Ok () -> ()
+  | Error error -> failf "adopt: %a" Mentat_protocol.Error.pp error);
+  let lock =
+    List.fold_left Filename.concat
+      (Unix.getenv "XDG_DATA_HOME")
+      [ "mentat"; "sessions"; Session.Id.to_string session; "run.lock" ]
+  in
+  let line = In_channel.with_open_bin lock In_channel.input_all in
+  let contains_label =
+    let needle = "label" in
+    let n = String.length needle and l = String.length line in
+    let rec go i = i + n <= l && (String.sub line i n = needle || go (i + 1)) in
+    go 0
+  in
+  is_false ~msg:"an offline attach's owner line carries no label"
+    contains_label
+
 let () =
   run "mentat.agent-client"
     [
@@ -232,6 +259,8 @@ let () =
         [
           test "a serving endpoint is probed and dialed, nothing started"
             a_serving_endpoint_is_dialed;
+          test "an offline attach's owner line is unlabeled"
+            an_offline_attach_is_unlabeled;
           test "the dormant trivial reads answer without starting an agent"
             the_dormant_reads_start_nothing;
           test "the first session-scoped call decides the start"

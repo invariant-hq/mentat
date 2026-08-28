@@ -6,14 +6,13 @@
 (** The per-session endpoint's shared machinery.
 
     What every per-session endpoint is made of: the confined session cone
-    that answers only for one session and its delegation subtree, the
-    handshake binder for a single-workspace server, and the socket-directory
+    that answers for one session alone, the handshake binder for a single-workspace server, and the socket-directory
     discipline. The per-session child server ([mentat serve]) consumes
     these pieces directly and owns its own boot, idle watchdog, and exit. *)
 
-(** One cached, stamp-elided store of durable-head summaries, shared by every
-    consumer of the subtree walk over one endpoint's lifetime so each journal
-    decodes once per stamp. *)
+(** One cached, stamp-elided store of durable-head summaries — the idle
+    watchdog's walk over one endpoint's lifetime, decoding each journal
+    once per stamp. *)
 module Heads : sig
   type t
   (** The type for the cache. *)
@@ -33,17 +32,16 @@ module Heads : sig
 end
 
 val confined :
-  store:Mentat_store.t ->
-  cache:Heads.t ->
   served:Mentat_session.Id.t ->
   Mentat_client.Driver.t ->
   Mentat_client.Driver.t
-(** [confined ~store ~cache ~served driver] is [driver] with the one-session
-    confinement applied: the session cone answers only for [served] and its
-    own delegation subtree — membership decided by journal truth through
-    [cache] — and a foreign session id is refused, never resolved against the
-    shared store. The two session-scoped settings writes ([set_model],
-    [set_permission_review]) pass under the same membership guard — their
+(** [confined ~served driver] is [driver] with the one-session confinement
+    applied: the session cone answers for [served] alone — every other
+    session, its own delegated children included, is served by its own
+    agent behind its own socket — and a foreign session id is refused,
+    never resolved against the shared store. The two session-scoped
+    settings writes ([set_model], [set_permission_review]) pass under the
+    same guard — their
     overlays live in the driving process, which is exactly this one, so the
     frontend that opened the session reaches them here. Every other cone —
     accounts, the sessionless settings, lifecycle, review, workspace — is

@@ -42,45 +42,28 @@ module Heads = struct
                 Some (settled, children)))
 end
 
-(* Whether [target] lies in the served session's delegation subtree: [root]
-   itself, or a session reachable from it through recorded delegation edges.
-   Journal truth decides — an edge not yet durable is not yet served, and the
-   caller retries once it is. The [seen] set bounds the walk: ids are
-   parent-minted, so an uncorrupted tree is finite, and a corrupt journal
-   naming an ancestor edge must not recurse forever. *)
-let member ~store cache ~root target =
-  let rec go seen id =
-    Session.Id.equal id target
-    || (not (Hashtbl.mem seen (Session.Id.to_string id))
-       && begin
-            Hashtbl.replace seen (Session.Id.to_string id) ();
-            match Heads.summary ~store cache id with
-            | None -> false
-            | Some (_, children) -> List.exists (go seen) children
-          end)
-  in
-  go (Hashtbl.create 8) root
-
-(* The one-session confinement, making the man page's claim a code fact. The
-   session cone answers only for the served session's own delegation
-   subtree — the only sessions this endpoint can speak for; a foreign session
-   id is refused, never resolved against the shared store. The two
-   session-scoped settings writes pass under the same membership guard; every
-   other cone — accounts, the sessionless settings, lifecycle, review,
-   workspace — is refused whole: a per-session endpoint exists to drive one
-   session, not to reach the user's accounts, configuration, or session
-   index. *)
-let confined ~store ~cache ~served (driver : Driver.t) : Driver.t =
+(* The one-session confinement, making the man page's claim a code fact.
+   The session cone answers for the served session alone — every other
+   session, its own delegated children included, is served by its own
+   agent behind its own socket, so admitting a descendant here would
+   attach it in this process under this server's label with its own
+   socket unserved: exactly the lie the escalation ladder is built to
+   punish. A foreign session id is refused, never resolved against the
+   shared store. The two session-scoped settings writes pass under the
+   same guard; every other cone — accounts, the sessionless settings,
+   lifecycle, review, workspace — is refused whole: a per-session
+   endpoint exists to drive one session, not to reach the user's
+   accounts, configuration, or session index. *)
+let confined ~served (driver : Driver.t) : Driver.t =
   let foreign session =
     Mentat_protocol.Error.unavailable
       (Printf.sprintf
-         "this server serves session %s and its delegation subtree, not %s"
+         "this server serves session %s, not %s"
          (Session.Id.to_string served)
          (Session.Id.to_string session))
   in
   let admit session k =
-    if member ~store cache ~root:served session then k ()
-    else Error (foreign session)
+    if Session.Id.equal served session then k () else Error (foreign session)
   in
   let cone_refused () =
     Error
@@ -104,11 +87,11 @@ let confined ~store ~cache ~served (driver : Driver.t) : Driver.t =
               s.Driver.Session.answer_unattended ~session ~decision));
       possibly_mutating =
         (fun ~session ->
-          member ~store cache ~root:served session
+          Session.Id.equal served session
           && s.Driver.Session.possibly_mutating ~session);
       faulted =
         (fun ~session ->
-          if member ~store cache ~root:served session then
+          if Session.Id.equal served session then
             s.Driver.Session.faulted ~session
           else None);
       fork =

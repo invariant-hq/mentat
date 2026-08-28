@@ -106,8 +106,7 @@ let with_confined name fn =
    with
   | Ok (_ : Store.Session.Document.t) -> ()
   | Error error -> failf "create session: %a" Store.Session.Error.pp error);
-  let cache = Session_endpoint.Heads.create () in
-  fn ~served (Session_endpoint.confined ~store ~cache ~served (stub_driver ()))
+  fn ~served (Session_endpoint.confined ~served (stub_driver ()))
 
 let cone_refused_text =
   "this server serves one session; accounts, settings, lifecycle, review, \
@@ -166,6 +165,25 @@ let the_two_settings_writes_pass_the_member_guard () =
       failf "expected the whole-cone refusal, got %a" Mentat_protocol.Error.pp
         other
 
+(* A recorded child of the served session is still foreign here: every
+   session, delegated children included, is served by its own agent behind
+   its own socket — the narrowing that keeps a serve-labeled fence and its
+   endpoint in one process. *)
+let a_recorded_child_is_refused_at_the_parents_endpoint () =
+  with_confined "child" @@ fun ~served confined ->
+  let child = sid "served-child" in
+  match confined.Driver.session.Driver.Session.tail child with
+  | Ok _ -> fail "a child's id must be refused at the parent's endpoint"
+  | Error (Mentat_protocol.Error.Unavailable text) ->
+      equal Testable.string ~msg:"the one-session refusal names both ids"
+        (Printf.sprintf "this server serves session %s, not %s"
+           (Session.Id.to_string served)
+           (Session.Id.to_string child))
+        (Mentat_diagnostic.message text)
+  | Error other ->
+      failf "expected the one-session refusal, got %a" Mentat_protocol.Error.pp
+        other
+
 let () =
   run "mentat.session-endpoint"
     [
@@ -175,5 +193,7 @@ let () =
             every_foreign_cone_answers_the_one_refusal;
           test "the two settings writes pass the member guard"
             the_two_settings_writes_pass_the_member_guard;
+          test "a recorded child's id is refused at the parent's endpoint"
+            a_recorded_child_is_refused_at_the_parents_endpoint;
         ];
     ]

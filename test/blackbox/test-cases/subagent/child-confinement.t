@@ -1,5 +1,5 @@
 The agent endpoint is confined to its one purpose: the session cone answers
-only for the served session and its own delegation subtree, and the two
+only for the served session — every other session, its own children included, is served by its own agent — and the two
 session-scoped settings writes (set_model, set_permission_review) pass under
 the same membership guard — the one confinement door. A foreign session id
 is refused, never resolved against the shared store. The other cones —
@@ -43,7 +43,7 @@ reaching a driver.
   $ mentat run resume alpha "hi" --json --cwd "$PWD/work" 2>&1 | censor
   {"schema_version":1,"type":"run.started","session_id":"alpha","sandbox":{"mode":"danger-full-access","read":"project","network":"restricted"},"trusted":true}
   {"schema_version":1,"type":"session.started","session_id":"alpha"}
-  mentat: this server serves session beta and its delegation subtree, not alpha
+  mentat: this server serves session beta, not alpha
   [1]
 
 The door is member-guarded too: a session-scoped settings write for alpha
@@ -51,7 +51,7 @@ at beta's endpoint is the same refusal — the write rides the wire ahead of
 the prompt, so it is the first thing refused.
 
   $ mentat run resume alpha --reasoning high "hi" --json --cwd "$PWD/work" 2>&1 | censor
-  mentat: this server serves session beta and its delegation subtree, not alpha
+  mentat: this server serves session beta, not alpha
   [1]
   $ kill "$BETA_PID" 2>/dev/null; wait "$BETA_PID" 2>/dev/null; true
 

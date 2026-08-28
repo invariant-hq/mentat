@@ -191,7 +191,7 @@ let send_signal pid signal =
   try Unix.kill pid signal with Unix.Unix_error _ -> ()
 
 (* Map the fence probe onto the table's vocabulary. This process's own hold
-   (an in-process driver) is its own arm; every other holder is
+   (its own served session's driver) is its own arm; every other holder is
    [classify_owner]'s: [`Held (Some pid)] only for a dialable child server —
    the only holder the escalation ladder may signal — and [`Held None] for a
    holder the table refuses to preempt. *)
@@ -1396,21 +1396,6 @@ let wire_send t ?origin ~timeout_s ~target ~id ~input () =
           | exception _ -> `Unreachable))
 
 let send t ?origin ?(budget_s = grace_s) ~target ~id ~input () =
-  let carries_media =
-    List.exists
-      (function
-        | Mentat_llm.Content.Media { source = `Base64 _ | `Ref _; _ } -> true
-        | Mentat_llm.Content.Media { source = `Uri _; _ }
-        | Mentat_llm.Content.Text _ ->
-            false)
-      input
-  in
-  if carries_media then
-    (* Inline base64 would enter the journal unexternalized and a content
-       reference names the sender's namespace, not the target's; both are
-       refused rather than committed broken. *)
-    `Undelivered "mail cannot carry inline or referenced media"
-  else
     let backoff_s = 0.05 in
     (* The budget bounds the loop in wall time — read from the broker clock,
        never accumulated from the sleeps alone, or a frozen server's dials
@@ -1648,12 +1633,28 @@ let cancel t ~child =
   match t with Real b -> cancel b ~child | Stub _ -> no_processes "cancel"
 
 let send t ?origin ?budget_s ~target ~id ~input () =
-  match t with
-  | Real b -> send b ?origin ?budget_s ~target ~id ~input ()
-  | Stub stub ->
-      Eio.Mutex.use_ro
-        (lock_for stub.locks (Mentat_session.Id.to_string target))
-        (fun () -> stub.send ~origin ~target ~id ~input)
+  let carries_media =
+    List.exists
+      (function
+        | Mentat_llm.Content.Media { source = `Base64 _ | `Ref _; _ } -> true
+        | Mentat_llm.Content.Media { source = `Uri _; _ }
+        | Mentat_llm.Content.Text _ ->
+            false)
+      input
+  in
+  if carries_media then
+    (* Inline base64 would enter the journal unexternalized and a content
+       reference names the sender's namespace, not the target's; both are
+       refused rather than committed broken — in the stub too, so a test
+       broker honors the documented contract. *)
+    `Undelivered "mail cannot carry inline or referenced media"
+  else
+    match t with
+    | Real b -> send b ?origin ?budget_s ~target ~id ~input ()
+    | Stub stub ->
+        Eio.Mutex.use_ro
+          (lock_for stub.locks (Mentat_session.Id.to_string target))
+          (fun () -> stub.send ~origin ~target ~id ~input)
 
 let sweep_endpoints t =
   match t with

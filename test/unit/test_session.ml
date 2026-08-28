@@ -1215,6 +1215,44 @@ let turn_group =
               Session.Turn.Origin.Compaction;
               Session.Turn.Origin.Step_limit_wind_down;
             ];
+          (* The decode-forever pins, hand-built: documents already written
+             carry these spellings, and no corpus regeneration can rewrite
+             this test. *)
+          is_true ~msg:"a written triggered origin decodes forever"
+            (Session.Turn.Origin.equal
+               (Session.Turn.Origin.Triggered
+                  {
+                    source = "nightly-review";
+                    digest = "0f9a4c1d2e3b4a5f";
+                    key = "delivery-42";
+                    entry = None;
+                  })
+               (decode Session.Turn.Origin.jsont
+                  (json_object
+                     [
+                       ("type", Json.string "triggered");
+                       ("source", Json.string "nightly-review");
+                       ("digest", Json.string "0f9a4c1d2e3b4a5f");
+                       ("key", Json.string "delivery-42");
+                     ])));
+          is_true ~msg:"a written triggered origin with its entry decodes"
+            (Session.Turn.Origin.equal
+               (Session.Turn.Origin.Triggered
+                  {
+                    source = "nightly-review";
+                    digest = "0f9a4c1d2e3b4a5f";
+                    key = "delivery-42";
+                    entry = Some (queue_id "q-trigger-1");
+                  })
+               (decode Session.Turn.Origin.jsont
+                  (json_object
+                     [
+                       ("type", Json.string "triggered");
+                       ("source", Json.string "nightly-review");
+                       ("digest", Json.string "0f9a4c1d2e3b4a5f");
+                       ("key", Json.string "delivery-42");
+                       ("entry", Json.string "q-trigger-1");
+                     ])));
           assert_decode_error "unknown origin" Session.Turn.Origin.jsont
             (json_object [ ("type", Json.string "cron") ]);
           assert_decode_error "queued origin without entry"

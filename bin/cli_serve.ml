@@ -225,12 +225,11 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd =
               match Composition.driver instance with
               | Error status -> status
               | Ok driver ->
-                  (* One durable-head cache behind both consumers of the
-                     subtree walk — the idle watchdog and the confinement's
-                     membership — so each journal decodes once per stamp. *)
+                  (* The durable-head cache behind the idle watchdog's
+                     subtree walk, decoding each journal once per stamp. *)
                   let heads = Session_endpoint.Heads.create () in
                   let driver =
-                    Session_endpoint.confined ~store ~cache:heads ~served driver
+                    Session_endpoint.confined ~served driver
                   in
                   let socket_dir =
                     match socket_dir_override with
@@ -474,7 +473,7 @@ let man =
        deliveries.";
     `P
       "The endpoint is confined to its one purpose: the session cone answers \
-       only for the served session and its own delegation subtree, and the \
+       only for the served session (every other session is its own agent's) and the \
        session-scoped settings writes (model, permission review) pass under \
        the same guard — their overlays live in this driving process. The \
        accounts, lifecycle, review, and workspace cones and the sessionless \
