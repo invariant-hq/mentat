@@ -448,8 +448,8 @@ let settle_session ~sw store ~id =
 let outcome_sinks () =
   let outcome, resolver = Eio.Promise.create () in
   let on_settled () = ignore (Eio.Promise.try_resolve resolver `Settled) in
-  let on_failure ~reason =
-    ignore (Eio.Promise.try_resolve resolver (`Failed reason))
+  let on_failure failure =
+    ignore (Eio.Promise.try_resolve resolver (`Failed failure))
   in
   (outcome, on_settled, on_failure)
 
@@ -474,7 +474,14 @@ let with_sigterm_counter fn =
     ~finally:(fun () -> ignore (Sys.signal Sys.sigterm previous))
     (fun () -> fn terms)
 
-let tmp = Lpath.Abs.of_string_exn "/tmp"
+(* Every supervise here starts fresh over an ungoverned session, so the
+   answer is pinned [`Supervising] at the call site. *)
+let supervising = function
+  | `Supervising -> ()
+  | `Already_governed -> fail "no standing entry governs the session"
+  | `Stopped -> fail "the broker is not stopped"
+
+let failed_reason failure = failf "failed: %s" (Broker.failure_message failure)
 
 let a_finished_session_settles_immediately () =
   let resolved = ref 0 in
@@ -486,11 +493,12 @@ let a_finished_session_settles_immediately () =
   create_root store ~id:"run";
   settle_session ~sw store ~id:"run";
   let outcome, on_settled, on_failure = outcome_sinks () in
-  Broker.supervise broker ~session:(sid "run") ~cwd:tmp ~environment:[]
-    ~on_settled ~on_failure ();
+  supervising
+    (Broker.supervise broker ~session:(sid "run") ~environment:[] ~on_settled
+       ~on_failure ());
   (match await_outcome clock outcome with
   | `Settled -> ()
-  | `Failed reason -> failf "failed: %s" reason);
+  | `Failed failure -> failed_reason failure);
   equal int ~msg:"a concluded session spawns nothing" 0 !resolved
 
 let a_spawned_run_settles_at_its_terminal_head () =
@@ -509,11 +517,12 @@ let a_spawned_run_settles_at_its_terminal_head () =
        Eio.Switch.run (fun sw -> settle_session ~sw store ~id:"run");
        Ok "/usr/bin/true");
   let outcome, on_settled, on_failure = outcome_sinks () in
-  Broker.supervise broker ~session:(sid "run") ~cwd:tmp ~environment:[]
-    ~on_settled ~on_failure ();
+  supervising
+    (Broker.supervise broker ~session:(sid "run") ~environment:[] ~on_settled
+       ~on_failure ());
   (match await_outcome clock outcome with
   | `Settled -> ()
-  | `Failed reason -> failf "failed: %s" reason);
+  | `Failed failure -> failed_reason failure);
   equal int ~msg:"one spawn served the whole run" 1 !resolved
 
 let respawn_exhaustion_fires_the_failure_sink () =
@@ -525,11 +534,13 @@ let respawn_exhaustion_fires_the_failure_sink () =
   @@ fun ~sw:_ ~clock ~store ~broker ~socket_base:_ ->
   create_root store ~id:"run";
   let outcome, on_settled, on_failure = outcome_sinks () in
-  Broker.supervise broker ~session:(sid "run") ~cwd:tmp ~environment:[]
-    ~respawns:1 ~on_settled ~on_failure ();
+  supervising
+    (Broker.supervise broker ~session:(sid "run") ~environment:[] ~respawns:1
+       ~on_settled ~on_failure ());
   (match await_outcome clock outcome with
   | `Settled -> fail "a run that never settles must not answer settled"
-  | `Failed reason ->
+  | `Failed (Broker.Deadline _) -> fail "no deadline was given"
+  | `Failed (Broker.Gave_up reason) ->
       is_true ~msg:"the failure names the unsettled deaths"
         (contains_sub ~sub:"died before settling, 2 times over" reason));
   equal int ~msg:"the budget bounds the spawns" 2 !resolved
@@ -546,9 +557,10 @@ let the_deadline_fires_the_ladder_then_the_failure_sink () =
   @@ fun ~sw:_ ~clock ~store ~broker ~socket_base:_ ->
   create_root store ~id:"run";
   let outcome, on_settled, on_failure = outcome_sinks () in
-  Broker.supervise broker ~session:(sid "run") ~cwd:tmp
-    ~environment:[ ("PATH", "/usr/bin:/bin") ]
-    ~deadline_s:0.4 ~respawns:0 ~on_settled ~on_failure ();
+  supervising
+    (Broker.supervise broker ~session:(sid "run")
+       ~environment:[ ("PATH", "/usr/bin:/bin") ]
+       ~deadline_s:0.4 ~respawns:0 ~on_settled ~on_failure ());
   let rec spawned_pid elapsed =
     match Broker.children broker with
     | [ (session, `Spawned pid) ] ->
@@ -563,9 +575,11 @@ let the_deadline_fires_the_ladder_then_the_failure_sink () =
   let pid = spawned_pid 0. in
   (match await_outcome clock outcome with
   | `Settled -> fail "an overdue run must not answer settled"
-  | `Failed reason ->
-      is_true ~msg:"the failure names the deadline"
-        (contains_sub ~sub:"deadline" reason));
+  | `Failed (Broker.Gave_up reason) ->
+      failf "the failure must carry the typed deadline arm, not: %s" reason
+  | `Failed (Broker.Deadline deadline) ->
+      equal Testable.float_exact ~msg:"the failure carries the clock" 0.4
+        deadline);
   match Unix.kill pid 0 with
   | () -> failf "pid %d survived the deadline ladder" pid
   | exception Unix.Unix_error (Unix.ESRCH, _, _) -> ()
@@ -587,11 +601,12 @@ let an_unlabeled_holder_is_observed_never_signalled () =
      head and settles without ever touching the holder. *)
   settle_with_fence store ~fence:guard ~id:"run";
   let outcome, on_settled, on_failure = outcome_sinks () in
-  Broker.supervise broker ~session:(sid "run") ~cwd:tmp ~environment:[]
-    ~on_settled ~on_failure ();
+  supervising
+    (Broker.supervise broker ~session:(sid "run") ~environment:[] ~on_settled
+       ~on_failure ());
   (match await_outcome clock outcome with
   | `Settled -> ()
-  | `Failed reason -> failf "failed: %s" reason);
+  | `Failed failure -> failed_reason failure);
   equal int ~msg:"the holder was never signalled" 0 !terms;
   Store.Run_lock.release guard
 
@@ -608,15 +623,21 @@ let a_double_supervise_is_idempotent () =
     | Error _ -> fail "the fixture could not take the fence"
   in
   let outcome, on_settled, on_failure = outcome_sinks () in
-  Broker.supervise broker ~session:(sid "run") ~cwd:tmp ~environment:[]
-    ~on_settled ~on_failure ();
-  (* The second call is a no-op: the standing supervision owns the outcome
-     and the second sinks never fire. *)
+  supervising
+    (Broker.supervise broker ~session:(sid "run") ~environment:[] ~on_settled
+       ~on_failure ());
+  (* The second call is a no-op that says so: the standing supervision owns
+     the outcome and the second sinks never fire. *)
   let second = ref false in
-  Broker.supervise broker ~session:(sid "run") ~cwd:tmp ~environment:[]
-    ~on_settled:(fun () -> second := true)
-    ~on_failure:(fun ~reason:_ -> second := true)
-    ();
+  (match
+     Broker.supervise broker ~session:(sid "run") ~environment:[]
+       ~on_settled:(fun () -> second := true)
+       ~on_failure:(fun _ -> second := true)
+       ()
+   with
+  | `Already_governed -> ()
+  | `Supervising -> fail "the standing entry must be answered as governing"
+  | `Stopped -> fail "the broker is not stopped");
   (match Broker.children broker with
   | [ (session, `Observed) ] ->
       is_true ~msg:"one entry governs the session"
@@ -625,7 +646,7 @@ let a_double_supervise_is_idempotent () =
   settle_with_fence store ~fence:guard ~id:"run";
   (match await_outcome clock outcome with
   | `Settled -> ()
-  | `Failed reason -> failf "failed: %s" reason);
+  | `Failed failure -> failed_reason failure);
   Eio.Time.sleep clock 0.1;
   is_false ~msg:"the second supervision's sinks never fire" !second;
   Store.Run_lock.release guard
@@ -687,6 +708,30 @@ let the_watch_reports_a_holder_death () =
   | Ok `Gone -> fail "the session exists"
   | Error `Timeout -> fail "the watch never fired")
 
+(* Boot rediscovery's leaf sweep claims a leaf for every stored session —
+   a live root activation (a charter run, a served root) binds its leaf in
+   the same tree as a delegated child, and the successor's boot must not
+   sever it. A leaf no session answers to is residue and is removed. *)
+let rediscovery_keeps_a_live_roots_leaf () =
+  with_broker "rediscover"
+  @@ fun ~sw:_ ~clock:_ ~store ~broker ~socket_base ->
+  create_root store ~id:"run";
+  let leaf id = Broker.socket_dir ~base:socket_base ~session:id in
+  let rec ensure_dir path =
+    if not (Sys.file_exists path) then begin
+      ensure_dir (Filename.dirname path);
+      Unix.mkdir path 0o700
+    end
+  in
+  ensure_dir (leaf "run");
+  ensure_dir (leaf "ghost");
+  Broker.rediscover broker ~engine_for:(fun ~root:_ ->
+      Error "the unit tier stages no engine");
+  is_true ~msg:"the live root's endpoint leaf survives the sweep"
+    (Sys.file_exists (leaf "run"));
+  is_false ~msg:"a leaf no session answers to is removed as residue"
+    (Sys.file_exists (leaf "ghost"))
+
 let the_watch_reports_a_missing_session () =
   with_broker "watch-gone" @@ fun ~sw:_ ~clock ~store:_ ~broker ~socket_base:_
     ->
@@ -743,5 +788,10 @@ let () =
             the_watch_reports_a_holder_death;
           test "the watch reports a missing session"
             the_watch_reports_a_missing_session;
+        ];
+      group "rediscovery"
+        [
+          test "a live root's endpoint leaf survives the sweep"
+            rediscovery_keeps_a_live_roots_leaf;
         ];
     ]

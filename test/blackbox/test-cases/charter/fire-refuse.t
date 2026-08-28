@@ -268,3 +268,30 @@ did not poison re-admission; only the run-claim dedups.
   $ wait_fake_server
   $ grep -c '"disposition":"refused"' "$RECEIPTS"
   1
+
+A broken output schema refuses before any spend: the recorded contract is
+decoded and pre-flighted before the run-claim, so the refusal claims
+nothing, provisions nothing, and mints no session — the head re-enters
+freely once the charter is repaired. (Breaking the schema moves the policy
+digest, so this delivery is a fresh identity under the edited policy.)
+
+  $ ls "$PWD/state/mentat/charters/pr-review/events" | wc -l | tr -d ' '
+  1
+  $ ls "$HOME/.cache/mentat/charters/pr-review/runs" | wc -l | tr -d ' '
+  1
+  $ printf 'not json\n' > "$CDIR/findings.schema.json"
+  $ start_fake_server github-fresh.jsonl capture-badschema gh-port
+  $ export MENTAT_GITHUB_BASE_URL="http://127.0.0.1:$(cat gh-port)"
+  $ mentatd charter fire pr-review --event event-fresh.json 2>&1 | censor | sed -e 's/not valid JSON: .*/not valid JSON: (parse error)/' -e '/^File "-"/d'
+  refused github:acme/widgets#8@$DIGEST:head: output schema: not valid JSON: (parse error)
+  mentat: output schema: not valid JSON: (parse error)
+  [1]
+  $ wait_fake_server
+  $ grep -c '"disposition":"refused"' "$RECEIPTS"
+  2
+  $ ls "$PWD/state/mentat/charters/pr-review/events" | wc -l | tr -d ' '
+  1
+  $ ls "$HOME/.cache/mentat/charters/pr-review/runs" | wc -l | tr -d ' '
+  1
+  $ ls "$XDG_DATA_HOME/mentat/sessions" | wc -l | tr -d ' '
+  0

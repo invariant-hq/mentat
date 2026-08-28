@@ -19,7 +19,10 @@
       receipt records arrival, it decides nothing.
     - {!dispose} is the decision half — the node's {e pump fiber}. It
       gates the event, probes the run-claim, checks the current head,
-      folds the budget fences, commits the run-claim, refuses a layout
+      folds the budget fences, decodes and pre-flights the recorded
+      contract (the output schema and the {!Run_policy_overlay} lowering —
+      a contract no activation could serve refuses before anything is
+      claimed or spent), commits the run-claim, refuses a layout
       that would put secrets under the run's read roots, mints the derived
       session id, provisions the checkout, creates the run session with
       the charter's recorded contract, mails it the trigger prompt,
@@ -34,10 +37,12 @@
     admits no delivery.
 
     The run-claim marker is taken at {e spawn commitment} — after the gate,
-    the head check, and the fences have all admitted the event, immediately
-    before the session mint and the checkout — so a refusal that is not a
-    commitment never claims: a draft that goes ready re-enters, and a
-    fenced head re-enters when a later pass finds its window freed. The
+    the head check, the fences, and the contract pre-flight have all
+    admitted the event, immediately before the session mint and the
+    checkout — so a refusal that is not a commitment never claims: a draft
+    that goes ready re-enters, a fenced head re-enters when a later pass
+    finds its window freed, and a broken contract re-enters once the
+    charter is repaired. The
     fence fold, the claim, and the spawned receipt are serialized under a
     per-charter lock, so concurrent fires cannot each read the pre-spawn
     counts and jointly overshoot a cap. Budget fences admit every delivery
@@ -149,7 +154,10 @@ type env = {
           through its ordinary sinks, so the reaped disposition is written
           on every stop path before the pipeline returns. Answers never
           regress: once [`Stop], never [`None]; once [`Force], always
-          [`Force]. *)
+          [`Force]. The pipeline reads the answer as a boolean projection —
+          [`Stop] and [`Force] alike request the stop; the three-state
+          vocabulary belongs to the invoking process's signal seam, and a
+          new arm would change nothing here. *)
   say : string -> unit;
       (** The narration line sink. The CLI prints to standard output; a
           node routes to its log. Lines carry no trailing newline. *)
@@ -270,8 +278,10 @@ val alert_identity :
     fires the identity-scoped alert for [transition] — the alert receipt,
     then the charter's notify hook — unless the record already carries one
     for [transition] under [digest] and [identity], in which case nothing
-    happens: the dedup rides the receipt log, so the call is idempotent and
-    a reconcile pass may re-derive an owed alert freely. [digest] is the
+    happens: the dedup rides the receipt log, read, checked, and appended
+    under the charter's fire lock (the hook fires outside it), so the call
+    is idempotent and two concurrent passes re-deriving the same owed alert
+    land one line and one hook firing. [digest] is the
     policy the alerted run was spawned under — which for a recovered run
     may not be the policy in force — so an old policy's failure never
     spends the new policy's one alert. *)
@@ -326,6 +336,14 @@ val sweep_events :
     the arm admits — the sweep asks whether a head wants review, and the
     admitted action names the moment the charter subscribed to. An arm
     admitting no review-class action synthesizes nothing. *)
+
+val trigger_mail_id :
+  source:string -> digest:string -> key:string -> Mentat_session.Queue.Id.t
+(** [trigger_mail_id ~source ~digest ~key] is the queue-entry id the trigger
+    prompt is mailed under — derived from the trigger identity, so a double
+    fire lands the same entry once and the admission's recorded-enqueue
+    dedup absorbs the rest. Pure and deterministic; the adoption of a torn
+    claim re-mails the same id. *)
 
 val findings_of_session : Mentat_session.t -> string option
 (** [findings_of_session session] is the findings document [session]'s

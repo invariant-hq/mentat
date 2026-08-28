@@ -38,12 +38,13 @@ type shape =
    (sandbox posture, model, reasoning, unattended permission, step cap,
    instruction toggle), and every activation of it — first or successor —
    re-derives the same overrides from the document alone. The admission half
-   (mode, output schema) is the driver's to read at each queue admission. A
-   member the configuration layer refuses (an unknown sandbox spelling, a
-   malformed selector) refuses the boot loudly rather than serving the
-   session under defaults the grant never named. A load failure lowers
-   nothing: the instance stages plainly and [resolve_shape]'s own load
-   produces the canonical error. *)
+   (mode, output schema) is the driver's to read at each queue admission.
+   The lowering itself is [Run_policy_overlay] — one home, shared with the
+   charter fire's pre-flight — and a member the configuration layer refuses
+   (an unknown sandbox spelling, a malformed selector) refuses the boot
+   loudly rather than serving the session under defaults the grant never
+   named. A load failure lowers nothing: the instance stages plainly and
+   [resolve_shape]'s own load produces the canonical error. *)
 let recorded_overrides store served =
   match Store.Session.load store served with
   | Error _ -> Ok []
@@ -53,65 +54,15 @@ let recorded_overrides store served =
           (Session.metadata (Store.Session.Document.session doc))
       with
       | None -> Ok []
-      | Some policy ->
-          let module P = Session.Metadata.Run_policy in
-          let ( let* ) = Result.bind in
-          let fail field e =
-            Printf.sprintf "session %s: recorded run policy: %s: %s"
-              (Session.Id.to_string served)
-              field
-              (Mentat_config.Error.message e)
-          in
-          let set_text field name raw config =
-            Result.map_error (fail name) (Mentat_config.set_text field raw config)
-          in
-          let steps =
-            List.filter_map Fun.id
-              [
-                Option.map
-                  (set_text Mentat_config.Field.sandbox_mode "sandbox")
-                  (P.sandbox policy);
-                (if P.require_sandbox policy then
-                   Some
-                     (fun config ->
-                       Result.map_error (fail "require_sandbox")
-                         (Mentat_config.set Mentat_config.Field.sandbox_require
-                            Mentat_sandbox.Requirement.Enforced_or_external
-                            config))
-                 else None);
-                Option.map
-                  (fun n ->
-                    set_text Mentat_config.Field.run_max_steps "max_steps"
-                      (string_of_int n))
-                  (P.max_steps policy);
-                Option.map
-                  (set_text Mentat_config.Field.model "model")
-                  (P.model policy);
-                Option.map
-                  (set_text Mentat_config.Field.reasoning "reasoning")
-                  (P.reasoning policy);
-                Option.map
-                  (set_text Mentat_config.Field.permission_unattended
-                     "unattended")
-                  (P.unattended policy);
-                Option.map
-                  (fun on config ->
-                    Result.map_error (fail "project_instructions")
-                      (Mentat_config.set
-                         Mentat_config.Field.instructions_project on config))
-                  (P.project_instructions policy);
-              ]
-          in
-          if List.is_empty steps then Ok []
-          else
-            let* overlay =
-              List.fold_left
-                (fun acc step ->
-                  let* config = acc in
-                  step config)
-                (Ok Mentat_config.empty) steps
-            in
-            Ok [ overlay ])
+      | Some policy -> (
+          match Run_policy_overlay.of_policy policy with
+          | Ok None -> Ok []
+          | Ok (Some overlay) -> Ok [ overlay ]
+          | Error message ->
+              Error
+                (Printf.sprintf "session %s: recorded run policy: %s"
+                   (Session.Id.to_string served)
+                   message)))
 
 (* Derive the shape this boot serves from the session document. The [--cwd]
    assertion holds for every shape: the session's recorded cwd must equal the

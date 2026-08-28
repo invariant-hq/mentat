@@ -97,6 +97,8 @@ mailed queue entry, and the turn that consumed it as a triggered turn.
   1
   $ grep -c '"run_policy"' "$DOC"
   1
+  $ grep -c '"mode":"review"' "$DOC"
+  1
   $ grep -c '"type":"trigger"' "$DOC"
   1
   $ grep -c '"type":"triggered"' "$DOC"

@@ -13,9 +13,12 @@
     ({!Mentat_charter.Receipt.pending_runs}) — gains one broker watch
     ({!Mentat_broker.watch}, deduplicated across passes), whose terminal
     observation drives the honest settle
-    ([Charter_fire.settle_recovered]) — a run observed settled while its
-    activation still lingers holding the fence is left to the next pass,
-    which re-watches; every reaped disposition still owed
+    ([Charter_fire.settle_recovered]) — a run younger than the spawn grace
+    is not watched at all (its activation may still be staging, and a free
+    fence over an unfinished head would read holder-died either way), and a
+    run observed settled while its activation still lingers holding the
+    fence is left to the next pass, which re-watches; every reaped
+    disposition still owed
     its alert re-fires it — the reap and the alert are two appends with an
     external hook between them, so a crash window between them is repaired
     here, idempotently, off the receipt-log dedup; every delivery receipt

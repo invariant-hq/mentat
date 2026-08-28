@@ -433,16 +433,27 @@ let run_policy_of (loaded : Charter_store.Loaded.t) =
   in
   let charter = loaded.Charter_store.Loaded.charter in
   let run = charter.Charter.run in
-  Ok
-    (Mentat_session.Metadata.Run_policy.make
-       ~mode:Mentat_session.Contract.Mode.Review ~output_schema
-       ~max_steps:run.Charter.Run.max_steps ~sandbox:"read-only"
-       ~require_sandbox:true ?model:run.Charter.Run.model
-       ?reasoning:run.Charter.Run.reasoning
-       ?unattended:
-         (Option.map Charter.Unattended.to_string
-            charter.Charter.permission_unattended)
-       ?project_instructions:run.Charter.Run.project_instructions ())
+  let policy =
+    Mentat_session.Metadata.Run_policy.make
+      ~mode:Mentat_session.Contract.Mode.Review ~output_schema
+      ~max_steps:run.Charter.Run.max_steps ~sandbox:"read-only"
+      ~require_sandbox:true ?model:run.Charter.Run.model
+      ?reasoning:run.Charter.Run.reasoning
+      ?unattended:
+        (Option.map Charter.Unattended.to_string
+           charter.Charter.permission_unattended)
+      ?project_instructions:run.Charter.Run.project_instructions ()
+  in
+  (* The lowering pre-flight, against an empty configuration: the one home
+     the serving boot lowers through ([Run_policy_overlay]), run at the
+     writer too, so a spelling the boot would refuse refuses here — before
+     the claim and the spend — the same courtesy the schema gets above. *)
+  let* (_ : Mentat_config.t option) =
+    Result.map_error
+      (fun e -> Printf.sprintf "recorded run policy: %s" e)
+      (Run_policy_overlay.of_policy policy)
+  in
+  Ok policy
 
 (* The trigger's mail identity: the entry id derives from the trigger
    identity — source, digest, key, length-framed — so a double fire lands
@@ -467,43 +478,48 @@ let send_trigger env (loaded : Charter_store.Loaded.t) ~identity ~session
   | `Delivered -> Ok ()
   | `Undelivered reason -> Error (Printf.sprintf "trigger mail: %s" reason)
 
-(* The supervision deadline's fixed reason prefix — the broker's one wording
-   ([Mentat_broker.supervise]), matched to stamp the wall-clock cause. *)
-let deadline_reason reason =
-  String.starts_with ~prefix:"the supervision deadline (" reason
-
 (* Supervise the run to its conclusion and await the outcome. The sinks fold
    from the journal, never from fence absence: [`Settled] fires on the
    head-and-queue read — possibly while the activation still lingers holding
-   the fence — and [`Failed] carries the broker's fixed reason. The stop
-   seam maps onto the broker's cancel ladder: the wire interrupt first, then
-   the bounded signals, and the supervision concludes through its ordinary
+   the fence — and [`Failed] carries the broker's typed failure. The no-op
+   arms are machinery failures: a broker that cannot own the outcome is
+   refused, never awaited on sinks that will not fire. The stop seam maps
+   onto the broker's cancel ladder: the wire interrupt first, then the
+   bounded signals, and the supervision concludes through its ordinary
    sinks, so the disposition receipt is written on every stop path. *)
-let supervise_run env ~session ~run_root ~wall_clock =
+let supervise_run env ~session ~wall_clock =
   let clock = Eio.Stdenv.clock env.stdenv in
   let child = Mentat_session.Id.of_string session in
   let outcome, resolve = Eio.Promise.create () in
   let settle o = ignore (Eio.Promise.try_resolve resolve o) in
-  Mentat_broker.supervise env.broker ~session:child ~cwd:run_root
-    ~environment:(scrubbed_environment env) ~deadline_s:wall_clock ~respawns:0
-    ~on_settled:(fun () -> settle `Settled)
-    ~on_failure:(fun ~reason -> settle (`Failed reason))
-    ();
-  let rec await ~stop_sent =
-    match Eio.Promise.peek outcome with
-    | Some o -> (o, stop_sent)
-    | None ->
-        let stop_sent =
-          match env.stop () with
-          | `None -> stop_sent
-          | `Stop | `Force ->
-              if not stop_sent then Mentat_broker.cancel env.broker ~child;
-              true
-        in
-        Eio.Time.sleep clock 0.1;
-        await ~stop_sent
-  in
-  await ~stop_sent:false
+  match
+    Mentat_broker.supervise env.broker ~session:child
+      ~environment:(scrubbed_environment env) ~deadline_s:wall_clock
+      ~respawns:0
+      ~on_settled:(fun () -> settle `Settled)
+      ~on_failure:(fun failure -> settle (`Failed failure))
+      ()
+  with
+  | `Stopped -> Error "run supervision: the broker is stopped"
+  | `Already_governed ->
+      Error
+        "run supervision: this process already governs the run session"
+  | `Supervising ->
+      let rec await ~stop_sent =
+        match Eio.Promise.peek outcome with
+        | Some o -> Ok (o, stop_sent)
+        | None ->
+            let stop_sent =
+              match env.stop () with
+              | `None -> stop_sent
+              | `Stop | `Force ->
+                  if not stop_sent then Mentat_broker.cancel env.broker ~child;
+                  true
+            in
+            Eio.Time.sleep clock 0.1;
+            await ~stop_sent
+      in
+      await ~stop_sent:false
 
 (* Journal head and spend, read once at reap: the exit code is liveness, the
    head is truth. *)
@@ -565,6 +581,9 @@ let derived_cost env view =
    under the current digest would spend the new policy's one alert. The
    notify hook is a courtesy behind the charter's own contract. *)
 
+let fire_lock env ~name =
+  Filename.concat (User_dirs.charter_state_dir env.dirs name) "fire.lock"
+
 let fire_hook env (loaded : Charter_store.Loaded.t) ~digest ~transition ~identity ~session =
   match loaded.Charter_store.Loaded.charter.Charter.notify with
   | None -> ()
@@ -587,18 +606,35 @@ let fire_hook env (loaded : Charter_store.Loaded.t) ~digest ~transition ~identit
                  ("session", Output.Json.string_or_null session);
                ])
 
-let alert_identity env (loaded : Charter_store.Loaded.t) ~digest ~identity ~transition ~session =
-  let name = loaded.Charter_store.Loaded.name in
+(* The identity-scoped read-check-append, assuming the charter's fire lock
+   is already held: exactly one alert line lands per (digest, identity,
+   transition), and the answer says whether this call won the append, so
+   the notify hook fires for the winner only. *)
+let alert_under_lock env ~name ~digest ~identity ~transition =
   let* receipts = read_receipts env ~name in
-  if Receipt.alerted ~digest ~identity ~transition receipts then Ok ()
+  if Receipt.alerted ~digest ~identity ~transition receipts then Ok false
   else
     let* () =
       append_receipt env ~name
         (receipt_now ~identity ~digest
            (Receipt.Kind.Alert { transition; window = `Identity }))
     in
-    fire_hook env loaded ~digest ~transition ~identity ~session;
-    Ok ()
+    Ok true
+
+(* The read-check-append rides the fire lock: the pump and the beat both
+   re-derive owed alerts, and two unserialized passes reading not-alerted
+   together would each append the line and fire the hook. The hook stays
+   outside the lock. [Fs.with_lock] does not re-enter, so a caller already
+   holding the fire lock (a refusal inside the commit) goes through
+   [alert_under_lock] directly. *)
+let alert_identity env (loaded : Charter_store.Loaded.t) ~digest ~identity ~transition ~session =
+  let name = loaded.Charter_store.Loaded.name in
+  let* fresh =
+    Fs.with_lock (fire_lock env ~name) (fun () ->
+        alert_under_lock env ~name ~digest ~identity ~transition)
+  in
+  if fresh then fire_hook env loaded ~digest ~transition ~identity ~session;
+  Ok ()
 
 (* Publication: the tokenless renderer, then the poster holding the write
    token in its environment alone. Both are short-lived [mentat] children. *)
@@ -742,9 +778,11 @@ module Committed = struct
   type t = { session : string; run_root : Lpath.Abs.t; diff_rel : string }
 end
 
-(* The canonical run root, resolved exactly as the activation's own staging
-   resolves its [--cwd]: the recorded cwd and the served workspace root must
-   be one path, or every boot of the run session refuses the mismatch. *)
+(* The canonical run root the created session records as its cwd
+   ([Mentat_session.create ~cwd]), resolved exactly as the activation's own
+   staging resolves its [--cwd]: the recorded cwd and the served workspace
+   root must be one path, or every boot of the run session refuses the
+   mismatch. *)
 let canonical_run_root run_root =
   let resolved =
     match Unix.realpath run_root with
@@ -754,9 +792,6 @@ let canonical_run_root run_root =
   match Lpath.Abs.of_string resolved with
   | Ok path -> Ok path
   | Error e -> Error (Printf.sprintf "%s: %s" resolved (Lpath.Error.message e))
-
-let fire_lock env ~name =
-  Filename.concat (User_dirs.charter_state_dir env.dirs name) "fire.lock"
 
 (* The run-claim commitment, serialized per charter: the fence fold, the
    O_EXCL claim, the layout refusal, the session mint, provisioning, and the
@@ -799,6 +834,17 @@ let commit env ~(repo : Repo.t) (loaded : Charter_store.Loaded.t)
       env.say (Printf.sprintf "fenced %s: %s" id (Receipt.Meter.to_string meter));
       Ok `Done
   | Fence.Pass -> (
+      (* The recorded contract, decoded and pre-flighted before the claim:
+         a contract no activation could serve — a broken schema, an
+         unlowerable spelling — is a refusal, never a commitment, so it
+         claims nothing and the head re-enters freely if the charter is
+         repaired. *)
+      let* policy =
+        Result.map_error
+          (fun e ->
+            match refuse e with Ok _ | Error _ -> e)
+          (run_policy_of loaded)
+      in
       let* claim =
         Result.map_error store_error
           (Charter_store.claim_identity env.dirs ~name ~digest identity)
@@ -874,12 +920,6 @@ let commit env ~(repo : Repo.t) (loaded : Charter_store.Loaded.t)
                     committed ~root ~diff_rel:(diff_rel_of_session session)
                 | Some _ | None -> dispose_already_exists session)
             | Error (Mentat_store.Session.Error.Not_found _) -> (
-                let* policy =
-                  Result.map_error
-                    (fun e ->
-                      match refuse e with Ok _ | Error _ -> e)
-                    (run_policy_of loaded)
-                in
                 let wall_clock = charter.Charter.budget.Charter.Budget.wall_clock in
                 let* provisioned =
                   Result.map_error
@@ -946,14 +986,30 @@ let dispose env ~(repo : Repo.t) ?(on_reap = fun () -> ())
     env.say (Printf.sprintf "skipped %s: %s" id reason);
     Ok ()
   in
-  let refuse reason =
+  let refuse_with ~alert reason =
     let* () = record (Receipt.Kind.Disposition (Receipt.Disposition.Refused reason)) in
-    let* () =
-      alert_identity env loaded ~digest ~identity:id ~transition:Receipt.Transition.Failed
-        ~session:None
-    in
+    let* () = alert () in
     env.say (Printf.sprintf "refused %s: %s" id reason);
     Error reason
+  in
+  let refuse reason =
+    refuse_with reason ~alert:(fun () ->
+        alert_identity env loaded ~digest ~identity:id
+          ~transition:Receipt.Transition.Failed ~session:None)
+  in
+  (* The commit runs under the charter's fire lock, and [Fs.with_lock] does
+     not re-enter: a refusal inside it appends its alert through the
+     under-lock core instead of the locking wrapper. *)
+  let refuse_committing reason =
+    refuse_with reason ~alert:(fun () ->
+        let* fresh =
+          alert_under_lock env ~name ~digest ~identity:id
+            ~transition:Receipt.Transition.Failed
+        in
+        if fresh then
+          fire_hook env loaded ~digest ~transition:Receipt.Transition.Failed
+            ~identity:id ~session:None;
+        Ok ())
   in
   match Charter.webhook_arm charter with
   | None ->
@@ -1007,8 +1063,8 @@ let dispose env ~(repo : Repo.t) ?(on_reap = fun () -> ())
               else
                 let* staged =
                   Fs.with_lock (fire_lock env ~name) (fun () ->
-                      commit env ~repo loaded ~event ~identity ~record ~refuse
-                        ~dispose_skipped)
+                      commit env ~repo loaded ~event ~identity ~record
+                        ~refuse:refuse_committing ~dispose_skipped)
                 in
                 match staged with
                 | `Done -> Ok Disposed
@@ -1016,19 +1072,28 @@ let dispose env ~(repo : Repo.t) ?(on_reap = fun () -> ())
                     let wall_clock =
                       charter.Charter.budget.Charter.Budget.wall_clock
                     in
-                    let outcome, stopped =
-                      supervise_run env ~session ~run_root ~wall_clock
+                    let* outcome, stopped =
+                      match supervise_run env ~session ~wall_clock with
+                      | Ok _ as awaited -> awaited
+                      | Error reason ->
+                          (* The broker answered a no-op arm: the run is
+                             committed but nothing owns its outcome here.
+                             Refuse loudly; the record stays pending and
+                             the reconcile's watch settles it. *)
+                          refuse reason
                     in
                     (* The fold is the journal's, never the supervision's:
                        the head decides the stamped exit — 0 settled, 255
                        anything else, the same honest rule the recovery
                        settle applies — and the supervision outcome only
-                       classifies the cause. The broker's failure reason is
-                       narrated verbatim. *)
+                       classifies the cause. The broker's failure is
+                       narrated through its one wording. *)
                     (match outcome with
                     | `Settled -> ()
-                    | `Failed reason ->
-                        env.say (Printf.sprintf "run %s: %s" session reason));
+                    | `Failed failure ->
+                        env.say
+                          (Printf.sprintf "run %s: %s" session
+                             (Mentat_broker.failure_message failure)));
                     let head, view = head_of_journal env ~session in
                     let exit_code =
                       if Receipt.Head.equal head Receipt.Head.Settled then 0
@@ -1038,9 +1103,10 @@ let dispose env ~(repo : Repo.t) ?(on_reap = fun () -> ())
                       if stopped then Receipt.Cause.Interrupted
                       else
                         match outcome with
-                        | `Failed reason when deadline_reason reason ->
+                        | `Failed (Mentat_broker.Deadline _) ->
                             Receipt.Cause.Wall_clock
-                        | `Settled | `Failed _ -> Receipt.Cause.Exited
+                        | `Settled | `Failed (Mentat_broker.Gave_up _) ->
+                            Receipt.Cause.Exited
                     in
                     let usage =
                       match view with

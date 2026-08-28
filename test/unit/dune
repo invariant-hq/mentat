@@ -727,9 +727,14 @@
   mentat_boot
   mentat_broker
   mentat_charter
+  mentat_digest
+  mentat_llm
+  mentat_permission
   mentat_provider
+  mentat_sandbox
   mentat_session
   mentat_store
+  lpath
   jsont
   eio
   eio.unix

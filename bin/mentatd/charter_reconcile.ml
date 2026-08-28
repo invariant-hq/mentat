@@ -26,12 +26,35 @@ let say env fmt = Printf.ksprintf env.Charter_fire.say fmt
    or after a settle that had to leave the record. *)
 let watched : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* The spawn grace. A just-committed run's activation stages a whole
+   composition before it binds the fence, and a watch cannot tell "crashed
+   before settling" from "not yet booted": a free fence over an unfinished
+   head reads holder-died either way, and a false settle spends the claim,
+   fires a false alert, and suppresses the eventual publication. A pending
+   run younger than this grace is left to the next pass — the broker's own
+   boot patience is 30 s, so a minute keeps even a slow cold boot out of
+   the false arm. MENTAT_CHARTER_SPAWN_GRACE (test-only, seconds) shortens
+   it so a blackbox stage that manufactures a seconds-old orphan is not
+   paced by the default. *)
+let default_spawn_grace_s = 60.0
+
+let spawn_grace_s env =
+  match
+    Option.bind
+      (List.assoc_opt "MENTAT_CHARTER_SPAWN_GRACE"
+         env.Charter_fire.environment)
+      float_of_string_opt
+  with
+  | Some s when s >= 0. -> s
+  | Some _ | None -> default_spawn_grace_s
+
 let settle env (loaded : Charter_store.Loaded.t) (pending : Receipt.Pending.t)
     =
-  let { Receipt.Pending.identity; digest; session; spawned_at = _ } =
-    pending
+  let { Receipt.Pending.identity; digest; session; spawned_at } = pending in
+  let age =
+    Eio.Time.now (Eio.Stdenv.clock env.Charter_fire.stdenv) -. spawned_at
   in
-  if not (Hashtbl.mem watched session) then begin
+  if age >= spawn_grace_s env && not (Hashtbl.mem watched session) then begin
     Hashtbl.replace watched session ();
     Mentat_broker.watch env.Charter_fire.broker
       ~session:(Mentat_session.Id.of_string session)

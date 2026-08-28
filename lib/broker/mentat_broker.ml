@@ -74,7 +74,18 @@ let classify_owner owner =
       `Mount
   | Some _ | None -> `Other
 
-type failure_sink = reason:string -> unit
+(* The typed supervision failure: the arm is the contract a caller
+   classifies on, the prose is diagnostic. [failure_message] is the one
+   wording home — the broker's own traces and every narrating caller render
+   through it, so a reword can never silently reclassify an outcome. *)
+type failure = Deadline of float | Gave_up of string
+
+type failure_sink = failure -> unit
+
+let failure_message = function
+  | Deadline deadline ->
+      Printf.sprintf "the supervision deadline (%gs) elapsed" deadline
+  | Gave_up reason -> reason
 
 module Engine = struct
   type t = {
@@ -111,10 +122,9 @@ let reap_interval_s = 0.05
 type shape =
   | Delegated of Engine.t
   | Root of {
-      root : Lpath.Abs.t;
       environment : (string * string) list;
       settled : unit -> unit;
-      failed : reason:string -> unit;
+      failed : failure -> unit;
     }
 
 (* One materialized or observed child. [pid] is [Some] only for a process this
@@ -228,17 +238,30 @@ let holder_name t ~session =
   | `Free -> "a holder that has since released"
   | `Io io -> Format.asprintf "an unprobeable fence (%a)" Mentat_store.Io.pp io
 
-let entry_root entry =
+(* An entry's workspace identity — the spawned activation's cwd and the
+   handshake identity of every dial. A delegation carries its engine's root;
+   a root supervision reads the session's recorded cwd from the document,
+   fence-free, at each use — exactly as the send's wire arm reads it — so
+   the store, never the supervising caller, owns the fact. *)
+let entry_workspace t entry =
   match entry.shape with
-  | Delegated engine -> engine.Engine.root
-  | Root { root; _ } -> root
+  | Delegated engine -> Ok engine.Engine.root
+  | Root _ -> (
+      match Mentat_store.Session.load t.store entry.child with
+      | Error e ->
+          Error
+            (Printf.sprintf "the session document could not be read: %s"
+               (Mentat_store.Session.Error.message e))
+      | Ok document ->
+          Ok
+            (Mentat_session.Metadata.cwd
+               (Mentat_session.metadata
+                  (Mentat_store.Session.Document.session document))))
 
 let entry_environment entry =
   match entry.shape with
   | Delegated engine -> engine.Engine.environment
   | Root { environment; _ } -> environment
-
-let root_string entry = Lpath.Abs.to_string (entry_root entry)
 
 (* The unfinished-work judgment is the state's own: a settled head with
    unconsumed mail is not finished — the mail buys the session another turn,
@@ -278,9 +301,17 @@ let child_head t entry : Reconcile.head =
   | (`Unfinished | `Terminal) as head -> head
 
 let connect_child t entry ~sw =
-  Mentat_server.connect ~sw ~net:(net t) ~clock:(clock t)
-    ~workspace:(root_string entry)
-    (Mentat_server.Bind.unix ~dir:(Lpath.Abs.of_string_exn entry.socket_dir))
+  match entry_workspace t entry with
+  | Error message -> Error (`Workspace message)
+  | Ok workspace -> (
+      match
+        Mentat_server.connect ~sw ~net:(net t) ~clock:(clock t)
+          ~workspace:(Lpath.Abs.to_string workspace)
+          (Mentat_server.Bind.unix
+             ~dir:(Lpath.Abs.of_string_exn entry.socket_dir))
+      with
+      | Ok _ as ok -> ok
+      | Error error -> Error (`Connect error))
 
 (* A scoped reachability probe: one throwaway handshake, resources torn down
    with the scope. This is the decide table's probe — once per launch; the
@@ -369,10 +400,12 @@ let integrate t entry =
           `Integrated
       | `Unfinished | `Absent -> `Not_settled)
 
-let fail_shape entry ~message =
+let fail_shape entry failure =
   match entry.shape with
-  | Delegated engine -> engine.Engine.fail_child ~child:entry.child ~message
-  | Root root -> root.failed ~reason:message
+  | Delegated engine ->
+      engine.Engine.fail_child ~child:entry.child
+        ~message:(failure_message failure)
+  | Root root -> root.failed failure
 
 let trace_abandoned entry message =
   match entry.shape with
@@ -406,7 +439,7 @@ let give_up t entry message =
         destroy t pid;
         remove_endpoint entry);
     trace_abandoned entry message;
-    fail_shape entry ~message
+    fail_shape entry (Gave_up message)
   end
 
 (* The escalation ladder for a child this broker spawned. Each signal is sent
@@ -614,7 +647,7 @@ let rec settle_exit t entry =
               (entry.respawns + 1)
           in
           trace_abandoned entry message;
-          fail_shape entry ~message
+          fail_shape entry (Gave_up message)
         end
         else begin
           (* A fresh record, honoring [current]'s discipline: the
@@ -642,17 +675,20 @@ and spawn_child t entry =
     | Delegated _ -> entry.cancelled
     | Root _ -> false
   in
-  match
-    Spawn.spawn ~resolve_bin:t.resolve_bin ~log_dir:t.log_dir
-      ~leaf:(socket_leaf ~session:(key entry.child))
-      ~environment:(entry_environment entry) ~session:entry.child ~interrupted
-      ~cwd:(entry_root entry)
-  with
+  match entry_workspace t entry with
   | Error message -> give_up t entry message
-  | Ok pid ->
-      entry.pid <- Some pid;
-      ensure_reaper t;
-      observe t entry
+  | Ok cwd -> (
+      match
+        Spawn.spawn ~resolve_bin:t.resolve_bin ~log_dir:t.log_dir
+          ~leaf:(socket_leaf ~session:(key entry.child))
+          ~environment:(entry_environment entry) ~session:entry.child
+          ~interrupted ~cwd
+      with
+      | Error message -> give_up t entry message
+      | Ok pid ->
+          entry.pid <- Some pid;
+          ensure_reaper t;
+          observe t entry)
 
 (* The reaper: one fiber per broker sweeping the spawned-pid set with
    [WNOHANG] on a short cadence. It starts with the first spawned pid — a
@@ -946,58 +982,70 @@ let wind_down t entry =
   in
   await 0.
 
-(* Deadline enforcement: the supervisor's one clock. Each pass claims the
-   session's current entry out of the table before signalling anything, so no
-   concurrent settlement can race the ruling and no respawn can outlive the
-   clock; the loop re-checks for a successor a racing exit installed in the
-   claim window. A head already terminal at the firing settles instead: the
-   work beat the clock, and the ordinary funnel drains the entry. The ladder
-   here signals only what the delegated ladder may — an own pid, or a
-   same-host child server — never an unlabeled holder; one that survives the
-   deadline is named in the failure instead. *)
-let enforce_deadline t ~session reason =
+(* Deadline enforcement: the supervisor's one clock. The clock has fired, so
+   each pass first marks the session's current binding cancelled — before
+   any suspending probe, so an exit settling in the probe window cannot
+   install and spawn a successor the ruling would miss ([respawn_refused]
+   blocks a cancelled root) — and then claims the binding by identity: the
+   re-find and the remove share one non-suspending step, and a binding the
+   probe window replaced is re-ruled by the loop instead of signalled
+   through a stale entry. A head already terminal at the firing settles
+   instead: the work beat the clock, and the ordinary funnel drains the
+   entry. The ladder here signals only what the delegated ladder may — an
+   own pid, or a same-host child server — never an unlabeled holder; one
+   that survives the deadline is named in the trace instead. *)
+let enforce_deadline t ~session deadline =
   let rec enforce () =
     match Hashtbl.find_opt t.entries (key session) with
     | None -> ()
     | Some entry -> (
+        entry.cancelled <- true;
         match child_head t entry with
         | `Terminal -> (
             match integrate t entry with
             | `Integrated | `Not_settled | `Unbound -> ())
-        | `Unfinished | `Absent ->
-            Hashtbl.remove t.entries (key session);
-            entry.cancelled <- true;
-            wire_interrupt t entry;
-            wind_down t entry;
-            (match entry.pid with
-            | Some pid ->
-                entry.pid <- None;
-                destroy t pid
-            | None -> (
-                match probe_root_fence t ~session () with
-                | `Held (Some pid) -> ignore (ladder_foreign t entry pid)
-                | `Free | `Held_self | `Held None | `Custodial | `Io _ -> ()));
-            let message =
-              match probe_root_fence t ~session () with
-              | `Held _ | `Held_self ->
-                  Printf.sprintf "%s; the session's fence is still held by %s"
-                    reason
-                    (holder_name t ~session)
-              | `Free | `Custodial | `Io _ -> reason
-            in
-            remove_endpoint entry;
-            trace_abandoned entry message;
-            fail_shape entry ~message;
-            enforce ())
+        | `Unfinished | `Absent -> (
+            match Hashtbl.find_opt t.entries (key session) with
+            | Some current when current == entry ->
+                Hashtbl.remove t.entries (key session);
+                wire_interrupt t entry;
+                wind_down t entry;
+                (match entry.pid with
+                | Some pid ->
+                    entry.pid <- None;
+                    destroy t pid
+                | None -> (
+                    match probe_root_fence t ~session () with
+                    | `Held (Some pid) -> ignore (ladder_foreign t entry pid)
+                    | `Free | `Held_self | `Held None | `Custodial | `Io _ ->
+                        ()));
+                let failure = Deadline deadline in
+                let message =
+                  match probe_root_fence t ~session () with
+                  | `Held _ | `Held_self ->
+                      Printf.sprintf
+                        "%s; the session's fence is still held by %s"
+                        (failure_message failure)
+                        (holder_name t ~session)
+                  | `Free | `Custodial | `Io _ -> failure_message failure
+                in
+                remove_endpoint entry;
+                trace_abandoned entry message;
+                fail_shape entry failure;
+                enforce ()
+            | Some _ | None -> enforce ()))
   in
   enforce ()
 
 (* Root supervision's admission. Idempotent per session: while any entry —
-   delegated or root — governs the session, a second call is a no-op whose
-   sinks never fire; the standing supervision owns the outcome. *)
-let supervise t ~session ~cwd ~environment ?deadline_s
-    ?(respawns = max_respawns) ~on_settled ~on_failure () =
-  if (not t.stopped) && not (Hashtbl.mem t.entries (key session)) then begin
+   delegated or root — governs the session, the standing supervision owns
+   the outcome; the answer names the arm, so a caller never awaits sinks
+   that cannot fire. *)
+let supervise t ~session ~environment ?deadline_s ?(respawns = max_respawns)
+    ~on_settled ~on_failure () =
+  if t.stopped then `Stopped
+  else if Hashtbl.mem t.entries (key session) then `Already_governed
+  else begin
     (* Exactly one outcome crosses to the caller, however many observation
        passes re-derive it: the sink pair shares one guard, carried by every
        successor entry through the shared shape record. *)
@@ -1011,26 +1059,22 @@ let supervise t ~session ~cwd ~environment ?deadline_s
     let shape =
       Root
         {
-          root = cwd;
           environment;
           settled = (fun () -> once on_settled);
-          failed = (fun ~reason -> once (fun () -> on_failure ~reason));
+          failed = (fun failure -> once (fun () -> on_failure failure));
         }
     in
     register t ~shape ~budget:respawns ~child:session (fun entry ->
         launch_root t entry);
-    match deadline_s with
+    (match deadline_s with
     | None -> ()
     | Some deadline ->
-        let reason =
-          Printf.sprintf "the supervision deadline (%gs) elapsed" deadline
-        in
         Eio.Fiber.fork ~sw:t.sw (fun () ->
             Eio.Fiber.first
               (fun () -> Eio.Promise.await t.stop_signal)
               (fun () ->
                 sleep t deadline;
-                try enforce_deadline t ~session reason with
+                try enforce_deadline t ~session deadline with
                 | Eio.Cancel.Cancelled _ as exn -> raise exn
                 | exn -> (
                     let message =
@@ -1039,7 +1083,9 @@ let supervise t ~session ~cwd ~environment ?deadline_s
                     in
                     match Hashtbl.find_opt t.entries (key session) with
                     | Some entry -> give_up t entry message
-                    | None -> Eio.traceln "broker: %s: %s" (key session) message)))
+                    | None ->
+                        Eio.traceln "broker: %s: %s" (key session) message))));
+    `Supervising
   end
 
 (* Observation without ownership: fence and head until the head is terminal,
@@ -1376,12 +1422,13 @@ let rediscover t ~engine_for =
             | `Free | `Io _ -> false)
           children
       in
-      (* A leaf no delegated session answers to is residue of a removed
-         session: remove it. *)
+      (* A leaf no stored session answers to is residue of a removed
+         session: remove it. The claim set is every session in the scan,
+         not just delegated children — a charter run or a served root binds
+         a leaf in the same tree with no delegation backlink, and a boot
+         must not sever a live root's endpoint. *)
       let claimed = Hashtbl.create 8 in
-      List.iter
-        (fun (id, _, _) -> Hashtbl.replace claimed (leaf_of id) ())
-        children;
+      Hashtbl.iter (fun id _ -> Hashtbl.replace claimed (leaf_of id) ()) sessions;
       List.iter
         (fun leaf -> if not (Hashtbl.mem claimed leaf) then remove_leaf leaf)
         leaves;
@@ -1470,11 +1517,10 @@ type send_stub =
 
 type supervise_stub =
   session:Mentat_session.Id.t ->
-  cwd:Lpath.Abs.t ->
   environment:(string * string) list ->
   deadline_s:float option ->
   respawns:int ->
-  [ `Settled | `Failed of string ]
+  [ `Settled | `Failed of failure ]
 
 (* The stub keeps the real send's per-target serialization — its own lock
    registry — so an ordering-sensitive engine test observes the primitive's
@@ -1508,20 +1554,21 @@ let materialize t engine ~child =
   | Real b -> materialize b engine ~child
   | Stub _ -> no_processes "materialize"
 
-let supervise t ~session ~cwd ~environment ?deadline_s ?respawns ~on_settled
+let supervise t ~session ~environment ?deadline_s ?respawns ~on_settled
     ~on_failure () =
   match t with
   | Real b ->
-      supervise b ~session ~cwd ~environment ?deadline_s ?respawns ~on_settled
+      supervise b ~session ~environment ?deadline_s ?respawns ~on_settled
         ~on_failure ()
   | Stub { supervise = None; _ } -> no_processes "supervise"
-  | Stub { supervise = Some script; _ } -> (
-      match
-        script ~session ~cwd ~environment ~deadline_s
-          ~respawns:(Option.value respawns ~default:max_respawns)
-      with
+  | Stub { supervise = Some script; _ } ->
+      (match
+         script ~session ~environment ~deadline_s
+           ~respawns:(Option.value respawns ~default:max_respawns)
+       with
       | `Settled -> on_settled ()
-      | `Failed reason -> on_failure ~reason)
+      | `Failed failure -> on_failure failure);
+      `Supervising
 
 let watch t ~session ~on_terminal =
   match t with

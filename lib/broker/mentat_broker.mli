@@ -175,34 +175,53 @@ val materialize : t -> Engine.t -> child:Mentat_session.Id.t -> unit
     re-spawned; a child whose fence holder cannot be identified or signalled
     fails the delegation loudly through [engine]'s seam. *)
 
-type failure_sink = reason:string -> unit
+(** The type for supervision failures. The arm, not its prose, is the
+    contract: a caller that classifies an outcome matches the arm, and
+    {!failure_message} renders the one diagnostic wording. *)
+type failure =
+  | Deadline of float
+      (** The supervision's one clock ([deadline_s], in seconds) fired and
+          the escalation ladder ended whatever still ran. *)
+  | Gave_up of string
+      (** Respawn exhaustion, a refusal, or an unreachable holder; the
+          reason is diagnostic prose. *)
+
+type failure_sink = failure -> unit
 (** The type for the place a given-up supervision's failure lands. Every
     {!val-supervise} names its sink, so a silent failure arm is
     unrepresentable: exhaustion, the deadline, and every refusal all end
     here when they do not end in the settled callback. *)
 
+val failure_message : failure -> string
+(** [failure_message failure] is the one diagnostic wording for [failure] —
+    what the broker's own traces print, and what a caller narrates. *)
+
 val supervise :
   t ->
   session:Mentat_session.Id.t ->
-  cwd:Lpath.Abs.t ->
   environment:(string * string) list ->
   ?deadline_s:float ->
   ?respawns:int ->
   on_settled:(unit -> unit) ->
   on_failure:failure_sink ->
   unit ->
-  unit
-(** [supervise t ~session ~cwd ~environment ~on_settled ~on_failure ()] makes
-    the root session [session] run to its conclusion and answers exactly one
-    of the two sinks, exactly once. [cwd] must be the session's recorded
-    working directory — it is the workspace identity of every dial and the
-    spawned activation's root, and the activation's own boot refuses a
-    mismatch loudly. [environment] is rendered whole as a spawned
-    activation's environment. Non-blocking; idempotent per session: while
-    this broker already runs, observes, or supervises the session, a second
-    call is a no-op whose sinks never fire — the standing supervision owns
-    the outcome. A stopped broker accepts no further supervision; a successor
+  [ `Supervising | `Already_governed | `Stopped ]
+(** [supervise t ~session ~environment ~on_settled ~on_failure ()] makes
+    the root session [session] run to its conclusion. [`Supervising]: this
+    call owns the outcome and answers exactly one of the two sinks, exactly
+    once. [`Already_governed]: an entry — delegated or root — already
+    governs the session and owns the outcome; this call's sinks never
+    fire — observe with {!watch} instead. [`Stopped]: the broker accepts no
+    further supervision and this call's sinks never fire; a successor
     process supervises afresh.
+
+    The activation's working directory is the session's recorded cwd, read
+    from the session document exactly as the send's dial reads it — the
+    store, not the caller, owns that fact, and the activation's own boot
+    asserts it again. A document that cannot be read fails the supervision
+    loudly through [on_failure]. [environment] is rendered whole as a
+    spawned activation's environment. Non-blocking: the probe-spawn-observe
+    work runs on forked fibers.
 
     The fence decides, through the one owner classification the send loop
     uses: a holder serving the session's endpoint is adopted and observed to
@@ -226,9 +245,9 @@ val supervise :
     the supervision's one clock: at its firing the escalation ladder — the
     wire interrupt, a grace, then the signals, against an own process or a
     same-host child server only — ends whatever still runs, and the outcome
-    is [on_failure] naming the deadline (a head found already terminal at
-    the firing settles instead). Without a deadline, a serving holder that
-    never concludes is observed for as long as it holds the fence. *)
+    is [on_failure] with {!failure.Deadline} (a head found already terminal
+    at the firing settles instead). Without a deadline, a serving holder
+    that never concludes is observed for as long as it holds the fence. *)
 
 val watch :
   t ->
@@ -350,11 +369,10 @@ val stop : t -> unit
 val for_tests :
   ?supervise:
     (session:Mentat_session.Id.t ->
-    cwd:Lpath.Abs.t ->
     environment:(string * string) list ->
     deadline_s:float option ->
     respawns:int ->
-    [ `Settled | `Failed of string ]) ->
+    [ `Settled | `Failed of failure ]) ->
   send:
     (origin:Mentat_session.Origin.t option ->
     target:Mentat_session.Id.t ->
@@ -372,12 +390,12 @@ val for_tests :
     observe the primitive's contract.
 
     [supervise], when given, scripts {!val-supervise}: each call hands the
-    full supervision request to the script and fires exactly one of the
-    caller's sinks with its answer — the real verb's outcome contract. The
-    stub holds no table, so a re-supervision reaches the script again,
-    exactly as the real broker re-governs a session whose previous
-    supervision has drained. {!val-children} answers the empty list: the stub
-    supervises no process.
+    full supervision request to the script, fires exactly one of the
+    caller's sinks with its answer, and returns [`Supervising] — the real
+    verb's outcome contract. The stub holds no table, so a re-supervision
+    reaches the script again, exactly as the real broker re-governs a
+    session whose previous supervision has drained. {!val-children} answers
+    the empty list: the stub supervises no process.
 
     Every process-facing operation left unstubbed — {!materialize},
     {!val-watch}, {!cancel}, {!rediscover}, and {!val-supervise} without a

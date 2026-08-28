@@ -95,3 +95,18 @@ whose interrupt it could carry. On a root it is refused loudly.
   $ mentat serve-session --session root-mail --interrupted --cwd "$PWD/work"
   mentat: session root-mail has no delegation lineage; --interrupted applies only to a delegated child
   [1]
+
+A recorded run policy the configuration layer refuses fails the boot
+loudly — the session never serves under defaults the grant never named,
+and no socket is announced. The document member is rewritten directly, as
+a creating host would have recorded it.
+
+  $ mentat session create --id bad-policy --cwd "$PWD/work"
+  bad-policy
+  $ BAD="$XDG_DATA_HOME/mentat/sessions/bad-policy/session.json"
+  $ V=$(mentat_cram json .version "$BAD")
+  $ M=$(mentat_cram json .metadata "$BAD" | sed 's/}$/,"run_policy":{"sandbox":"bogus-spelling"}}/')
+  $ printf '{"version":%s,"id":"bad-policy","metadata":%s,"events":[]}' "$V" "$M" > "$BAD"
+  $ mentat serve-session --session bad-policy --cwd "$PWD/work"
+  mentat: session bad-policy: recorded run policy: sandbox: unknown sandbox mode: bogus-spelling
+  [1]

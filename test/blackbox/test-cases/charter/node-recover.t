@@ -81,7 +81,9 @@ first pass performs the boot's one open-PR listing, finds the settled run
 with findings and no egress, and re-enters the publisher only. The ambient
 base URL is poisoned again: the flags are the node's only configuration.
 MENTAT_DAEMON_MAX_IDLE is one second — the enabled webhook charter pins
-residency, so the backstop never fires.
+residency, so the backstop never fires. The spawn grace is zeroed: this
+orphan is seconds old by construction, and the real minute-long grace
+exists to keep a pass off a run whose activation is still staging.
 
   $ cat > github-recover.jsonl <<EOF
   > {"expect": {"request_line": "GET /repos/acme/widgets/pulls?state=open&per_page=100 HTTP/1.1"}, "http": {"status": 200, "json": [{"number": 7, "draft": false, "author_association": "OWNER", "head": {"sha": "$HEAD_SHA"}, "base": {"ref": "main"}}]}}
@@ -97,6 +99,7 @@ residency, so the backstop never fires.
   $ unset MENTAT_CHARTER_GIT_URL
   $ trap stop_daemon EXIT
   $ export MENTAT_DAEMON_MAX_IDLE=1
+  $ export MENTAT_CHARTER_SPAWN_GRACE=0
   $ mentatd --github-base-url "$GH_URL" --charter-git-base "$PWD/remotes" \
   >   >daemon-serve.out 2>&1 &
   $ MENTAT_DAEMON_PID=$!

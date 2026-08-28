@@ -97,10 +97,12 @@ let run_turn ~id =
     ~input:(Session.Turn.Input.user [ Llm.Content.text "Review the diff." ])
     ~max_steps:32 ~contract ()
 
-(* One completed turn whose provider response carries [calls] and whose
+(* One finished turn whose provider response carries [calls] and whose
    terminating structured-output claim, when [answer] is given, records it —
-   the event shape [dispatch_structured_output] commits. *)
-let completed_turn ~id ?answer () =
+   the event shape [dispatch_structured_output] commits. [outcome] defaults
+   to completed; the discriminating extraction case ends otherwise. *)
+let completed_turn ~id ?answer
+    ?(outcome = Session.Turn.Outcome.completed) () =
   let turn = run_turn ~id in
   let turn_id = Session.Turn.id turn in
   let claim =
@@ -153,10 +155,7 @@ let completed_turn ~id ?answer () =
             assistant));
   ]
   @ claims
-  @ [
-      Session.Event.turn_finished ~turn:turn_id
-        Session.Turn.Outcome.completed;
-    ]
+  @ [ Session.Event.turn_finished ~turn:turn_id outcome ]
 
 let session_of events =
   let metadata =
@@ -181,6 +180,18 @@ let findings_extraction () =
     None
     (Charter_fire.findings_of_session
        (session_of (completed_turn ~id:"t1" ())));
+  equal (option string)
+    ~msg:"a head that did not complete has none, claim or not" None
+    (Charter_fire.findings_of_session
+       (session_of
+          (completed_turn ~id:"t1" ~answer:(answer_json "s")
+             ~outcome:Session.Turn.Outcome.step_limit ())));
+  equal (option string)
+    ~msg:"a failed head has none, claim or not" None
+    (Charter_fire.findings_of_session
+       (session_of
+          (completed_turn ~id:"t1" ~answer:(answer_json "s")
+             ~outcome:(Session.Turn.Outcome.failed ~message:"x") ())));
   equal (option string) ~msg:"an unstarted session has none" None
     (Charter_fire.findings_of_session (session_of []));
   equal (option string) ~msg:"the head turn's answer wins"

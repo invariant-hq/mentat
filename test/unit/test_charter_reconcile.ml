@@ -169,14 +169,14 @@ let with_estate name fn =
   Mentat_broker.stop broker;
   result
 
-let loaded_of dirs ~name ~enabled =
+let loaded_of ?(digest = "d1") ?(output_schema = "") dirs ~name ~enabled =
   {
     Charter_store.Loaded.name;
     dir = User_dirs.charter_dir dirs name;
     charter = test_charter ~name ~enabled;
-    digest = "d1";
+    digest;
     prompt = "";
-    output_schema = "";
+    output_schema;
     ingress_id = None;
   }
 
@@ -277,6 +277,37 @@ let orphan_settles () =
   equal int ~msg:"a second pass finds nothing owed" 3
     (List.length (read_back dirs ~name))
 
+(* The spawn gap: a pending run younger than the spawn grace is not
+   watched — its activation may still be staging, and a free fence over an
+   unfinished head would read holder-died and falsely settle a run that
+   then completes normally. An old record settles in the same pass. *)
+let a_young_pending_run_is_left_to_the_next_pass () =
+  with_estate "young" @@ fun ~env ~dirs ~said:_ ~await ->
+  let name = "pr-review" in
+  let young = "github:acme/widgets#6@abc6666:opened" in
+  let old = "github:acme/widgets#7@abc7777:opened" in
+  let loaded = loaded_of dirs ~name ~enabled:false in
+  append dirs ~name
+    (spawned ~at:(Unix.gettimeofday ()) ~identity:young ~digest:"d1"
+       "run-young");
+  append dirs ~name (spawned ~at:1. ~identity:old ~digest:"d1" "run-old");
+  let reaped_for session receipts =
+    List.exists
+      (fun (r : Receipt.t) ->
+        match r.Receipt.kind with
+        | Receipt.Kind.Disposition
+            (Receipt.Disposition.Reaped { session = named; _ }) ->
+            String.equal named session
+        | _ -> false)
+      receipts
+  in
+  let repo_for _ = fail "a disabled charter must not build a repo" in
+  Charter_reconcile.reconcile env ~repo_for loaded;
+  await ~msg:"the old orphan settles" (fun () ->
+      reaped_for "run-old" (read_back dirs ~name));
+  equal bool ~msg:"a run spawned now is left to the next pass" false
+    (reaped_for "run-young" (read_back dirs ~name))
+
 let sweep_failure_is_narrated () =
   with_estate "sweep" @@ fun ~env ~dirs ~said ~await ->
   let name = "pr-review" in
@@ -315,6 +346,7 @@ let lost_alert_is_repaired () =
   with_estate "repair" @@ fun ~env ~dirs ~said:_ ~await:_ ->
   let name = "pr-review" in
   let failed = "github:acme/widgets#3@abc9999:head" in
+  let parked = "github:acme/widgets#6@abccccc:head" in
   let stopped = "github:acme/widgets#4@abcaaaa:head" in
   let clean = "github:acme/widgets#5@abcbbbb:head" in
   let loaded = loaded_of dirs ~name ~enabled:false in
@@ -322,19 +354,25 @@ let lost_alert_is_repaired () =
     (reaped ~exit:255 ~head:Receipt.Head.Missing ~identity:failed ~digest:"d1"
        "s-f");
   append dirs ~name
+    (reaped ~exit:255 ~head:Receipt.Head.Parked ~identity:parked ~digest:"d1"
+       "s-p");
+  append dirs ~name
     (reaped ~exit:130 ~head:Receipt.Head.Interrupted ~identity:stopped
        ~digest:"d1" "s-s");
   append dirs ~name (reaped ~identity:clean ~digest:"d1" "s-c");
   let repo_for _ = fail "a disabled charter must not build a repo" in
   Charter_reconcile.reconcile env ~repo_for loaded;
   let receipts = read_back dirs ~name in
-  equal int ~msg:"exactly the failed reap is repaired with an alert" 1
+  equal int ~msg:"exactly the failed and parked reaps are repaired" 2
     (count is_alert receipts);
   equal bool ~msg:"the repaired alert names the failed identity" true
     (Receipt.alerted ~digest:"d1" ~identity:failed
        ~transition:Receipt.Transition.Failed receipts);
+  equal bool ~msg:"a parked head's repaired alert carries parked" true
+    (Receipt.alerted ~digest:"d1" ~identity:parked
+       ~transition:Receipt.Transition.Parked receipts);
   Charter_reconcile.reconcile env ~repo_for loaded;
-  equal int ~msg:"the repair is idempotent across passes" 1
+  equal int ~msg:"the repair is idempotent across passes" 2
     (count is_alert (read_back dirs ~name))
 
 (* The delivery re-drive: an admitted delivery with no disposition is
@@ -445,6 +483,210 @@ let settled_without_findings_closes () =
   equal int ~msg:"the closed record re-enters nothing" (List.length receipts)
     (List.length (read_back dirs ~name))
 
+(* The adoption arm. A run session that already exists under the derived id
+   with matching trigger provenance is a commitment a previous pass created
+   and lost before its spawned line: the next fire adopts it — the re-mail
+   lands the same derived entry id and the admission's recorded-enqueue
+   dedup absorbs a delivered entry — and drives on to the supervised settle
+   and the spawned/reaped record, spawning nothing for a run that already
+   concluded. A mismatched digest squats the id and is disposed
+   already-exists: nothing mailed, nothing spawned. *)
+
+let hex_digest = "aaaabbbbccccdddd"
+
+let run_contract =
+  lazy
+    (Mentat_session.Contract.make ~mode:Mentat_session.Contract.Mode.Review
+       ~model:
+         (Mentat_llm.Model.make
+            ~provider:(Mentat_llm.Provider.make "openai")
+            ~api:(Mentat_llm.Model.Api.make "responses")
+            ~id:"gpt-5")
+       ~declarations:[] ~policy:Mentat_permission.Policy.default
+       ~review:Mentat_permission.Review_behavior.Enforce
+       ~sandbox:Mentat_sandbox.Identity.not_requested ())
+
+(* A settled run journal whose one turn consumed the trigger's derived mail
+   entry, exactly as a completed run leaves it. *)
+let settled_run_events ~source ~digest ~key =
+  let entry_id = Charter_fire.trigger_mail_id ~source ~digest ~key in
+  let entry =
+    Mentat_session.Queue.Entry.make
+      ~origin:(Mentat_session.Origin.trigger ~source ~digest ~key)
+      ~id:entry_id
+      ~input:[ Mentat_llm.Content.text "review the diff" ]
+      ()
+  in
+  let turn =
+    Mentat_session.Turn.make
+      ~id:(Mentat_session.Turn.Id.of_string "turn-1")
+      ~origin:
+        (Mentat_session.Turn.Origin.triggered ~entry:entry_id ~source ~digest
+           ~key ())
+      ~input:(Mentat_session.Turn.Input.user_text "review the diff")
+      ~max_steps:8
+      ~contract:(Lazy.force run_contract) ()
+  in
+  let claim =
+    Mentat_session.Provider_request.Started.make
+      ~turn:(Mentat_session.Turn.id turn)
+      ~request_digest:(Mentat_digest.string "req-1")
+  in
+  [
+    Mentat_session.Event.queue_updated
+      (Mentat_session.Queue.Update.enqueued entry);
+    Mentat_session.Event.turn_started turn;
+    Mentat_session.Event.provider_requested claim;
+    Mentat_session.Event.provider_settled
+      (Mentat_session.Provider_request.Settled.responded
+         ~id:(Mentat_session.Provider_request.Started.id claim)
+         (Mentat_llm.Response.make
+            ~model:
+              (Mentat_llm.Model.make
+                 ~provider:(Mentat_llm.Provider.make "openai")
+                 ~api:(Mentat_llm.Model.Api.make "responses")
+                 ~id:"gpt-5")
+            (Mentat_llm.Message.Assistant.text "Done.")));
+    Mentat_session.Event.turn_finished
+      ~turn:(Mentat_session.Turn.id turn)
+      Mentat_session.Turn.Outcome.completed;
+  ]
+
+let rec ensure_dir path =
+  if not (Sys.file_exists path) then begin
+    ensure_dir (Filename.dirname path);
+    Unix.mkdir path 0o700
+  end
+
+let create_run_session env ~id ~cwd ~triggered_from ~events =
+  let metadata =
+    Mentat_session.Metadata.make ~triggered_from ~cwd
+      ~created_at:(Mentat_session.Time.of_unix_ms 0L)
+      ~updated_at:(Mentat_session.Time.of_unix_ms 0L)
+      ()
+  in
+  let session =
+    match
+      Mentat_session.make ~id:(Mentat_session.Id.of_string id) ~metadata
+        ~events
+    with
+    | Ok session -> session
+    | Error e -> failf "run session: %s" (Mentat_session.Error.message e)
+  in
+  match Mentat_store.Session.create env.Charter_fire.store session with
+  | Ok (_ : Mentat_store.Session.Document.t) -> ()
+  | Error e ->
+      failf "store run session: %s" (Mentat_store.Session.Error.message e)
+
+let event_count env ~id =
+  match
+    Mentat_store.Session.load env.Charter_fire.store
+      (Mentat_session.Id.of_string id)
+  with
+  | Ok document ->
+      List.length
+        (Mentat_session.events
+           (Mentat_store.Session.Document.session document))
+  | Error e ->
+      failf "load run session: %s" (Mentat_store.Session.Error.message e)
+
+let count_disposition pred receipts =
+  count
+    (fun (r : Receipt.t) ->
+      match r.Receipt.kind with
+      | Receipt.Kind.Disposition d -> pred d
+      | _ -> false)
+    receipts
+
+let dispose_ok env ~repo loaded ~event =
+  match Charter_fire.dispose env ~repo loaded ~event ~check_head:false with
+  | Ok Charter_fire.Disposed -> ()
+  | Ok Charter_fire.Interrupted -> fail "nothing requested a stop"
+  | Error e -> failf "dispose: %s" e
+
+let adoption_re_mails_and_drives () =
+  with_estate "adopt" @@ fun ~env ~dirs ~said ~await:_ ->
+  let name = "pr-review" in
+  let loaded =
+    loaded_of ~digest:hex_digest ~output_schema:{|{"type":"object"}|} dirs
+      ~name ~enabled:true
+  in
+  let ev = event () in
+  let identity = Event.Identity.of_pull_request ev in
+  let id = Event.Identity.to_string identity in
+  claim dirs ~name ~digest:hex_digest identity;
+  let session = Run_id.mint ~policy_digest:hex_digest identity in
+  let run_root =
+    Filename.concat (User_dirs.charter_runs_dir dirs name) session
+  in
+  ensure_dir run_root;
+  create_run_session env ~id:session
+    ~cwd:(Lpath.Abs.of_string_exn (Unix.realpath run_root))
+    ~triggered_from:
+      (Mentat_session.Metadata.Triggered_from.make ~source:name
+         ~digest:hex_digest ~key:id)
+    ~events:(settled_run_events ~source:name ~digest:hex_digest ~key:id);
+  let before = event_count env ~id:session in
+  dispose_ok env ~repo:(fake_repo ()) loaded ~event:ev;
+  let receipts = read_back dirs ~name in
+  equal int ~msg:"the adoption lands the spawned receipt" 1
+    (count_disposition
+       (function
+         | Receipt.Disposition.Spawned { session = s } ->
+             String.equal s session
+         | _ -> false)
+       receipts);
+  equal int ~msg:"the settled head reaps exit 0" 1
+    (count_disposition
+       (function
+         | Receipt.Disposition.Reaped { session = s; exit; head; _ } ->
+             String.equal s session && exit = 0
+             && Receipt.Head.equal head Receipt.Head.Settled
+         | _ -> false)
+       receipts);
+  equal int ~msg:"the re-mail lands the same entry once: no new fact" before
+    (event_count env ~id:session);
+  equal bool ~msg:"a concluded run spawns nothing" false
+    (List.exists
+       (fun line -> String.ends_with ~suffix:"unit tests spawn nothing" line)
+       !said);
+  dispose_ok env ~repo:(fake_repo ()) loaded ~event:ev;
+  equal int ~msg:"a second dispose answers dup off the record alone" 1
+    (count_disposition
+       (function Receipt.Disposition.Dup -> true | _ -> false)
+       (read_back dirs ~name));
+  equal int ~msg:"the dup mails nothing" before (event_count env ~id:session)
+
+let a_squatting_session_is_disposed_already_exists () =
+  with_estate "squat" @@ fun ~env ~dirs ~said:_ ~await:_ ->
+  let name = "pr-review" in
+  let loaded =
+    loaded_of ~digest:hex_digest ~output_schema:{|{"type":"object"}|} dirs
+      ~name ~enabled:true
+  in
+  let ev = event () in
+  let identity = Event.Identity.of_pull_request ev in
+  let id = Event.Identity.to_string identity in
+  claim dirs ~name ~digest:hex_digest identity;
+  let session = Run_id.mint ~policy_digest:hex_digest identity in
+  create_run_session env ~id:session
+    ~cwd:(Lpath.Abs.of_string_exn "/tmp")
+    ~triggered_from:
+      (Mentat_session.Metadata.Triggered_from.make ~source:name
+         ~digest:"ffffeeeeddddcccc" ~key:id)
+    ~events:[];
+  dispose_ok env ~repo:(fake_repo ()) loaded ~event:ev;
+  let receipts = read_back dirs ~name in
+  equal int ~msg:"a mismatched digest is disposed already-exists" 1
+    (count_disposition
+       (function Receipt.Disposition.Already_exists -> true | _ -> false)
+       receipts);
+  equal int ~msg:"nothing was spawned for the squatted id" 0
+    (count_disposition
+       (function Receipt.Disposition.Spawned _ -> true | _ -> false)
+       receipts);
+  equal int ~msg:"the squatter was not mailed" 0 (event_count env ~id:session)
+
 (* The one-pass gate: the after-reap re-entry tries the gate and yields to
    a pass in flight instead of parking its caller; a freed gate admits the
    next re-entry. *)
@@ -490,6 +732,8 @@ let () =
   run "mentat.charter_reconcile"
     [
       test "an orphaned run settles honestly" orphan_settles;
+      test "a young pending run is left to the next pass"
+        a_young_pending_run_is_left_to_the_next_pass;
       test "a repo failure narrates and never raises" sweep_failure_is_narrated;
       test "a lost failure alert is repaired once" lost_alert_is_repaired;
       test "an open delivery re-drives through dispose" open_delivery_redrives;
@@ -499,5 +743,9 @@ let () =
         disabled_deliveries_close;
       test "a settled run without findings closes"
         settled_without_findings_closes;
+      test "an adoption re-mails the same entry and drives on"
+        adoption_re_mails_and_drives;
+      test "a squatting session is disposed already-exists"
+        a_squatting_session_is_disposed_already_exists;
       test "the re-entry yields to a pass in flight" reentry_yields_to_a_pass;
     ]
