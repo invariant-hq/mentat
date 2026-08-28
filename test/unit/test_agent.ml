@@ -4725,8 +4725,7 @@ let a_pending_notice_survives_the_compaction_boundary () =
   in
   let config _ ~latest_model:_ =
     Ok
-      (Agent.Config.make ~model ~continuation_turn_limit:None
-         ~compaction_pressure_tokens:1000 ())
+      (Agent.Config.make ~model ~compaction_pressure_tokens:1000 ())
   in
   let workspace =
     workspace_noticing_on_drain ~on_drain:2

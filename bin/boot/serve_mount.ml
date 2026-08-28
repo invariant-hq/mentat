@@ -191,7 +191,11 @@ let confined ~store ~cache ~served (driver : Driver.t) : Driver.t =
     }
   in
   let workspace : Driver.Workspace.t =
-    { Driver.Workspace.glance = (fun () -> cone_refused ()) }
+    {
+      Driver.Workspace.glance = (fun () -> cone_refused ());
+      dune = (fun () -> cone_refused ());
+      dune_control = (fun ~op:_ -> cone_refused ());
+    }
   in
   { Driver.session; accounts; settings; lifecycle; review; workspace }
 

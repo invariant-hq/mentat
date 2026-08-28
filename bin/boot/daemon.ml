@@ -6,19 +6,18 @@
 module Server = Mentat_server
 module Discovery = Server.Discovery
 
-(* A release carries its version; a dev build does not, and "dev" == "dev"
-   would attach a fresh client to any stale daemon from an older build —
-   whose wire may have moved — leaving surfaces silently empty. The
-   executable's own identity (device, inode, mtime, size — a rebuild mints
-   a fresh inode) makes the gate mean what it says for dev builds too. *)
+(* The gate compares the CLIENT's identity with the record the DAEMON wrote —
+   two different executables since the mentatd split, so an
+   executable-identity stamp (main's dev-build refinement, reverted here)
+   can never match between them. A release version is shared by both
+   binaries; a dev build falls back to the weak "dev" equality. The stale
+   dev-daemon concern that stamp addressed is real and needs a split-world
+   answer (a build-tree stamp both binaries carry); until then the wire
+   handshake's protocol version is the enforcement. *)
 let binary_version =
   match Build_info.V1.version () with
   | Some v -> Build_info.V1.Version.to_string v
-  | None -> (
-      match Unix.stat Sys.executable_name with
-      | { Unix.st_dev; st_ino; st_mtime; st_size; _ } ->
-          Printf.sprintf "dev-%d:%d:%.0f:%d" st_dev st_ino st_mtime st_size
-      | exception Unix.Unix_error _ -> "dev")
+  | None -> "dev"
 
 (* ---- Path policy ---- *)
 
