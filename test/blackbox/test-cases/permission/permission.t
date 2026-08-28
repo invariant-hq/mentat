@@ -44,6 +44,14 @@ identical later access asks again.
   $ permission_first=$(mentat_cram json .decision_id first.waiting)
   $ wait_fake_server
 
+A parked session's agent holds its fence mid-turn, and the json export of
+a served session routes through that agent's own export cone — which
+refuses while the turn is active, naming the turn.
+
+  $ mentat session export permission-flow --format json --cwd "$PWD" 2>&1 | mentat_cram subst 't-[0-9]{13}-[0-9a-f]{4}' 't-TURN'
+  mentat: turn is still active: t-TURN
+  [1]
+
   $ cat > permission-once.jsonl <<'JSONL'
   > {"expect":{"body_contains":["function_call_output","permission-call-1","permission sentinel"]},"response":{"id":"permission-once-1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"permission-once-item","call_id":"permission-call-2","name":"shell","arguments":"{\"command\":\"cat reviewed.txt\"}"}]}}
   > JSONL

@@ -71,7 +71,7 @@ written outside the workspace so the turns drain no notices.
   $ wait_for_file child-started
 
 The child's own id passes the confinement and reaches the live driver,
-whose Busy answer proves the contact (the child is mid-turn).
+whose active-turn refusal proves the contact (the child is mid-turn).
 
   $ mentat run resume "$CHILD" "DIRECT" --json --cwd "$PWD/work" 2>&1 | censor
   {"schema_version":1,"type":"run.started","session_id":"sub-$DIGEST1","sandbox":{"mode":"danger-full-access","read":"project","network":"restricted"},"trusted":true}

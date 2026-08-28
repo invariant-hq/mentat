@@ -76,3 +76,32 @@ the turn completed on the model's answer.
   returned
   $ grep '"type":"turn.finished"' resume.out | mentat_cram json .outcome
   completed
+
+A background process still running when a later turn starts is announced
+to the model: the standing context note names the handle and the stop
+affordance. The second run lands inside the first agent's raised linger —
+no pacing, so the same agent and its live registry serve the resumed turn —
+and the [expect] guard asserts the note reached the request.
+
+  $ export MENTAT_CHILD_LINGER=10
+  $ cat > note-start.jsonl <<'JSONL'
+  > {"response":{"id":"n1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"m1","call_id":"f1","name":"shell","arguments":"{\"command\":\"printf standing; sleep 30\",\"background\":true}"}]}}
+  > {"response":{"id":"n2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"standing started"}]}]}}
+  > JSONL
+  $ start_fake_openai note-start.jsonl capture-note port-note
+  $ mentat run start --permission bypass "start a standing process" --cwd "$PWD" --id note-session >/dev/null 2>&1
+  $ wait_fake_server
+  $ cat > note-resume.jsonl <<'JSONL'
+  > {"expect":{"body_contains":["Background shell processes still running in this session","shell_kill(handle)","bg_1"]},"response":{"id":"n3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"noted"}]}]}}
+  > JSONL
+  $ start_fake_openai note-resume.jsonl capture-note2 port-note2 --port "$(cat port-note)"
+  $ mentat run resume note-session "anything else?" --cwd "$PWD" 2>/dev/null
+  noted
+  $ wait_fake_server
+
+Wind the raised linger down explicitly: a graceful stop removes the
+endpoint (the detached sleep survives the agent, per the honesty laws, and
+ends on its own).
+
+  $ kill "$(head -n 1 "$XDG_DATA_HOME/mentat/sessions/note-session/run.lock" | mentat_cram json .pid)"
+  $ wait_child_exit note-session

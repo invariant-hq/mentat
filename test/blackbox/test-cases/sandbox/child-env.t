@@ -11,7 +11,7 @@ every route receives the same constructed environment.
   $ use_trusted_workspace
   $ cat > env.jsonl <<'JSONL'
   > {"response":{"id":"e1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"i1","call_id":"ec1","name":"shell","arguments":"{\"command\":\"env | grep -E '^(DUNE_CACHE|DUNE_PROFILE|DUNE_CONFIG__BACKGROUND_DIGESTS|OCAMLPARAM|DUNE_ACTION_TRACE_DIR|INSIDE_DUNE|AMBIENT_SECRET)=' | sort\"}"}]}}
-  > {"expect":{"body_contains":["function_call_output","ec1"]},"response":{"id":"e2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}}
+  > {"expect":{"body_contains":["function_call_output","ec1","DUNE_CACHE=enabled-except-user-rules"]},"response":{"id":"e2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}}
   > JSONL
   $ start_fake_openai env.jsonl
 
