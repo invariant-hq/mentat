@@ -51,6 +51,7 @@ the pid answers a signal probe while the server lingers.
 
   $ CHILD=$(grep -oh 'session sub-[0-9a-f]*' capture/request-*.json | head -n 1 | cut -d' ' -f2)
   $ LOCK="$XDG_DATA_HOME/mentat/sessions/$CHILD/run.lock"
+  $ mentat_cram wait-file "$LOCK"
   $ head -n 1 "$LOCK" | mentat_cram json .label
   serve-session
   $ CHILD_PID=$(head -n 1 "$LOCK" | mentat_cram json .pid)
