@@ -13,7 +13,8 @@
     {!Reads} is a small set of pull-request queries. {!Webhook} verifies a
     webhook delivery's signature over the raw body in constant time.
 
-    NAMING: opam release name TBD; [github] is taken upstream. *)
+    An internal library: no opam release is planned, so the name
+    stays [github] by the maintainer's ruling. *)
 
 module Api = Api
 module App = App
