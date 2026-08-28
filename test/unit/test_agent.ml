@@ -1274,6 +1274,105 @@ let append_or_fail ~what events session =
   | Ok session -> session
   | Error error -> failf "%s: %a" what Session.Error.pp error
 
+(* The head-claim projection: the last structured-output claim of the head
+   turn, and only when that turn completed. *)
+let catalog_claim_reads_the_completed_head () =
+  let contract = admission_contract () in
+  let status s = Json.object' [ (Json.name "status", Json.string s) ] in
+  let claimed_turn ?(outcome = Session.Turn.Outcome.completed) ?(claims = [])
+      ~id () =
+    let turn =
+      Session.Turn.make ~id:(tid id) ~origin:Session.Turn.Origin.User
+        ~input:(Session.Turn.Input.user_text "work")
+        ~max_steps:1 ~contract ()
+    in
+    let turn_id = Session.Turn.id turn in
+    let calls =
+      List.mapi
+        (fun ordinal input ->
+          Llm.Tool.Call.make
+            ~id:(Printf.sprintf "call-%s-%d" id ordinal)
+            ~name:Catalog.output_tool_name ~input ())
+        claims
+    in
+    let claim call =
+      let input = Llm.Tool.Call.input call in
+      let started =
+        Session.Tool_claim.Started.make ~turn:turn_id
+          ~stage:Mentat_tool.Stage.Direct ~call ~input ~requests:[]
+      in
+      let settled =
+        Session.Tool_claim.Settled.returned
+          ~id:(Session.Tool_claim.Started.id started)
+          (Mentat_tool.Result.completed
+             ~output:(Mentat_tool.Output.make ~text:"recorded" ~json:input ())
+             ())
+      in
+      [
+        Session.Event.tool_claimed started; Session.Event.tool_settled settled;
+      ]
+    in
+    let provider =
+      Session.Provider_request.Started.make ~turn:turn_id
+        ~request_digest:(Mentat_digest.string ("req-" ^ id))
+    in
+    let response =
+      match calls with
+      | [] -> plain_response "ok"
+      | calls ->
+          Llm.Response.make ~model
+            (Llm.Message.Assistant.make
+               (List.map Llm.Message.Assistant.tool_call calls))
+    in
+    [
+      Session.Event.turn_started turn;
+      Session.Event.provider_requested provider;
+      Session.Event.provider_settled
+        (Session.Provider_request.Settled.responded
+           ~id:(Session.Provider_request.Started.id provider)
+           response);
+    ]
+    @ List.concat_map claim calls
+    @ [ Session.Event.turn_finished ~turn:turn_id outcome ]
+  in
+  let session_of events =
+    Session.create ~id:(sid "claims") ~cwd
+      ~created_at:(Session.Time.of_unix_ms 1L)
+      ()
+    |> append_or_fail ~what:"claim fixture" events
+  in
+  let read = Option.equal Jsont.Json.equal in
+  is_true ~msg:"the completed head's claim is read"
+    (read
+       (Some (status "done"))
+       (Catalog.claim
+          (session_of (claimed_turn ~id:"t1" ~claims:[ status "done" ] ()))));
+  is_true ~msg:"the last claim of the head turn wins"
+    (read
+       (Some (status "late"))
+       (Catalog.claim
+          (session_of
+             (claimed_turn ~id:"t1"
+                ~claims:[ status "early"; status "late" ]
+                ()))));
+  is_true ~msg:"a completed head without a claim has none"
+    (read None (Catalog.claim (session_of (claimed_turn ~id:"t1" ()))));
+  is_true ~msg:"a head that did not complete has none, claim or not"
+    (read None
+       (Catalog.claim
+          (session_of
+             (claimed_turn ~id:"t1"
+                ~claims:[ status "done" ]
+                ~outcome:Session.Turn.Outcome.step_limit ()))));
+  is_true ~msg:"an earlier turn's claim is never read for a claimless head"
+    (read None
+       (Catalog.claim
+          (session_of
+             (claimed_turn ~id:"t1" ~claims:[ status "done" ] ()
+             @ claimed_turn ~id:"t2" ()))));
+  is_true ~msg:"an unstarted session has none"
+    (read None (Catalog.claim (session_of [])))
+
 (* The step limit is a runaway backstop, not a verdict that the work is over: a
    turn that reaches it is owed one wrap-up turn, with nothing else queued.
    That wind-down turn carries its own origin, which is what stops a wind-down
@@ -6699,6 +6798,8 @@ let () =
           test "spawn rejects an unknown role" spawn_rejects_an_unknown_role;
           test "engine verb declaration drift blocks dispatch"
             engine_verb_declaration_drift_blocks_dispatch;
+          test "the head-claim projection reads the completed head only"
+            catalog_claim_reads_the_completed_head;
         ];
       group "pure: config, env, errors"
         [

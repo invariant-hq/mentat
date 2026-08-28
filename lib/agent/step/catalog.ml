@@ -127,6 +127,32 @@ end
 type t = { tools : Mentat_tool.t list; verbs : Verb.t list }
 
 let output_tool_name = "structured_output"
+
+(* The record itself, never a captured stream: the input of the last
+   [structured_output] claim in the head turn, and only when that turn
+   completed, since completion is what proves the claim was the
+   schema-conforming terminating answer. *)
+let claim session =
+  let state = Mentat_session.state session in
+  match Mentat_session.State.settled_head state with
+  | Some (turn, Some Mentat_session.Turn.Outcome.Completed) ->
+      let head = Mentat_session.Turn.id turn in
+      List.fold_left
+        (fun acc (started, _settled) ->
+          if
+            Mentat_session.Turn.Id.equal
+              (Mentat_session.Tool_claim.Started.turn started)
+              head
+            && String.equal
+                 (Mentat_llm.Tool.Call.name
+                    (Mentat_session.Tool_claim.Started.call started))
+                 output_tool_name
+          then Some (Mentat_session.Tool_claim.Started.input started)
+          else acc)
+        None
+        (Mentat_session.State.tool_claims state)
+  | Some (_, _) | None -> None
+
 let tool_name tool = Mentat_llm.Tool.name (Mentat_tool.declaration tool)
 
 let is_verb_name name =

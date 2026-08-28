@@ -105,38 +105,16 @@ let sweep_events (arm : Routine.Trigger.Webhook.t) ~repo prs =
           })
         prs
 
-(* The findings document, read from the run's journal — the record itself,
-   never a captured stream: the input of the last [structured_output] claim
-   in the head turn, and only when that turn completed, since completion is
-   what proves the claim was the schema-conforming terminating answer. *)
+(* The findings document, read from the run's journal: the shared head-claim
+   projection ([Mentat_agent.Catalog.claim]), minified to the byte form the
+   publication children read on stdin. *)
 let findings_of_session session =
-  let state = Mentat_session.state session in
-  match Mentat_session.State.settled_head state with
-  | Some (turn, Some Mentat_session.Turn.Outcome.Completed) -> (
-      let head = Mentat_session.Turn.id turn in
-      let answer =
-        List.fold_left
-          (fun acc (started, _settled) ->
-            if
-              Mentat_session.Turn.Id.equal
-                (Mentat_session.Tool_claim.Started.turn started)
-                head
-              && String.equal
-                   (Mentat_llm.Tool.Call.name
-                      (Mentat_session.Tool_claim.Started.call started))
-                   Mentat_agent.Catalog.output_tool_name
-            then Some (Mentat_session.Tool_claim.Started.input started)
-            else acc)
-          None
-          (Mentat_session.State.tool_claims state)
-      in
-      match answer with
-      | None -> None
-      | Some json -> (
-          match Jsont_bytesrw.encode_string Jsont.json json with
-          | Ok minified -> Some minified
-          | Error _ -> None))
-  | Some (_, _) | None -> None
+  match Mentat_agent.Catalog.claim session with
+  | None -> None
+  | Some json -> (
+      match Jsont_bytesrw.encode_string Jsont.json json with
+      | Ok minified -> Some minified
+      | Error _ -> None)
 
 let findings_of_journal env ~session =
   match

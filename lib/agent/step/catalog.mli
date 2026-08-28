@@ -72,6 +72,15 @@ val output_tool_name : string
     reserved here so no executable tool can claim it, keeping the request's
     [declarations @ [output_tool]] free of a duplicate name. *)
 
+val claim : Mentat_session.t -> Jsont.json option
+(** [claim session] is what [session]'s head turn declared: the input of the
+    last {!output_tool_name} claim in the last accepted turn, read from the
+    journal, and only when that turn completed — completion is what proves
+    the claim was the schema-conforming terminating answer. [None] while a
+    turn is active, when the head turn ended any other way, or when it made
+    no structured-output claim. The one shared head-claim read; each consumer
+    interprets the JSON under its own schema. *)
+
 type t
 (** The type for one exact validated dispatch vocabulary. Invariant: executable
     tool names and engine verbs are each unique, and no executable name collides
