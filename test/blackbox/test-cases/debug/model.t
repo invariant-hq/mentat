@@ -26,5 +26,5 @@ The JSON view carries the decisions under one envelope.
 An unknown provider is a usage error (exit 2).
 
   $ mentat debug model --model bogus/nope 2>&1
-  mentat: unknown provider "bogus"; known providers: openai, anthropic, google, local, ollama
+  mentat: unknown provider "bogus"; known providers: openai, anthropic, google, local, ollama, opencode-go
   [2]

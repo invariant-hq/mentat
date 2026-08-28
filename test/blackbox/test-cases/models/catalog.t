@@ -31,6 +31,18 @@ provider reads [ready].
   local/gpt-oss-20b              stable   131072   -            ready
   local/devstral-small-2         stable   393216   -            ready
   local/qwen3.6-35b              stable   262144   -            ready
+  ollama/gpt-oss:20b             stable   -        -            ready
+  opencode-go/kimi-k2.7-code *   stable   262144   0.95/4       sign-in
+  opencode-go/kimi-k3            stable   1048576  3/15         sign-in
+  opencode-go/glm-5.3            stable   1000000  1.4/4.4      sign-in
+  opencode-go/deepseek-v4-pro    stable   1000000  1.32/3.96    sign-in
+  opencode-go/deepseek-v4-flash  stable   1000000  0.44/1.32    sign-in
+  opencode-go/mimo-v2.5-pro      stable   1048576  0.435/0.87   sign-in
+  opencode-go/mimo-v2.5          stable   1000000  0.14/0.28    sign-in
+  opencode-go/hy3                stable   256000   0.14/0.58    sign-in
+  opencode-go/minimax-m3         stable   1000000  0.3/1.2      sign-in
+  opencode-go/qwen3.8-max        stable   1000000  2/6          sign-in
+  opencode-go/qwen3.7-plus       stable   1000000  0.4/1.6      sign-in
   * provider default
 
 `--all` additionally reveals hidden and unavailable models: the OpenAI chat
@@ -59,6 +71,18 @@ A default `list` hides it.
   local/gpt-oss-20b              stable                                                          131072   -            ready
   local/devstral-small-2         stable                                                          393216   -            ready
   local/qwen3.6-35b              stable                                                          262144   -            ready
+  ollama/gpt-oss:20b             stable                                                          -        -            ready
+  opencode-go/kimi-k2.7-code *   stable                                                          262144   0.95/4       sign-in
+  opencode-go/kimi-k3            stable                                                          1048576  3/15         sign-in
+  opencode-go/glm-5.3            stable                                                          1000000  1.4/4.4      sign-in
+  opencode-go/deepseek-v4-pro    stable                                                          1000000  1.32/3.96    sign-in
+  opencode-go/deepseek-v4-flash  stable                                                          1000000  0.44/1.32    sign-in
+  opencode-go/mimo-v2.5-pro      stable                                                          1048576  0.435/0.87   sign-in
+  opencode-go/mimo-v2.5          stable                                                          1000000  0.14/0.28    sign-in
+  opencode-go/hy3                stable                                                          256000   0.14/0.58    sign-in
+  opencode-go/minimax-m3         stable                                                          1000000  0.3/1.2      sign-in
+  opencode-go/qwen3.8-max        stable                                                          1000000  2/6          sign-in
+  opencode-go/qwen3.7-plus       stable                                                          1000000  0.4/1.6      sign-in
   * provider default
 
   $ mentat models list | grep -c gpt-5.3-chat-latest
@@ -86,10 +110,10 @@ catalog models, so its filtered listing is the bare header and it never appears
 in `list --all` (MOD-4).
 
   $ mentat models list --provider ollama
-  MODEL  STATUS  CONTEXT  COST $/MTOK  READINESS
+  MODEL               STATUS  CONTEXT  COST $/MTOK  READINESS
+  ollama/gpt-oss:20b  stable  -        -            ready
   $ mentat models list --all | grep -c ollama
-  0
-  [1]
+  1
 
 The `--json` catalog is one envelope. Each entry extends the prior selector,
 status, and context window compatibly with the provider-default flag, the
@@ -138,7 +162,7 @@ Unknown providers and models are usage errors (exit 2), and a bare id without a
 provider is rejected with a canonical-selector hint.
 
   $ mentat models show bogus/nope 2>&1
-  mentat: unknown provider "bogus"; known providers: openai, anthropic, google, local, ollama
+  mentat: unknown provider "bogus"; known providers: openai, anthropic, google, local, ollama, opencode-go
   [2]
   $ mentat models show openai/no-such-model 2>&1
   mentat: unknown model "no-such-model" for provider "openai"; known models: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5-pro, gpt-5.4-mini, gpt-5.4-nano, gpt-5.3-codex, gpt-image-2, gpt-5.3-chat-latest

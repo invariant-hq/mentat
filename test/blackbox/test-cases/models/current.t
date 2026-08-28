@@ -51,7 +51,7 @@ provider against the known catalog.
   mentat: unknown model "gpt-4" for provider "openai"; known models: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5-pro, gpt-5.4-mini, gpt-5.4-nano, gpt-5.3-codex, gpt-image-2, gpt-5.3-chat-latest
   [1]
   $ MENTAT_MODEL=bogus/x mentat models current 2>&1
-  mentat: unknown provider "bogus"; known providers: openai, anthropic, google, local, ollama
+  mentat: unknown provider "bogus"; known providers: openai, anthropic, google, local, ollama, opencode-go
   [1]
 
 A stale or misspelled `small_model` never blocks the run: the small role falls

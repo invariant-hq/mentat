@@ -48,5 +48,5 @@ Plan is read-only: it drops the file-mutation and shell tools.
 An unknown provider is a usage error (exit 2).
 
   $ mentat debug tools --model bogus/nope 2>&1
-  mentat: unknown provider "bogus"; known providers: openai, anthropic, google, local, ollama
+  mentat: unknown provider "bogus"; known providers: openai, anthropic, google, local, ollama, opencode-go
   [2]

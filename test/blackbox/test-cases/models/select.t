@@ -45,7 +45,7 @@ An unknown small selector is the same usage error (exit 2) and writes nothing.
 A rejected selection does not modify an existing config file either.
 
   $ mentat models select nosuch/model-x 2>&1
-  mentat: unknown provider "nosuch"; known providers: openai, anthropic, google, local, ollama
+  mentat: unknown provider "nosuch"; known providers: openai, anthropic, google, local, ollama, opencode-go
   [2]
   $ cat config/mentat/config.json
   {"model":"openai/gpt-5.6-sol","small_model":"openai/gpt-5.4-mini"}

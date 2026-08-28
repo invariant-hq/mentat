@@ -6,7 +6,7 @@ the model surface (XCUT-1).
 
   $ use_trusted_workspace
   $ mentat models download bogus/nope 2>&1
-  mentat: unknown provider "bogus"; known providers: openai, anthropic, google, local, ollama
+  mentat: unknown provider "bogus"; known providers: openai, anthropic, google, local, ollama, opencode-go
   [2]
 
   $ mentat models download local/not-a-model >/dev/null 2>err.txt; echo $?
