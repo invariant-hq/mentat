@@ -43,7 +43,7 @@ You are deep in a refactor and want mentat to finish it:
     /goal "get the test suite green" --max-turns 20 --budget 5.00
 
 The session keeps working. Each time it goes idle — settled head,
-empty queue, nothing of yours pending — the steward mails it a
+empty queue, nothing of yours pending — the steward submits a
 continuation. Each continuation turn ends with a `goal_status`
 claim; when the claim says `done`, the loop stops and tells you.
 You can chat with the session the whole time: your input always
@@ -69,7 +69,7 @@ is one added decision inside that existing role:
     on finished (settled head AND empty queue):
       read the head turn's goal_status claim from the journal;
       done, bound reached, or budget spent → stop, notify;
-      otherwise → send the continuation; repeat.
+      otherwise → submit the continuation; repeat.
 
 **The intent** is one optional metadata member beside `Run_policy`:
 objective, turn bound, budget. Written by owner verbs only (`/goal`,
@@ -111,14 +111,23 @@ exactly as the old goals' loop was; on resume the TUI offers
   stomping an interactive exchange.
 - **L-G4 — Absent claim means continue.** Opt-out semantics: ending
   the goal takes the explicit declaration, the bound, the budget, or
-  the owner — never the model forgetting. *Prevents:* silent early
-  stop being mistaken for completion.
+  the owner — never the model forgetting. Landed adjudication: this
+  law governs the model's declarations, not machinery — a FAILED
+  head turn stops the loop loudly instead of silently burning the
+  bound. *Prevents:* silent early stop being mistaken for
+  completion.
 - **L-G5 — The budget meters the journal's whole cost fold.**
   *Prevents:* the old mis-denominated budget (a first-turn completion
   fenced by nothing).
-- **L-G6 — Every continuation is a framed, receipted mail turn.**
-  *Prevents:* invisible engine reflexes; the transcript shows who
-  continued the work and why.
+- **L-G6 — Every continuation is a framed, receipted turn.**
+  Amended at implementation (2026-08-29): a claim exists only where
+  the turn's contract seals the goal-status schema, and queue
+  entries carry no per-turn contract — so continuations ride the
+  owner's ordinary submission road, sealed through the existing
+  generic output-schema channel; the engine stays goal-blind and
+  the delivery spelling changed, never the law's point. *Prevents:*
+  invisible engine reflexes; the transcript shows who continued the
+  work and why.
 
 ## Drawbacks
 
