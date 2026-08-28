@@ -3,12 +3,16 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(* Unit suite for [Mentat_broker.send], the mail primitive, over a real store
-   in a fresh temp root: the fence-first append twin, its recorded-enqueue
-   dedup, the custodial-hold patience, the loud refusals. The wire arm — a
-   fence held by a live per-session server — needs a real serve-session
-   process and lives in the blackbox subagent suite. The supervision half's
-   pure tables are [test_reconcile]'s. *)
+(* Unit suite for [Mentat_broker]'s send and root supervision, over a real
+   store in a fresh temp root. The send half: the fence-first append twin,
+   its recorded-enqueue dedup, the custodial-hold patience, the loud
+   refusals. The supervision half: the real interpretation loop — spawn,
+   reap, respawn budget, deadline, the bounded hold — driven through the
+   spawn resolver seam (a trivial system binary stands in for the
+   activation, and the test settles the journal where the activation would),
+   plus the un-owning watch. The wire arm and a real served activation live
+   in the blackbox subagent suite; the pure decision tables are
+   [test_reconcile]'s. *)
 
 open Windtrap
 module Broker = Mentat_broker
@@ -28,10 +32,11 @@ let ok_store msg = function
   | Error error -> failf "%s: %a" msg Store.Session.Error.pp error
 
 (* One broker over one fresh store root; the socket base and log dir are
-   scratch, and the spawn resolver refuses — nothing here materializes. A
-   test that binds a socket under the base supplies its own short
-   [?socket_base]: the scratch root is too deep for the [sun_path] budget. *)
-let with_broker ?socket_base name fn =
+   scratch, and the default spawn resolver refuses — a supervision test
+   passes its own [?resolve_bin]. A test that binds a socket under the base
+   supplies its own short [?socket_base]: the scratch root is too deep for
+   the [sun_path] budget. *)
+let with_broker ?socket_base ?resolve_bin name fn =
   Eio_main.run @@ fun env ->
   let fs = Eio.Stdenv.fs env in
   let clock = Eio.Stdenv.clock env in
@@ -45,10 +50,13 @@ let with_broker ?socket_base name fn =
     | Some dir -> dir
     | None -> Filename.concat base "sock"
   in
+  let resolve_bin =
+    match resolve_bin with
+    | Some resolve -> resolve
+    | None -> fun () -> Error "the unit tier spawns nothing"
+  in
   let broker =
-    Broker.create ~sw ~stdenv:env ~store
-      ~resolve_bin:(fun () -> Error "the unit tier spawns nothing")
-      ~socket_base
+    Broker.create ~sw ~stdenv:env ~store ~resolve_bin ~socket_base
       ~log_dir:(Filename.concat base "log")
       ~now:(fun () -> time 2_000)
   in
@@ -328,14 +336,14 @@ let loud_refusals () =
    unconsumed entry from one sender lands, the next is a loud undelivered
    answer that commits nothing, and the owner's mail stays uncapped through
    the same full mailbox. *)
-let a_full_mailbox_is_a_loud_send_failure () =
-  let contains_sub ~sub s =
-    let ls = String.length s and lsub = String.length sub in
-    let rec go i =
-      i + lsub <= ls && (String.equal (String.sub s i lsub) sub || go (i + 1))
-    in
-    go 0
+let contains_sub ~sub s =
+  let ls = String.length s and lsub = String.length sub in
+  let rec go i =
+    i + lsub <= ls && (String.equal (String.sub s i lsub) sub || go (i + 1))
   in
+  go 0
+
+let a_full_mailbox_is_a_loud_send_failure () =
   with_broker "backlog" @@ fun ~sw:_ ~clock:_ ~store ~broker ~socket_base:_ ->
   create_root store ~id:"parent";
   create_child store ~id:"child" ~parent:"parent";
@@ -367,6 +375,333 @@ let a_full_mailbox_is_a_loud_send_failure () =
   | `Delivered -> ()
   | `Undelivered reason -> failf "the owner must never be capped: %s" reason
 
+(* Supervision fixtures. A concluded head is a real settled turn — started,
+   one provider round, finished — appended and committed under the session's
+   fence, exactly as a driver would leave it. *)
+
+let contract =
+  let provider = Llm.Provider.make "openai" in
+  let api = Llm.Model.Api.make "responses" in
+  let model = Llm.Model.make ~provider ~api ~id:"gpt-5" in
+  lazy
+    (Session.Contract.make ~mode:Session.Contract.Mode.Build ~model
+       ~declarations:[] ~policy:Mentat_permission.Policy.default
+       ~review:Mentat_permission.Review_behavior.Enforce
+       ~sandbox:(Mentat_sandbox.identity Mentat_sandbox.direct) ())
+
+let settle_with_fence store ~fence ~id =
+  let document = ok_store "load" (Store.Session.load store (sid id)) in
+  let session = Store.Session.Document.session document in
+  let turn =
+    Session.Turn.make
+      ~id:(Session.Turn.Id.of_string "turn-1")
+      ~origin:Session.Turn.Origin.User
+      ~input:(Session.Turn.Input.user_text "Go.")
+      ~max_steps:8 ~contract:(Lazy.force contract) ()
+  in
+  let claim =
+    Session.Provider_request.Started.make ~turn:(Session.Turn.id turn)
+      ~request_digest:(Mentat_digest.string "req-1")
+  in
+  let response =
+    Llm.Response.make
+      ~model:(Llm.Model.make ~provider:(Llm.Provider.make "openai")
+                ~api:(Llm.Model.Api.make "responses") ~id:"gpt-5")
+      (Llm.Message.Assistant.text "Done.")
+  in
+  let events =
+    [
+      Session.Event.turn_started turn;
+      Session.Event.provider_requested claim;
+      Session.Event.provider_settled
+        (Session.Provider_request.Settled.responded
+           ~id:(Session.Provider_request.Started.id claim)
+           response);
+      Session.Event.turn_finished ~turn:(Session.Turn.id turn)
+        Session.Turn.Outcome.completed;
+    ]
+  in
+  let appended =
+    match Session.append_all events session with
+    | Ok session -> session
+    | Error e -> failf "append settled turn: %s" (Session.Error.message e)
+  in
+  ignore
+    (ok_store "commit settled turn"
+       (Store.Session.commit store ~fence document
+          (Session.touch (time 3_000) appended)))
+
+let settle_session ~sw store ~id =
+  let guard =
+    match
+      Store.Run_lock.try_acquire ~sw store ~session:(sid id)
+        ~owner:(Store.Run_lock.Owner.make ())
+    with
+    | Ok guard -> guard
+    | Error _ -> fail "the fixture could not take the fence"
+  in
+  settle_with_fence store ~fence:guard ~id;
+  Store.Run_lock.release guard
+
+(* The supervision outcome, awaited with a timeout so a broken arm fails the
+   test instead of hanging it. *)
+let outcome_sinks () =
+  let outcome, resolver = Eio.Promise.create () in
+  let on_settled () = ignore (Eio.Promise.try_resolve resolver `Settled) in
+  let on_failure ~reason =
+    ignore (Eio.Promise.try_resolve resolver (`Failed reason))
+  in
+  (outcome, on_settled, on_failure)
+
+let await_outcome clock outcome =
+  match
+    Eio.Time.with_timeout clock 10.0 @@ fun () ->
+    Ok (Eio.Promise.await outcome)
+  with
+  | Ok answer -> answer
+  | Error `Timeout -> fail "the supervision never answered its sink"
+
+(* A SIGTERM counter around the never-signal assertions: if a supervision
+   arm ever signalled this process — the fence holder in these tests — the
+   count would show it (and without the handler the default disposition
+   would kill the runner outright). *)
+let with_sigterm_counter fn =
+  let terms = ref 0 in
+  let previous =
+    Sys.signal Sys.sigterm (Sys.Signal_handle (fun _ -> incr terms))
+  in
+  Fun.protect
+    ~finally:(fun () -> ignore (Sys.signal Sys.sigterm previous))
+    (fun () -> fn terms)
+
+let tmp = Lpath.Abs.of_string_exn "/tmp"
+
+let a_finished_session_settles_immediately () =
+  let resolved = ref 0 in
+  with_broker "settle-now"
+    ~resolve_bin:(fun () ->
+      incr resolved;
+      Error "nothing to spawn")
+  @@ fun ~sw ~clock ~store ~broker ~socket_base:_ ->
+  create_root store ~id:"run";
+  settle_session ~sw store ~id:"run";
+  let outcome, on_settled, on_failure = outcome_sinks () in
+  Broker.supervise broker ~session:(sid "run") ~cwd:tmp ~environment:[]
+    ~on_settled ~on_failure ();
+  (match await_outcome clock outcome with
+  | `Settled -> ()
+  | `Failed reason -> failf "failed: %s" reason);
+  equal int ~msg:"a concluded session spawns nothing" 0 !resolved
+
+let a_spawned_run_settles_at_its_terminal_head () =
+  let resolved = ref 0 in
+  let resolver = ref (fun () -> Error "unset") in
+  with_broker "spawn-settle" ~resolve_bin:(fun () -> !resolver ())
+  @@ fun ~sw:_ ~clock ~store ~broker ~socket_base:_ ->
+  create_root store ~id:"run";
+  (* The resolver runs at the spawn — after the decision read the unfinished
+     head — so settling the journal here is exactly the activation doing the
+     work; the trivial binary then exits and the reaper's funnel reads the
+     settled head. *)
+  (resolver :=
+     fun () ->
+       incr resolved;
+       Eio.Switch.run (fun sw -> settle_session ~sw store ~id:"run");
+       Ok "/usr/bin/true");
+  let outcome, on_settled, on_failure = outcome_sinks () in
+  Broker.supervise broker ~session:(sid "run") ~cwd:tmp ~environment:[]
+    ~on_settled ~on_failure ();
+  (match await_outcome clock outcome with
+  | `Settled -> ()
+  | `Failed reason -> failf "failed: %s" reason);
+  equal int ~msg:"one spawn served the whole run" 1 !resolved
+
+let respawn_exhaustion_fires_the_failure_sink () =
+  let resolved = ref 0 in
+  with_broker "exhaust"
+    ~resolve_bin:(fun () ->
+      incr resolved;
+      Ok "/usr/bin/true")
+  @@ fun ~sw:_ ~clock ~store ~broker ~socket_base:_ ->
+  create_root store ~id:"run";
+  let outcome, on_settled, on_failure = outcome_sinks () in
+  Broker.supervise broker ~session:(sid "run") ~cwd:tmp ~environment:[]
+    ~respawns:1 ~on_settled ~on_failure ();
+  (match await_outcome clock outcome with
+  | `Settled -> fail "a run that never settles must not answer settled"
+  | `Failed reason ->
+      is_true ~msg:"the failure names the unsettled deaths"
+        (contains_sub ~sub:"died before settling, 2 times over" reason));
+  equal int ~msg:"the budget bounds the spawns" 2 !resolved
+
+let the_deadline_fires_the_ladder_then_the_failure_sink () =
+  (* A stand-in activation that ignores its argv and lingers: the deadline's
+     ladder must end it. *)
+  let dir = Unix.realpath (temp_dir ~prefix:"mb-linger" ()) in
+  let script = Filename.concat dir "linger.sh" in
+  Out_channel.with_open_bin script (fun oc ->
+      Out_channel.output_string oc "#!/bin/sh\nexec sleep 30\n");
+  Unix.chmod script 0o700;
+  with_broker "deadline" ~resolve_bin:(fun () -> Ok script)
+  @@ fun ~sw:_ ~clock ~store ~broker ~socket_base:_ ->
+  create_root store ~id:"run";
+  let outcome, on_settled, on_failure = outcome_sinks () in
+  Broker.supervise broker ~session:(sid "run") ~cwd:tmp
+    ~environment:[ ("PATH", "/usr/bin:/bin") ]
+    ~deadline_s:0.4 ~respawns:0 ~on_settled ~on_failure ();
+  let rec spawned_pid elapsed =
+    match Broker.children broker with
+    | [ (session, `Spawned pid) ] ->
+        is_true ~msg:"the table names the supervised session"
+          (Session.Id.equal session (sid "run"));
+        pid
+    | _ when elapsed > 5.0 -> fail "the spawn never appeared in the table"
+    | _ ->
+        Eio.Time.sleep clock 0.02;
+        spawned_pid (elapsed +. 0.02)
+  in
+  let pid = spawned_pid 0. in
+  (match await_outcome clock outcome with
+  | `Settled -> fail "an overdue run must not answer settled"
+  | `Failed reason ->
+      is_true ~msg:"the failure names the deadline"
+        (contains_sub ~sub:"deadline" reason));
+  match Unix.kill pid 0 with
+  | () -> failf "pid %d survived the deadline ladder" pid
+  | exception Unix.Unix_error (Unix.ESRCH, _, _) -> ()
+
+let an_unlabeled_holder_is_observed_never_signalled () =
+  with_sigterm_counter @@ fun terms ->
+  with_broker "hold-settle" @@ fun ~sw:_ ~clock ~store ~broker ~socket_base:_ ->
+  create_root store ~id:"run";
+  Eio.Switch.run @@ fun hold_sw ->
+  let guard =
+    match
+      Store.Run_lock.try_acquire ~sw:hold_sw store ~session:(sid "run")
+        ~owner:(Store.Run_lock.Owner.make ())
+    with
+    | Ok guard -> guard
+    | Error _ -> fail "the fixture could not take the fence"
+  in
+  (* Concluded under the hold: the bounded observation reads the terminal
+     head and settles without ever touching the holder. *)
+  settle_with_fence store ~fence:guard ~id:"run";
+  let outcome, on_settled, on_failure = outcome_sinks () in
+  Broker.supervise broker ~session:(sid "run") ~cwd:tmp ~environment:[]
+    ~on_settled ~on_failure ();
+  (match await_outcome clock outcome with
+  | `Settled -> ()
+  | `Failed reason -> failf "failed: %s" reason);
+  equal int ~msg:"the holder was never signalled" 0 !terms;
+  Store.Run_lock.release guard
+
+let a_double_supervise_is_idempotent () =
+  with_broker "idempotent" @@ fun ~sw:_ ~clock ~store ~broker ~socket_base:_ ->
+  create_root store ~id:"run";
+  Eio.Switch.run @@ fun hold_sw ->
+  let guard =
+    match
+      Store.Run_lock.try_acquire ~sw:hold_sw store ~session:(sid "run")
+        ~owner:(Store.Run_lock.Owner.make ())
+    with
+    | Ok guard -> guard
+    | Error _ -> fail "the fixture could not take the fence"
+  in
+  let outcome, on_settled, on_failure = outcome_sinks () in
+  Broker.supervise broker ~session:(sid "run") ~cwd:tmp ~environment:[]
+    ~on_settled ~on_failure ();
+  (* The second call is a no-op: the standing supervision owns the outcome
+     and the second sinks never fire. *)
+  let second = ref false in
+  Broker.supervise broker ~session:(sid "run") ~cwd:tmp ~environment:[]
+    ~on_settled:(fun () -> second := true)
+    ~on_failure:(fun ~reason:_ -> second := true)
+    ();
+  (match Broker.children broker with
+  | [ (session, `Observed) ] ->
+      is_true ~msg:"one entry governs the session"
+        (Session.Id.equal session (sid "run"))
+  | rows -> failf "expected one observed row, got %d" (List.length rows));
+  settle_with_fence store ~fence:guard ~id:"run";
+  (match await_outcome clock outcome with
+  | `Settled -> ()
+  | `Failed reason -> failf "failed: %s" reason);
+  Eio.Time.sleep clock 0.1;
+  is_false ~msg:"the second supervision's sinks never fire" !second;
+  Store.Run_lock.release guard
+
+let the_watch_reports_a_settlement () =
+  with_sigterm_counter @@ fun terms ->
+  with_broker "watch-settle" @@ fun ~sw:_ ~clock ~store ~broker ~socket_base:_
+    ->
+  create_root store ~id:"run";
+  Eio.Switch.run @@ fun hold_sw ->
+  let guard =
+    match
+      Store.Run_lock.try_acquire ~sw:hold_sw store ~session:(sid "run")
+        ~owner:(Store.Run_lock.Owner.make ())
+    with
+    | Ok guard -> guard
+    | Error _ -> fail "the fixture could not take the fence"
+  in
+  let observation, resolver = Eio.Promise.create () in
+  Broker.watch broker ~session:(sid "run") ~on_terminal:(fun terminal ->
+      ignore (Eio.Promise.try_resolve resolver terminal));
+  settle_with_fence store ~fence:guard ~id:"run";
+  (match
+     Eio.Time.with_timeout clock 10.0 @@ fun () ->
+     Ok (Eio.Promise.await observation)
+   with
+  | Ok `Settled -> ()
+  | Ok `Holder_died -> fail "a settled head must report settled"
+  | Ok `Gone -> fail "the session exists"
+  | Error `Timeout -> fail "the watch never fired");
+  equal int ~msg:"the watch never signals" 0 !terms;
+  Store.Run_lock.release guard
+
+let the_watch_reports_a_holder_death () =
+  with_broker "watch-death" @@ fun ~sw:_ ~clock ~store ~broker ~socket_base:_
+    ->
+  create_root store ~id:"run";
+  let observation, resolver = Eio.Promise.create () in
+  Eio.Switch.run (fun hold_sw ->
+      let _guard =
+        match
+          Store.Run_lock.try_acquire ~sw:hold_sw store ~session:(sid "run")
+            ~owner:(Store.Run_lock.Owner.make ())
+        with
+        | Ok guard -> guard
+        | Error _ -> fail "the fixture could not take the fence"
+      in
+      Broker.watch broker ~session:(sid "run") ~on_terminal:(fun terminal ->
+          ignore (Eio.Promise.try_resolve resolver terminal));
+      (* Hold across one probe beat, then let the switch release the fence
+         with the work unfinished — the holder died. *)
+      Eio.Time.sleep clock 0.2);
+  (match
+     Eio.Time.with_timeout clock 10.0 @@ fun () ->
+     Ok (Eio.Promise.await observation)
+   with
+  | Ok `Holder_died -> ()
+  | Ok `Settled -> fail "unfinished work must not report settled"
+  | Ok `Gone -> fail "the session exists"
+  | Error `Timeout -> fail "the watch never fired")
+
+let the_watch_reports_a_missing_session () =
+  with_broker "watch-gone" @@ fun ~sw:_ ~clock ~store:_ ~broker ~socket_base:_
+    ->
+  let observation, resolver = Eio.Promise.create () in
+  Broker.watch broker ~session:(sid "never-created")
+    ~on_terminal:(fun terminal ->
+      ignore (Eio.Promise.try_resolve resolver terminal));
+  match
+    Eio.Time.with_timeout clock 10.0 @@ fun () ->
+    Ok (Eio.Promise.await observation)
+  with
+  | Ok `Gone -> ()
+  | Ok (`Settled | `Holder_died) -> fail "a missing session is gone"
+  | Error `Timeout -> fail "the watch never fired"
+
 let () =
   run "mentat.broker"
     [
@@ -385,5 +720,28 @@ let () =
           test "loud refusals" loud_refusals;
           test "a full mailbox is a loud send failure"
             a_full_mailbox_is_a_loud_send_failure;
+        ];
+      group "supervision"
+        [
+          test "a finished session settles immediately"
+            a_finished_session_settles_immediately;
+          test "a spawned run settles at its terminal head"
+            a_spawned_run_settles_at_its_terminal_head;
+          test "respawn exhaustion fires the failure sink"
+            respawn_exhaustion_fires_the_failure_sink;
+          test "the deadline fires the ladder then the failure sink"
+            the_deadline_fires_the_ladder_then_the_failure_sink;
+          test "an unlabeled holder is observed, never signalled"
+            an_unlabeled_holder_is_observed_never_signalled;
+          test "a double supervise is idempotent"
+            a_double_supervise_is_idempotent;
+        ];
+      group "the watch"
+        [
+          test "the watch reports a settlement" the_watch_reports_a_settlement;
+          test "the watch reports a holder death"
+            the_watch_reports_a_holder_death;
+          test "the watch reports a missing session"
+            the_watch_reports_a_missing_session;
         ];
     ]

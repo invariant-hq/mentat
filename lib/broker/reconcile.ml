@@ -35,6 +35,29 @@ let decide ~fence ~reachable ~head =
       | `Unfinished -> Respawn
       | `Terminal | `Absent -> Dispose)
 
+type root_action =
+  | Adopt
+  | Preempt_stale of int
+  | Spawn
+  | Settle
+  | Reprobe_hold
+  | Hold
+  | Refuse of string
+
+let supervise_action ~fence ~reachable ~head =
+  match fence () with
+  | `Io message -> Refuse ("the run fence could not be probed: " ^ message)
+  | `Custodial -> Reprobe_hold
+  | `Held_self -> Hold
+  | `Held holder -> (
+      if reachable () then Adopt
+      else match holder with Some pid -> Preempt_stale pid | None -> Hold)
+  | `Free -> (
+      match head () with
+      | `Unfinished -> Spawn
+      | `Terminal -> Settle
+      | `Absent -> Refuse "the session does not exist")
+
 type boot =
   [ `Adopt
   | `Adopt_and_watch

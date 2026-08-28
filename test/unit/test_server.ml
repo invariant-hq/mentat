@@ -1369,7 +1369,8 @@ let make_engine ~sw ~store ~script =
     ~config:engine_config ~now
     ~broker:
       (Mentat_broker.for_tests
-         ~send:(fun ~origin:_ ~target:_ ~id:_ ~input:_ -> `Delivered))
+         ~send:(fun ~origin:_ ~target:_ ~id:_ ~input:_ -> `Delivered)
+         ())
     ~execution_for_mode ~delegated_execution ()
 
 let live_driver engine : Driver.t =

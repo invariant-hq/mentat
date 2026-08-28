@@ -74,6 +74,8 @@ let classify_owner owner =
       `Mount
   | Some _ | None -> `Other
 
+type failure_sink = reason:string -> unit
+
 module Engine = struct
   type t = {
     root : Lpath.Abs.t;
@@ -100,23 +102,42 @@ let grace_s = 5.0
 let max_respawns = 2
 let reap_interval_s = 0.05
 
+(* The two shapes a supervised session takes. A delegation reports through
+   the hosting engine's seam — integration folds the child's result into the
+   parent, failure settles the parent's wait. A root answers its caller
+   directly: [settled] and [failed] are the supervising caller's sinks,
+   once-guarded as a pair at construction so exactly one outcome ever
+   crosses, however many observation passes re-derive it. *)
+type shape =
+  | Delegated of Engine.t
+  | Root of {
+      root : Lpath.Abs.t;
+      environment : (string * string) list;
+      settled : unit -> unit;
+      failed : reason:string -> unit;
+    }
+
 (* One materialized or observed child. [pid] is [Some] only for a process this
    broker spawned — the reaper's set; a foreign child (a previous node life's
    server) is watched through its endpoint and fence instead. [respawns]
    counts spawns beyond the first — construction-fixed, because each
-   re-materialization installs a fresh record. [resume] is the last committed
-   feed position an observation pass delivered, so a reconnect replays
-   nothing; [head_cache] keys the last decoded journal head on the document
-   stamp, so the polls that watch a parked child decode only on change. *)
+   re-materialization installs a fresh record — and [budget] bounds them:
+   the delegated default, or the count a root supervision was given. [resume]
+   is the last committed feed position an observation pass delivered, so a
+   reconnect replays nothing; [head_cache] keys the last decoded journal head
+   on the document stamp, so the polls that watch a parked child decode only
+   on change — a successor entry shares the cell, same session, same
+   journal. *)
 type entry = {
   child : Mentat_session.Id.t;
-  engine : Engine.t;
+  shape : shape;
   socket_dir : string;
   mutable pid : int option;
   respawns : int;
+  budget : int;
   mutable cancelled : bool;
   mutable resume : Mentat_protocol.Position.t option;
-  mutable head_cache : (string * Reconcile.head) option;
+  head_cache : (string * Reconcile.head) option ref;
 }
 
 type broker = {
@@ -168,8 +189,8 @@ let send_signal pid signal =
    [classify_owner]'s: [`Held (Some pid)] only for a dialable child server —
    the only holder the escalation ladder may signal — and [`Held None] for a
    holder the table refuses to preempt. *)
-let probe_fence t entry () : Reconcile.fence =
-  match Mentat_store.Run_lock.holder t.store ~session:entry.child with
+let probe_fence t ~session () : Reconcile.fence =
+  match Mentat_store.Run_lock.holder t.store ~session with
   | `Free -> `Free
   | `Io io -> `Io (Format.asprintf "%a" Mentat_store.Io.pp io)
   | `Held None -> `Held None
@@ -181,7 +202,43 @@ let probe_fence t entry () : Reconcile.fence =
         | `Server pid -> `Held (Some pid)
         | `Mount | `Other -> `Held None)
 
-let root_string entry = Lpath.Abs.to_string entry.engine.Engine.root
+(* Supervision's fence view has no self arm — the send loop's posture:
+   labels judge holders, whoever they are. The one exception is that this
+   process's own pid is never a ladder target, so an own-pid child-server
+   label degrades to the unpreemptable arm instead of [`Held (Some pid)]. *)
+let probe_root_fence t ~session () : Reconcile.fence =
+  match Mentat_store.Run_lock.holder t.store ~session with
+  | `Free -> `Free
+  | `Io io -> `Io (Format.asprintf "%a" Mentat_store.Io.pp io)
+  | `Held None -> `Held None
+  | `Held (Some owner) -> (
+      match classify_owner owner with
+      | `Custodial -> `Custodial
+      | `Server pid when pid <> Unix.getpid () -> `Held (Some pid)
+      | `Server _ | `Mount | `Other -> `Held None)
+
+(* The holder's owner line, re-read for a failure message: the table's fence
+   vocabulary deliberately collapses identity, so naming the holder is its
+   own probe at the failure edge. *)
+let holder_name t ~session =
+  match Mentat_store.Run_lock.holder t.store ~session with
+  | `Held (Some owner) ->
+      Format.asprintf "%a" Mentat_store.Run_lock.Owner.pp owner
+  | `Held None -> "an unreadable owner"
+  | `Free -> "a holder that has since released"
+  | `Io io -> Format.asprintf "an unprobeable fence (%a)" Mentat_store.Io.pp io
+
+let entry_root entry =
+  match entry.shape with
+  | Delegated engine -> engine.Engine.root
+  | Root { root; _ } -> root
+
+let entry_environment entry =
+  match entry.shape with
+  | Delegated engine -> engine.Engine.environment
+  | Root { environment; _ } -> environment
+
+let root_string entry = Lpath.Abs.to_string (entry_root entry)
 
 (* The unfinished-work judgment is the state's own: a settled head with
    unconsumed mail is not finished — the mail buys the session another turn,
@@ -192,25 +249,33 @@ let head_of session : Reconcile.head =
   else `Unfinished
 
 (* A fence-free head read, elided by the document stamp: the polls that watch
-   a parked child decode its journal only when the persisted bytes change. An
-   unreadable journal presumes outstanding work, so the caller keeps watching
-   rather than abandoning a child it cannot judge. *)
-let child_head t entry : Reconcile.head =
-  let store = t.store in
+   a parked session decode its journal only when the persisted bytes change.
+   A missing document is [`Absent]; any other read failure presumes
+   outstanding work. *)
+let cached_head t ~session cache : Reconcile.head =
   let read () : Reconcile.head =
-    match Mentat_store.Session.load store entry.child with
+    match Mentat_store.Session.load t.store session with
+    | Error (Mentat_store.Session.Error.Not_found _) -> `Absent
     | Error _ -> `Unfinished
     | Ok document -> head_of (Mentat_store.Session.Document.session document)
   in
-  match Mentat_store.Session.stamp store entry.child with
+  match Mentat_store.Session.stamp t.store session with
   | None -> read ()
   | Some stamp -> (
-      match entry.head_cache with
+      match !cache with
       | Some (cached, head) when String.equal cached stamp -> head
       | Some _ | None ->
           let head = read () in
-          entry.head_cache <- Some (stamp, head);
+          cache := Some (stamp, head);
           head)
+
+(* The delegated presumption over the same read: an unreadable or missing
+   journal keeps the child observed rather than abandoned — the broker never
+   disposes of a child it cannot judge. *)
+let child_head t entry : Reconcile.head =
+  match cached_head t ~session:entry.child entry.head_cache with
+  | `Absent -> `Unfinished
+  | (`Unfinished | `Terminal) as head -> head
 
 let connect_child t entry ~sw =
   Mentat_server.connect ~sw ~net:(net t) ~clock:(clock t)
@@ -290,6 +355,34 @@ let destroy t pid =
     end
   end
 
+(* The one settlement judgment behind every observation: a delegation
+   integrates through its engine's seam; a root's settlement is the
+   head-and-queue read itself, answered to the caller's settled sink — never
+   an exit code. Both are harmless to repeat. *)
+let integrate t entry =
+  match entry.shape with
+  | Delegated engine -> engine.Engine.integrate_child ~child:entry.child
+  | Root root -> (
+      match child_head t entry with
+      | `Terminal ->
+          root.settled ();
+          `Integrated
+      | `Unfinished | `Absent -> `Not_settled)
+
+let fail_shape entry ~message =
+  match entry.shape with
+  | Delegated engine -> engine.Engine.fail_child ~child:entry.child ~message
+  | Root root -> root.failed ~reason:message
+
+let trace_abandoned entry message =
+  match entry.shape with
+  | Delegated _ ->
+      Eio.traceln "broker: delegation to %s abandoned: %s" (key entry.child)
+        message
+  | Root _ ->
+      Eio.traceln "broker: supervision of %s abandoned: %s" (key entry.child)
+        message
+
 (* Abandonment: the loud floor for an entry the broker cannot govern. Silent
    only when a fresh entry has superseded this one — that entry's fibers now
    own the delegation's fate. A detached entry (the exit funnel removes its
@@ -312,9 +405,8 @@ let give_up t entry message =
         entry.pid <- None;
         destroy t pid;
         remove_endpoint entry);
-    Eio.traceln "broker: delegation to %s abandoned: %s" (key entry.child)
-      message;
-    entry.engine.Engine.fail_child ~child:entry.child ~message
+    trace_abandoned entry message;
+    fail_shape entry ~message
   end
 
 (* The escalation ladder for a child this broker spawned. Each signal is sent
@@ -342,13 +434,13 @@ let ladder_own t entry pid =
    whether the fence came free. *)
 let ladder_foreign t entry pid =
   let fire signal =
-    match probe_fence t entry () with
+    match probe_fence t ~session:entry.child () with
     | `Held (Some current_pid) when current_pid = pid ->
         send_signal pid signal
     | `Free | `Held_self | `Held _ | `Custodial | `Io _ -> ()
   in
   let rec await_free elapsed =
-    match probe_fence t entry () with
+    match probe_fence t ~session:entry.child () with
     | `Free -> true
     | _ when elapsed >= grace_s -> false
     | _ ->
@@ -410,7 +502,7 @@ let follow_feed t entry =
        after the settlement was already delivered would resume past it and
        tail a feed that will never speak again — pinning the lingering child
        alive on a connection nothing closes. *)
-    match entry.engine.Engine.integrate_child ~child:entry.child with
+    match integrate t entry with
     | `Integrated | `Unbound -> ()
     | `Not_settled -> (
         Eio.Switch.run @@ fun sw ->
@@ -441,10 +533,7 @@ let follow_feed t entry =
                       entry.resume <- Some position;
                       match fact with
                       | Mentat_protocol.Fact.Turn_settled _ -> (
-                          match
-                            entry.engine.Engine.integrate_child
-                              ~child:entry.child
-                          with
+                          match integrate t entry with
                           | `Integrated | `Unbound -> ()
                           | `Not_settled -> pull ())
                       | _ -> pull ())
@@ -463,6 +552,18 @@ let follow_feed t entry =
   | () -> ()
   | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
   | exception _ -> ()
+
+(* The one un-owning observation loop the delegated foreign watch and the
+   public watch ride: probe passes until one ends the loop. The rider owns
+   every effect and places the cadence sleep ([pause], one second) inside its
+   pass, so each rider keeps its own probe order; [`Keep] runs the next pass,
+   [`Done] ends the loop. [alive] is re-judged before every pass, so a rider
+   whose entry was superseded or claimed dies at its next beat. *)
+let rec unowned_watch t ~alive ~pass =
+  if alive () then
+    match pass ~pause:(fun () -> sleep t 1.0) with
+    | `Done -> ()
+    | `Keep -> unowned_watch t ~alive ~pass
 
 (* Fiber discipline: broker work runs under the node switch, races the stop
    signal so teardown never waits on a parked feed pull, and contains its own
@@ -493,19 +594,27 @@ let fork_entry t entry work =
 let rec settle_exit t entry =
   if current t entry then begin
     Hashtbl.remove t.entries (key entry.child);
-    match entry.engine.Engine.integrate_child ~child:entry.child with
+    match integrate t entry with
     | `Integrated | `Unbound -> remove_endpoint entry
     | `Not_settled ->
-        if entry.respawns >= max_respawns then begin
+        (* A cancelled delegation is respawned so its successor can mint the
+           terminal interrupted fact; the interrupt carry is the delegated
+           boot's alone — a root activation refuses the flag — so a cancelled
+           root is abandoned loudly instead of resumed. *)
+        let respawn_refused =
+          match entry.shape with
+          | Root _ -> entry.cancelled
+          | Delegated _ -> false
+        in
+        if entry.respawns >= entry.budget || respawn_refused then begin
           remove_endpoint entry;
           let message =
             Printf.sprintf
               "the child process died before settling, %d times over"
               (entry.respawns + 1)
           in
-          Eio.traceln "broker: delegation to %s abandoned: %s"
-            (key entry.child) message;
-          entry.engine.Engine.fail_child ~child:entry.child ~message
+          trace_abandoned entry message;
+          fail_shape entry ~message
         end
         else begin
           (* A fresh record, honoring [current]'s discipline: the
@@ -526,11 +635,18 @@ let rec settle_exit t entry =
   end
 
 and spawn_child t entry =
+  (* The interrupt carry belongs to the delegated shape: the root boot
+     refuses the flag, and a cancelled root never reaches a respawn. *)
+  let interrupted =
+    match entry.shape with
+    | Delegated _ -> entry.cancelled
+    | Root _ -> false
+  in
   match
     Spawn.spawn ~resolve_bin:t.resolve_bin ~log_dir:t.log_dir
       ~leaf:(socket_leaf ~session:(key entry.child))
-      ~environment:entry.engine.Engine.environment ~session:entry.child
-      ~interrupted:entry.cancelled ~cwd:entry.engine.Engine.root
+      ~environment:(entry_environment entry) ~session:entry.child ~interrupted
+      ~cwd:(entry_root entry)
   with
   | Error message -> give_up t entry message
   | Ok pid ->
@@ -634,21 +750,45 @@ and observe t entry =
         | None -> foreign_watch t entry)
 
 and foreign_watch t entry =
-  if current t entry then
-    match probe_fence t entry () with
-    | `Free -> settle_exit t entry
-    | `Held_self ->
-        (* An in-process driver took the child over (a message delivery
-           attached it); its own hooks integrate from here. *)
-        Hashtbl.remove t.entries (key entry.child)
-    | `Held _ | `Custodial | `Io _ -> (
-        sleep t 1.0;
+  unowned_watch t
+    ~alive:(fun () -> current t entry)
+    ~pass:(fun ~pause ->
+      let held () =
+        pause ();
         (* Reconnect only while work is outstanding: a settled child is
            lingering toward its own exit, and a fresh connection would reset
            that linger — the fence poll alone sees it out. *)
         match child_head t entry with
-        | `Unfinished -> observe t entry
-        | `Terminal | `Absent -> foreign_watch t entry)
+        | `Unfinished ->
+            observe t entry;
+            `Done
+        | `Terminal | `Absent ->
+            (* A root's sink must not wait out a holder's linger: the settled
+               answer is the head-and-queue read, taken here; the fence poll
+               still drains the entry once the holder exits. *)
+            (match entry.shape with
+            | Delegated _ -> ()
+            | Root _ -> (
+                match integrate t entry with
+                | `Integrated | `Not_settled | `Unbound -> ()));
+            `Keep
+      in
+      match probe_fence t ~session:entry.child () with
+      | `Free ->
+          settle_exit t entry;
+          `Done
+      | `Held_self -> (
+          match entry.shape with
+          | Delegated _ ->
+              (* An in-process driver took the child over (a message delivery
+                 attached it); its own hooks integrate from here. *)
+              Hashtbl.remove t.entries (key entry.child);
+              `Done
+          | Root _ ->
+              (* This process's own driver holds the session; the journal is
+                 still the truth — observe it like any held fence. *)
+              held ())
+      | `Held _ | `Custodial | `Io _ -> held ())
 
 (* Materialization: the pure table decides over live probes — the fence, the
    endpoint handshake, and the journal head, so the executed table is exactly
@@ -659,7 +799,8 @@ and foreign_watch t entry =
    doubles to a one-second ceiling. *)
 let rec launch ?(reprobe_s = 0.05) t entry =
   match
-    Reconcile.decide ~fence:(probe_fence t entry)
+    Reconcile.decide
+      ~fence:(probe_fence t ~session:entry.child)
       ~reachable:(endpoint_reachable t entry)
       ~head:(fun () -> child_head t entry)
   with
@@ -686,9 +827,10 @@ let rec launch ?(reprobe_s = 0.05) t entry =
         launch ~reprobe_s:(Float.min 1.0 (reprobe_s *. 2.)) t entry
   | Reconcile.Fail message -> give_up t entry message
 
-(* Admission: register the child in the node table and fork its work. A child
-   already registered — running or observed — is left to its own fibers. *)
-let register t engine ~child work =
+(* Admission: register the session in the node table and fork its work. A
+   session already registered — running or observed — is left to its own
+   fibers. *)
+let register t ~shape ~budget ~child work =
   if not t.stopped then
     match Hashtbl.find_opt t.entries (key child) with
     | Some _ -> ()
@@ -696,28 +838,31 @@ let register t engine ~child work =
         let entry =
           {
             child;
-            engine;
+            shape;
             socket_dir = socket_dir ~base:t.socket_base ~session:(key child);
             pid = None;
             respawns = 0;
+            budget;
             cancelled = false;
             resume = None;
-            head_cache = None;
+            head_cache = ref None;
           }
         in
         Hashtbl.replace t.entries (key child) entry;
         fork_entry t entry (fun () -> work entry)
 
 let materialize t engine ~child =
-  register t engine ~child (fun entry -> launch t entry)
+  register t ~shape:(Delegated engine) ~budget:max_respawns ~child
+    (fun entry -> launch t entry)
 
 (* Watch an already-running child this broker did not spawn (a previous node
    life's server): register the entry and observe, deciding nothing else — on
    its exit the ordinary policy integrates, re-drives shadowed messages, or
    re-materializes. A child the ordinary materialize already registered is left
    to it. *)
-let watch t engine ~child =
-  register t engine ~child (fun entry -> observe t entry)
+let observe_running t engine ~child =
+  register t ~shape:(Delegated engine) ~budget:max_respawns ~child
+    (fun entry -> observe t entry)
 
 let cancel t ~child =
   match Hashtbl.find_opt t.entries (key child) with
@@ -738,9 +883,213 @@ let cancel t ~child =
             match entry.pid with
             | Some pid -> ladder_own t entry pid
             | None -> (
-                match probe_fence t entry () with
+                match probe_fence t ~session:entry.child () with
                 | `Held (Some pid) -> ignore (ladder_foreign t entry pid)
                 | `Free | `Held_self | `Held None | `Custodial | `Io _ -> ()))
+
+(* Root supervision: the pure table decides over live probes, exactly as the
+   delegated launch does, differing on the arms the two verbs rule
+   differently. A holder the supervisor may neither adopt nor preempt is
+   observed for a bounded patience — an interactive driver may settle the
+   work under the watch, and the head read ends the wait early — and past the
+   bound the supervision fails loudly naming the holder. The patience reuses
+   the boot wait: the same "how long may an opaque state stand before it is
+   wedged" judgment, and the reprobe backs off exactly as a custodial hold's
+   does. *)
+let rec launch_root ?(reprobe_s = 0.05) ?(held_s = 0.) t entry =
+  match
+    Reconcile.supervise_action
+      ~fence:(probe_root_fence t ~session:entry.child)
+      ~reachable:(endpoint_reachable t entry)
+      ~head:(fun () -> cached_head t ~session:entry.child entry.head_cache)
+  with
+  | Reconcile.Adopt -> observe t entry
+  | Reconcile.Preempt_stale pid ->
+      Eio.traceln
+        "broker: session %s is fenced by pid %d with no endpoint; preempting"
+        (key entry.child) pid;
+      if ladder_foreign t entry pid then spawn_child t entry
+      else
+        give_up t entry
+          (Printf.sprintf "pid %d holds the session's fence and would not yield"
+             pid)
+  | Reconcile.Spawn -> spawn_child t entry
+  | Reconcile.Settle -> settle_exit t entry
+  | Reconcile.Refuse message -> give_up t entry message
+  | Reconcile.Reprobe_hold | Reconcile.Hold -> (
+      if held_s >= boot_wait_s then
+        give_up t entry
+          (Printf.sprintf "the session's fence stayed held by %s"
+             (holder_name t ~session:entry.child))
+      else
+        match child_head t entry with
+        | `Terminal -> settle_exit t entry
+        | `Unfinished | `Absent ->
+            sleep t reprobe_s;
+            if current t entry then
+              launch_root
+                ~reprobe_s:(Float.min 1.0 (reprobe_s *. 2.))
+                ~held_s:(held_s +. reprobe_s) t entry)
+
+(* The interrupt's grace at the deadline: exit releases the fence, so a
+   child that heard the interrupt gets one bounded window to wind down
+   cleanly before any signal. *)
+let wind_down t entry =
+  let rec await elapsed =
+    match probe_root_fence t ~session:entry.child () with
+    | `Free -> ()
+    | `Held_self | `Held _ | `Custodial | `Io _ ->
+        if elapsed < grace_s then begin
+          sleep t 0.25;
+          await (elapsed +. 0.25)
+        end
+  in
+  await 0.
+
+(* Deadline enforcement: the supervisor's one clock. Each pass claims the
+   session's current entry out of the table before signalling anything, so no
+   concurrent settlement can race the ruling and no respawn can outlive the
+   clock; the loop re-checks for a successor a racing exit installed in the
+   claim window. A head already terminal at the firing settles instead: the
+   work beat the clock, and the ordinary funnel drains the entry. The ladder
+   here signals only what the delegated ladder may — an own pid, or a
+   same-host child server — never an unlabeled holder; one that survives the
+   deadline is named in the failure instead. *)
+let enforce_deadline t ~session reason =
+  let rec enforce () =
+    match Hashtbl.find_opt t.entries (key session) with
+    | None -> ()
+    | Some entry -> (
+        match child_head t entry with
+        | `Terminal -> (
+            match integrate t entry with
+            | `Integrated | `Not_settled | `Unbound -> ())
+        | `Unfinished | `Absent ->
+            Hashtbl.remove t.entries (key session);
+            entry.cancelled <- true;
+            wire_interrupt t entry;
+            wind_down t entry;
+            (match entry.pid with
+            | Some pid ->
+                entry.pid <- None;
+                destroy t pid
+            | None -> (
+                match probe_root_fence t ~session () with
+                | `Held (Some pid) -> ignore (ladder_foreign t entry pid)
+                | `Free | `Held_self | `Held None | `Custodial | `Io _ -> ()));
+            let message =
+              match probe_root_fence t ~session () with
+              | `Held _ | `Held_self ->
+                  Printf.sprintf "%s; the session's fence is still held by %s"
+                    reason
+                    (holder_name t ~session)
+              | `Free | `Custodial | `Io _ -> reason
+            in
+            remove_endpoint entry;
+            trace_abandoned entry message;
+            fail_shape entry ~message;
+            enforce ())
+  in
+  enforce ()
+
+(* Root supervision's admission. Idempotent per session: while any entry —
+   delegated or root — governs the session, a second call is a no-op whose
+   sinks never fire; the standing supervision owns the outcome. *)
+let supervise t ~session ~cwd ~environment ?deadline_s
+    ?(respawns = max_respawns) ~on_settled ~on_failure () =
+  if (not t.stopped) && not (Hashtbl.mem t.entries (key session)) then begin
+    (* Exactly one outcome crosses to the caller, however many observation
+       passes re-derive it: the sink pair shares one guard, carried by every
+       successor entry through the shared shape record. *)
+    let fired = ref false in
+    let once f =
+      if not !fired then begin
+        fired := true;
+        f ()
+      end
+    in
+    let shape =
+      Root
+        {
+          root = cwd;
+          environment;
+          settled = (fun () -> once on_settled);
+          failed = (fun ~reason -> once (fun () -> on_failure ~reason));
+        }
+    in
+    register t ~shape ~budget:respawns ~child:session (fun entry ->
+        launch_root t entry);
+    match deadline_s with
+    | None -> ()
+    | Some deadline ->
+        let reason =
+          Printf.sprintf "the supervision deadline (%gs) elapsed" deadline
+        in
+        Eio.Fiber.fork ~sw:t.sw (fun () ->
+            Eio.Fiber.first
+              (fun () -> Eio.Promise.await t.stop_signal)
+              (fun () ->
+                sleep t deadline;
+                try enforce_deadline t ~session reason with
+                | Eio.Cancel.Cancelled _ as exn -> raise exn
+                | exn -> (
+                    let message =
+                      Printf.sprintf "the deadline enforcement failed: %s"
+                        (Printexc.to_string exn)
+                    in
+                    match Hashtbl.find_opt t.entries (key session) with
+                    | Some entry -> give_up t entry message
+                    | None -> Eio.traceln "broker: %s: %s" (key session) message)))
+  end
+
+(* Observation without ownership: fence and head until the head is terminal,
+   through the same loop the delegated foreign watch rides. The watch holds
+   nothing — no table entry, no fence, no connection — so it collides with no
+   supervision of the same session, and it never signals and never spawns. *)
+let watch t ~session ~on_terminal =
+  if not t.stopped then
+    Eio.Fiber.fork ~sw:t.sw (fun () ->
+        Eio.Fiber.first
+          (fun () -> Eio.Promise.await t.stop_signal)
+          (fun () ->
+            let cache = ref None in
+            try
+              unowned_watch t
+                ~alive:(fun () -> not t.stopped)
+                ~pass:(fun ~pause ->
+                  match cached_head t ~session cache with
+                  | `Absent ->
+                      on_terminal `Gone;
+                      `Done
+                  | `Terminal ->
+                      on_terminal `Settled;
+                      `Done
+                  | `Unfinished -> (
+                      match probe_fence t ~session () with
+                      | `Free ->
+                          on_terminal `Holder_died;
+                          `Done
+                      | `Held_self | `Held _ | `Custodial | `Io _ ->
+                          pause ();
+                          `Keep))
+            with
+            | Eio.Cancel.Cancelled _ as exn -> raise exn
+            | exn ->
+                Eio.traceln "broker: watch of %s ended unexpectedly: %s"
+                  (key session) (Printexc.to_string exn)))
+
+let children t =
+  Hashtbl.fold
+    (fun _ entry acc ->
+      let state =
+        if entry.cancelled then `Laddering
+        else
+          match entry.pid with
+          | Some pid -> `Spawned pid
+          | None -> `Observed
+      in
+      (entry.child, state) :: acc)
+    t.entries []
 
 (* The send — mail as a queue entry in the target's journal.
 
@@ -1093,9 +1442,11 @@ let rediscover t ~engine_for =
           with
           | `Adopt -> with_engine ~adopt:true (fun _ -> ())
           | `Adopt_and_watch ->
-              with_engine ~adopt:true (fun engine -> watch t engine ~child)
+              with_engine ~adopt:true (fun engine ->
+                  observe_running t engine ~child)
           | `Watch ->
-              with_engine ~adopt:false (fun engine -> watch t engine ~child)
+              with_engine ~adopt:false (fun engine ->
+                  observe_running t engine ~child)
           | `Adopt_and_dispose ->
               with_engine ~adopt:true (fun _ -> ());
               dispose ()
@@ -1117,11 +1468,29 @@ type send_stub =
   input:Mentat_llm.Content.t list ->
   [ `Delivered | `Undelivered of string ]
 
+type supervise_stub =
+  session:Mentat_session.Id.t ->
+  cwd:Lpath.Abs.t ->
+  environment:(string * string) list ->
+  deadline_s:float option ->
+  respawns:int ->
+  [ `Settled | `Failed of string ]
+
 (* The stub keeps the real send's per-target serialization — its own lock
    registry — so an ordering-sensitive engine test observes the primitive's
    contract, not a mock's looser one. It has no clock, so the lock wait is
-   unbounded; a stub that never returns is a test bug, not a case to serve. *)
-type stub = { send : send_stub; locks : (string, Eio.Mutex.t) Hashtbl.t }
+   unbounded; a stub that never returns is a test bug, not a case to serve.
+   The optional supervise script answers each supervision request with its
+   outcome; the stub fires exactly one of the caller's sinks per call — the
+   real verb's contract — and holds no table, so it never dedups a
+   re-supervision, exactly as the real broker re-governs a session whose
+   previous supervision has drained. *)
+type stub = {
+  send : send_stub;
+  supervise : supervise_stub option;
+  locks : (string, Eio.Mutex.t) Hashtbl.t;
+}
+
 type t = Real of broker | Stub of stub
 
 let no_processes op =
@@ -1131,12 +1500,35 @@ let no_processes op =
 let create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir ~now =
   Real (create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir ~now)
 
-let for_tests ~send = Stub { send; locks = Hashtbl.create 4 }
+let for_tests ?supervise ~send () =
+  Stub { send; supervise; locks = Hashtbl.create 4 }
 
 let materialize t engine ~child =
   match t with
   | Real b -> materialize b engine ~child
   | Stub _ -> no_processes "materialize"
+
+let supervise t ~session ~cwd ~environment ?deadline_s ?respawns ~on_settled
+    ~on_failure () =
+  match t with
+  | Real b ->
+      supervise b ~session ~cwd ~environment ?deadline_s ?respawns ~on_settled
+        ~on_failure ()
+  | Stub { supervise = None; _ } -> no_processes "supervise"
+  | Stub { supervise = Some script; _ } -> (
+      match
+        script ~session ~cwd ~environment ~deadline_s
+          ~respawns:(Option.value respawns ~default:max_respawns)
+      with
+      | `Settled -> on_settled ()
+      | `Failed reason -> on_failure ~reason)
+
+let watch t ~session ~on_terminal =
+  match t with
+  | Real b -> watch b ~session ~on_terminal
+  | Stub _ -> no_processes "watch"
+
+let children t = match t with Real b -> children b | Stub _ -> []
 
 let cancel t ~child =
   match t with Real b -> cancel b ~child | Stub _ -> no_processes "cancel"

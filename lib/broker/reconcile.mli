@@ -68,6 +68,47 @@ val decide :
     under a foreign-held fence, [head] only under a free one, so a probe is
     never spent on an arm that cannot use it. *)
 
+type root_action =
+  | Adopt
+      (** A holder serves the session's endpoint: observe it, spawn
+          nothing. *)
+  | Preempt_stale of int
+      (** A same-host child server holds the fence but serves no endpoint:
+          ladder [pid], then spawn. *)
+  | Spawn  (** The fence is free and work is outstanding: spawn. *)
+  | Settle
+      (** The fence is free and the work is concluded: answer the settled
+          sink directly — no process needed. *)
+  | Reprobe_hold
+      (** A custodial hold is in flight: re-run the table after a short
+          backoff — never preempt it, never fail over it. *)
+  | Hold
+      (** An unpreemptable holder — unlabeled, foreign-host, self-held, or a
+          serving label with a dead endpoint that may not be signalled — sits
+          on the fence over outstanding work. The interpreter observes it for
+          a bounded patience, settling early if the head concludes, and past
+          the bound fails loudly naming the holder. Never a signal. *)
+  | Refuse of string
+      (** No safe move exists (an unprobeable fence, a missing session):
+          refuse the supervision loudly. *)
+(** The type for the root-supervision decision. *)
+
+val supervise_action :
+  fence:(unit -> fence) ->
+  reachable:(unit -> bool) ->
+  head:(unit -> head) ->
+  root_action
+(** [supervise_action ~fence ~reachable ~head] is the root-supervision table
+    over the same lazy probes as {!decide}, differing on the arms the two
+    verbs must rule differently: a holder the supervisor may neither adopt
+    nor preempt is [Hold] — a bounded observation, never the delegated
+    table's immediate failure — because an interactive driver may settle the
+    work under the supervisor's watch; a free fence over a missing session is
+    [Refuse], because settling a session that does not exist would lie to the
+    caller's sink. [`Held_self] takes the [Hold] arm: whatever holds the
+    fence, this table never rules a signal against a holder that is not a
+    stale same-host child server. *)
+
 type boot =
   [ `Adopt
     (** The fence is free and work is outstanding: adopt the parent, whose

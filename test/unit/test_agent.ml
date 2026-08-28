@@ -613,6 +613,7 @@ let mk_engine ~sw ~store ?(script = default_script) ?(config = default_config)
     | None ->
         Mentat_broker.for_tests
           ~send:(fun ~origin:_ ~target:_ ~id:_ ~input:_ -> `Delivered)
+          ()
   in
   Agent.create ~sw ~store:(store_of store) ~provider:script ~config ~now
     ?max_children ?child_backend ~broker ~execution_for_mode
@@ -5075,9 +5076,11 @@ let message_script ~verbs =
 let a_brokered_message_crosses_the_broker_send () =
   let sent = ref [] in
   let broker =
-    Mentat_broker.for_tests ~send:(fun ~origin ~target ~id ~input:_ ->
+    Mentat_broker.for_tests
+      ~send:(fun ~origin ~target ~id ~input:_ ->
         sent := (origin, target, id) :: !sent;
         `Delivered)
+      ()
   in
   let materialized, child_backend = brokered_spy () in
   let script =
@@ -5131,7 +5134,8 @@ let same_edge_messages_deliver_in_order () =
   let delivered = ref [] in
   let calls = ref 0 in
   let broker =
-    Mentat_broker.for_tests ~send:(fun ~origin:_ ~target:_ ~id:_ ~input ->
+    Mentat_broker.for_tests
+      ~send:(fun ~origin:_ ~target:_ ~id:_ ~input ->
         incr calls;
         if !calls = 1 then
           for _ = 1 to 100 do
@@ -5141,6 +5145,7 @@ let same_edge_messages_deliver_in_order () =
         | [ Llm.Content.Text text ] -> delivered := text :: !delivered
         | _ -> fail "mail carries one text block");
         `Delivered)
+      ()
   in
   let _materialized, child_backend = brokered_spy () in
   let script =
@@ -5197,9 +5202,11 @@ let an_undelivered_message_redrives_at_the_next_attach () =
   let run () =
     let first = ref [] in
     let broker1 =
-      Mentat_broker.for_tests ~send:(fun ~origin:_ ~target:_ ~id ~input:_ ->
+      Mentat_broker.for_tests
+        ~send:(fun ~origin:_ ~target:_ ~id ~input:_ ->
           first := id :: !first;
           `Undelivered "the target's fence stayed held")
+        ()
     in
     let _materialized, child_backend = brokered_spy () in
     let script = message_script ~verbs:[ ("send", "extra context") ] in
@@ -5216,9 +5223,11 @@ let an_undelivered_message_redrives_at_the_next_attach () =
     Agent.shutdown engine1;
     let redriven = ref [] in
     let broker2 =
-      Mentat_broker.for_tests ~send:(fun ~origin:_ ~target:_ ~id ~input:_ ->
+      Mentat_broker.for_tests
+        ~send:(fun ~origin:_ ~target:_ ~id ~input:_ ->
           redriven := id :: !redriven;
           `Delivered)
+        ()
     in
     let _materialized2, child_backend2 = brokered_spy () in
     let engine2 =

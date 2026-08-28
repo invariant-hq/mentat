@@ -3,7 +3,8 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(** The child broker: the process half of brokered delegation, and the send.
+(** The child broker: the process half of brokered delegation, root
+    supervision, and the send.
 
     One broker per process, shared by every workspace instance that process
     hosts. The engine keeps everything semantic — the durable edge, the child
@@ -15,6 +16,12 @@
     reports back through the owning engine's {!Engine} seam, and every path
     terminates in either an integrated settlement or a parent-visible
     failure — a parked wait is never abandoned silently.
+
+    {!val-supervise} is the same machinery with a root shape: a session with
+    no delegation edge — a charter run, any owned root — is made to run and
+    observed to its conclusion, and the outcome lands in the caller's own
+    sinks instead of an engine seam. {!val-watch} observes a session without
+    owning it, and {!val-children} is the supervised table as data.
 
     The broker is also every process's one way to mail another agent:
     {!val-send} lands an input in a target session's durable queue — over the
@@ -168,6 +175,88 @@ val materialize : t -> Engine.t -> child:Mentat_session.Id.t -> unit
     re-spawned; a child whose fence holder cannot be identified or signalled
     fails the delegation loudly through [engine]'s seam. *)
 
+type failure_sink = reason:string -> unit
+(** The type for the place a given-up supervision's failure lands. Every
+    {!val-supervise} names its sink, so a silent failure arm is
+    unrepresentable: exhaustion, the deadline, and every refusal all end
+    here when they do not end in the settled callback. *)
+
+val supervise :
+  t ->
+  session:Mentat_session.Id.t ->
+  cwd:Lpath.Abs.t ->
+  environment:(string * string) list ->
+  ?deadline_s:float ->
+  ?respawns:int ->
+  on_settled:(unit -> unit) ->
+  on_failure:failure_sink ->
+  unit ->
+  unit
+(** [supervise t ~session ~cwd ~environment ~on_settled ~on_failure ()] makes
+    the root session [session] run to its conclusion and answers exactly one
+    of the two sinks, exactly once. [cwd] must be the session's recorded
+    working directory — it is the workspace identity of every dial and the
+    spawned activation's root, and the activation's own boot refuses a
+    mismatch loudly. [environment] is rendered whole as a spawned
+    activation's environment. Non-blocking; idempotent per session: while
+    this broker already runs, observes, or supervises the session, a second
+    call is a no-op whose sinks never fire — the standing supervision owns
+    the outcome. A stopped broker accepts no further supervision; a successor
+    process supervises afresh.
+
+    The fence decides, through the one owner classification the send loop
+    uses: a holder serving the session's endpoint is adopted and observed to
+    its conclusion; a custodial hold is a transient, re-probed briefly; a
+    free fence over unfinished work — an unfinished head {e or} unconsumed
+    queue entries — spawns the activation, so mail must be sent before
+    supervising (the activation holds a workless virgin root open
+    indefinitely); a free fence over concluded work answers [on_settled]
+    directly; a same-host child server holding the fence but serving no
+    endpoint is escalated and replaced. A holder that is none of these — an
+    interactive driver, an unreadable owner line, a foreign host — is never
+    signalled: it is observed for a bounded patience, settling if the head
+    concludes under it, and past the bound the supervision fails naming the
+    holder.
+
+    [on_settled] fires on a head-and-queue read — the session's work is
+    concluded — never on an exit code, and possibly while a serving holder
+    still lingers. A spawned activation that dies unsettled is respawned at
+    most [respawns] times (default 2; a caller whose runs must not re-fire
+    passes 0); exhaustion fires [on_failure]. [deadline_s], when given, is
+    the supervision's one clock: at its firing the escalation ladder — the
+    wire interrupt, a grace, then the signals, against an own process or a
+    same-host child server only — ends whatever still runs, and the outcome
+    is [on_failure] naming the deadline (a head found already terminal at
+    the firing settles instead). Without a deadline, a serving holder that
+    never concludes is observed for as long as it holds the fence. *)
+
+val watch :
+  t ->
+  session:Mentat_session.Id.t ->
+  on_terminal:([ `Settled | `Holder_died | `Gone ] -> unit) ->
+  unit
+(** [watch t ~session ~on_terminal] observes [session] without owning it —
+    the run fence and the journal head on a poll, holding no table entry, no
+    fence, and no connection — and fires [on_terminal] once with the terminal
+    observation: [`Settled] when the head-and-queue read concludes (whether
+    or not a holder lingers), [`Holder_died] when the fence is free with work
+    outstanding — whoever ran the session stopped without settling it, or
+    nothing runs it at all — and [`Gone] when the session document no longer
+    exists. A held fence keeps the watch alive, whatever the label: a watch
+    never signals, never spawns, and never preempts, so a holder that never
+    concludes is watched for as long as it holds. Watches end, without
+    firing, when the broker stops. *)
+
+val children :
+  t ->
+  (Mentat_session.Id.t * [ `Spawned of int | `Observed | `Laddering ]) list
+(** [children t] is the supervised table as data, one row per session this
+    broker currently runs or observes — delegated and root alike:
+    [`Spawned pid] for a process this broker spawned and reaps, [`Observed]
+    for a session watched through its fence and endpoint, [`Laddering] while
+    a cancel escalation is in flight. A read-only snapshot; rows leave the
+    table as their sessions settle or are abandoned. *)
+
 val send :
   t ->
   ?origin:Mentat_session.Origin.t ->
@@ -259,20 +348,38 @@ val stop : t -> unit
     {!rediscover} re-adopts them. Idempotent. *)
 
 val for_tests :
+  ?supervise:
+    (session:Mentat_session.Id.t ->
+    cwd:Lpath.Abs.t ->
+    environment:(string * string) list ->
+    deadline_s:float option ->
+    respawns:int ->
+    [ `Settled | `Failed of string ]) ->
   send:
     (origin:Mentat_session.Origin.t option ->
     target:Mentat_session.Id.t ->
     id:Mentat_session.Queue.Id.t ->
     input:Mentat_llm.Content.t list ->
     [ `Delivered | `Undelivered of string ]) ->
+  unit ->
   t
-(** [for_tests ~send] is a mocked broker for unit-tier tests of the engines
-    that hold one: {!val-send}'s fence, append, and dial effects are replaced
-    by the given function, which answers the outcome the test scripts and may
-    record what crossed. The stub keeps the real send's per-target
-    serialization — concurrent sends to one target reach the given function
-    one at a time, in arrival order — so ordering-sensitive tests observe the
-    primitive's contract. Every process-facing operation — {!materialize},
-    {!cancel}, {!rediscover} — raises [Invalid_argument]: the stub performs no
-    process work, and a test that reaches one of those has wired the wrong
-    seam. *)
+(** [for_tests ~send ()] is a mocked broker for unit-tier tests of the engines
+    and callers that hold one: {!val-send}'s fence, append, and dial effects
+    are replaced by the given function, which answers the outcome the test
+    scripts and may record what crossed. The stub keeps the real send's
+    per-target serialization — concurrent sends to one target reach the given
+    function one at a time, in arrival order — so ordering-sensitive tests
+    observe the primitive's contract.
+
+    [supervise], when given, scripts {!val-supervise}: each call hands the
+    full supervision request to the script and fires exactly one of the
+    caller's sinks with its answer — the real verb's outcome contract. The
+    stub holds no table, so a re-supervision reaches the script again,
+    exactly as the real broker re-governs a session whose previous
+    supervision has drained. {!val-children} answers the empty list: the stub
+    supervises no process.
+
+    Every process-facing operation left unstubbed — {!materialize},
+    {!val-watch}, {!cancel}, {!rediscover}, and {!val-supervise} without a
+    script — raises [Invalid_argument]: the stub performs no process work,
+    and a test that reaches one of those has wired the wrong seam. *)

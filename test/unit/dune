@@ -423,7 +423,10 @@
   unix
   lpath
   mentat_broker
+  mentat_digest
   mentat_llm
+  mentat_permission
+  mentat_sandbox
   mentat_server
   mentat_session
   mentat_store))

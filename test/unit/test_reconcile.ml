@@ -90,6 +90,68 @@ let materialize_table () =
   equal action ~msg:"a free fence over no session disposes" Reconcile.Dispose
     (decide ~head:(fun () -> `Absent) `Free)
 
+let root_action =
+  Testable.make
+    ~pp:(fun ppf -> function
+      | Reconcile.Adopt -> Format.pp_print_string ppf "Adopt"
+      | Reconcile.Preempt_stale pid -> Format.fprintf ppf "Preempt_stale %d" pid
+      | Reconcile.Spawn -> Format.pp_print_string ppf "Spawn"
+      | Reconcile.Settle -> Format.pp_print_string ppf "Settle"
+      | Reconcile.Reprobe_hold -> Format.pp_print_string ppf "Reprobe_hold"
+      | Reconcile.Hold -> Format.pp_print_string ppf "Hold"
+      | Reconcile.Refuse message -> Format.fprintf ppf "Refuse %S" message)
+    ~equal:(fun a b ->
+      match (a, b) with
+      | Reconcile.Adopt, Reconcile.Adopt
+      | Reconcile.Spawn, Reconcile.Spawn
+      | Reconcile.Settle, Reconcile.Settle
+      | Reconcile.Reprobe_hold, Reconcile.Reprobe_hold
+      | Reconcile.Hold, Reconcile.Hold ->
+          true
+      | Reconcile.Preempt_stale a, Reconcile.Preempt_stale b -> Int.equal a b
+      | Reconcile.Refuse _, Reconcile.Refuse _ -> true
+      | _ -> false)
+
+let supervise ?(reachable = never_reachable) ?(head = never_head) fence =
+  Reconcile.supervise_action ~fence:(fun () -> fence) ~reachable ~head
+
+(* The root-supervision table, arm by arm. It shares the delegated table's
+   probe discipline — reachability only under a held fence, the head only
+   under a free one — and differs where the two verbs must rule differently:
+   an unpreemptable holder is a bounded hold, never an immediate failure, and
+   a free fence over a missing session refuses rather than settles. No fence
+   answer maps to a signal against anything but a stale same-host child
+   server. *)
+let supervise_table () =
+  equal root_action ~msg:"an unprobeable fence refuses loudly"
+    (Reconcile.Refuse "")
+    (supervise (`Io "boom"));
+  equal root_action ~msg:"a self-held fence is a hold, never a signal"
+    Reconcile.Hold (supervise `Held_self);
+  equal root_action ~msg:"a reachable holder is adopted" Reconcile.Adopt
+    (supervise ~reachable:(fun () -> true) (`Held (Some 42)));
+  equal root_action ~msg:"a reachable holder needs no identity" Reconcile.Adopt
+    (supervise ~reachable:(fun () -> true) (`Held None));
+  equal root_action ~msg:"an unreachable same-host child server is preempted"
+    (Reconcile.Preempt_stale 42)
+    (supervise ~reachable:(fun () -> false) (`Held (Some 42)));
+  equal root_action
+    ~msg:"an unreachable unidentifiable holder is a bounded hold, no signal"
+    Reconcile.Hold
+    (supervise ~reachable:(fun () -> false) (`Held None));
+  equal root_action
+    ~msg:"a custodial hold is re-probed — never preempted, never failed"
+    Reconcile.Reprobe_hold (supervise `Custodial);
+  equal root_action ~msg:"a free fence with outstanding work spawns"
+    Reconcile.Spawn
+    (supervise ~head:(fun () -> `Unfinished) `Free);
+  equal root_action ~msg:"a free fence over concluded work settles"
+    Reconcile.Settle
+    (supervise ~head:(fun () -> `Terminal) `Free);
+  equal root_action ~msg:"a free fence over no session refuses"
+    (Reconcile.Refuse "")
+    (supervise ~head:(fun () -> `Absent) `Free)
+
 (* The node-boot table over its full domain. *)
 let boot_table () =
   let all_heads = [ `Unfinished; `Terminal; `Absent ] in
@@ -143,5 +205,6 @@ let () =
   run "mentat.reconcile"
     [
       test "the materialization table" materialize_table;
+      test "the root-supervision table" supervise_table;
       test "the node-boot table" boot_table;
     ]
