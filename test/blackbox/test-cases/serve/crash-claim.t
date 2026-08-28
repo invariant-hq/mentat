@@ -1,10 +1,11 @@
-The claim across a daemon crash: a process the daemon spawns must not
-inherit the daemon's claim descriptor (the O_CLOEXEC half of the discovery
-claim lock), or a crashed daemon's claim would live on in its children and
-no successor could ever start. The producer is the daemon-as-frontend path:
-a browser prompt against a dormant session starts the session's agent
-through the daemon's broker — a long-lived descendant of the daemon,
-exactly the process an inherited descriptor would ride.
+The claim across a daemon crash. POSIX record locks are owned by the
+process: the kernel releases the daemon's claim the instant it dies,
+whatever descriptors its children carry — so the truths this test can pin
+are that the spawned agent survives the daemon's death as its own
+process, that a successor daemon claims the store immediately, and that
+the successor's residue sweep spares the living agent's endpoint. The
+producer is the daemon-as-frontend path: a browser prompt against a
+dormant session starts the session's agent through the daemon's broker.
 
   $ use_trusted_workspace
   $ SOCK_BASE=$(child_sock_base)
@@ -56,10 +57,9 @@ pid is recorded first to tell the successor's fresh pid apart.
   $ kill -0 "$(cat agent.pid)" && echo agent-survives-daemon
   agent-survives-daemon
 
-The proof: a successor daemon claims the store immediately. The claim lock
-was kernel-released at the crash only because the living agent did NOT
-inherit its descriptor — were it inherited, this start would refuse
-"already running" for as long as the agent lingers.
+A successor daemon claims the store immediately: the kernel released the
+dead daemon's record lock at the crash, and the surviving agent holds no
+claim of its own to stand in the way.
 
   $ mentatd >successor.out 2>&1 &
   $ MENTAT_DAEMON_PID=$!
@@ -69,10 +69,16 @@ inherit its descriptor — were it inherited, this start would refuse
   reclaimed-by-fresh-daemon
 
 The successor's boot residue sweep spared the live agent: its session is
-stored, so its endpoint leaf is claimed and survives.
+stored, so its endpoint leaf is claimed and survives — and the spared
+endpoint is genuinely routable: a mid-linger mail delivers only over the
+wire into the surviving agent's own socket.
 
   $ test -e "$SOCK_BASE/$SES" && echo endpoint-survives-boot
   endpoint-survives-boot
+  $ mentat session send "$SES" "mail for the survivor" --cwd "$PWD" | sed "s/$SES/SES/"
+  delivered SES
+  $ head -n 1 "$XDG_DATA_HOME/mentat/sessions/$SES/run.lock" | mentat_cram json .pid | diff - agent.pid && echo same-surviving-agent
+  same-surviving-agent
 
 Teardown: stop the successor, reap the lingering agent.
 

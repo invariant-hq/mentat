@@ -251,7 +251,7 @@ let install_cmd =
          outlive it — $(b,KillMode=process) under systemd, \
          $(b,AbandonProcessGroup) under launchd. Delegated children detach \
          into their own sessions and must survive a stop, restart, or crash \
-         of the daemon, which adopts them when it next boots; without the \
+         of the daemon; the reconcile pass settles any orphaned routine run at its next boot — without the \
          pin, the service manager would take mid-turn runs down with the \
          daemon. Do not edit it out — the next install overwrites edits \
          anyway.";

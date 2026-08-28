@@ -35,7 +35,7 @@ let launchd_golden =
      next install overwrites it. AbandonProcessGroup is load-bearing: the
      daemon's run children detach into their own sessions and must outlive
      it, so stopping or restarting this job may signal only the daemon
-     itself — it adopts the survivors when it next boots. Without the key,
+     itself — the survivors account for themselves, and the reconcile pass settles any orphaned routine run at its next boot. Without the key,
      launchd would take mid-turn runs down with the job. -->
 <plist version="1.0">
 <dict>
@@ -67,7 +67,7 @@ let systemd_golden =
 # next install overwrites it. KillMode=process is load-bearing: the daemon's
 # run children detach into their own sessions and must outlive it, so
 # stopping or restarting this unit may signal only the daemon itself — it
-# adopts the survivors when it next boots. The default control-group kill
+# survivors account for themselves; reconcile settles orphaned routine runs. The default control-group kill
 # would take mid-turn runs down with the unit. The restart pacing is
 # load-bearing too: a daemon spawned outside the service holds the per-user
 # claim and this unit's daemon then exits nonzero, so the manager must retry

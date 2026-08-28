@@ -1535,7 +1535,7 @@ let sweep_endpoints t =
     | Error error ->
         Eio.traceln "broker: endpoint residue sweep skipped: %s"
           (Mentat_store.Session.Error.message error)
-    | Ok (documents, _corrupt) ->
+    | Ok (documents, corrupt) ->
         let claimed = Hashtbl.create 16 in
         List.iter
           (fun document ->
@@ -1546,6 +1546,20 @@ let sweep_endpoints t =
                    (Mentat_session.Id.to_string (Mentat_session.id session)))
               ())
           documents;
+        (* Existence claims a leaf, not decodability: a session this binary
+           cannot decode — an older sweeper meeting newer documents across an
+           upgrade — still exists, and its agent may be live behind the leaf.
+           The corrupt facts carry the id parsed from the store path, which
+           is all a claim needs. *)
+        List.iter
+          (fun (fact : Mentat_store.Session.Corrupt.t) ->
+            match fact.Mentat_store.Session.Corrupt.id with
+            | Some id ->
+                Hashtbl.replace claimed
+                  (socket_leaf ~session:(Mentat_session.Id.to_string id))
+                  ()
+            | None -> ())
+          corrupt;
         List.iter
           (fun leaf ->
             if not (Hashtbl.mem claimed leaf) then

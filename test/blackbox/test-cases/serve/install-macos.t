@@ -3,7 +3,7 @@ The resident-service verbs, driven only through their no-touch surfaces:
 paths fire before any launchctl call — this cram must never load a real
 service. The pinned golden carries the crash-story contract explicitly:
 AbandonProcessGroup keeps run children alive across a stop or crash of the
-daemon, which adopts them at its next boot.
+daemon; the reconcile pass settles any orphaned routine run at its next boot.
 
   $ mentatd install --print | sed -E 's#<string>/[^<]*mentatd</string>#<string>MENTATD</string>#'
   <?xml version="1.0" encoding="UTF-8"?>
@@ -12,7 +12,7 @@ daemon, which adopts them at its next boot.
        next install overwrites it. AbandonProcessGroup is load-bearing: the
        daemon's run children detach into their own sessions and must outlive
        it, so stopping or restarting this job may signal only the daemon
-       itself — it adopts the survivors when it next boots. Without the key,
+       itself — the survivors account for themselves, and the reconcile pass settles any orphaned routine run at its next boot. Without the key,
        launchd would take mid-turn runs down with the job. -->
   <plist version="1.0">
   <dict>

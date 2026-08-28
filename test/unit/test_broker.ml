@@ -1020,7 +1020,7 @@ let the_watch_reports_a_holder_death () =
    session answers to is residue and is removed. *)
 let sweep_keeps_a_stored_sessions_leaf () =
   with_broker "sweep"
-  @@ fun ~sw:_ ~base:_ ~clock:_ ~store ~broker ~socket_base ->
+  @@ fun ~sw:_ ~base ~clock:_ ~store ~broker ~socket_base ->
   create_root store ~id:"run";
   let leaf id = Broker.socket_dir ~base:socket_base ~session:id in
   let rec ensure_dir path =
@@ -1031,9 +1031,21 @@ let sweep_keeps_a_stored_sessions_leaf () =
   in
   ensure_dir (leaf "run");
   ensure_dir (leaf "ghost");
+  (* A session this binary cannot decode still exists: existence, not
+     decodability, claims the leaf — the upgrade window where an older
+     sweeper meets newer documents must not sever a live agent. *)
+  let broken_dir =
+    List.fold_left Filename.concat base [ "sessions"; "broken" ]
+  in
+  ensure_dir broken_dir;
+  Out_channel.with_open_bin (Filename.concat broken_dir "session.json")
+    (fun oc -> Out_channel.output_string oc "{not json");
+  ensure_dir (leaf "broken");
   Broker.sweep_endpoints broker;
   is_true ~msg:"the live root's endpoint leaf survives the sweep"
     (Sys.file_exists (leaf "run"));
+  is_true ~msg:"an undecodable session's leaf survives the sweep"
+    (Sys.file_exists (leaf "broken"));
   is_false ~msg:"a leaf no session answers to is removed as residue"
     (Sys.file_exists (leaf "ghost"))
 

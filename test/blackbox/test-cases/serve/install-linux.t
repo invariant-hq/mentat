@@ -3,14 +3,14 @@ The resident-service verbs, driven only through their no-touch surfaces:
 refusal paths fire before any systemctl call — this cram must never enable a
 real service. The pinned golden carries the crash-story contract explicitly:
 KillMode=process keeps run children alive across a stop or restart of the
-daemon, which adopts them at its next boot.
+daemon; the reconcile pass settles any orphaned routine run at its next boot.
 
   $ mentatd install --print | sed -E 's#^ExecStart=".*"$#ExecStart="MENTATD"#'
   # Written by `mentatd install`; `mentatd uninstall` removes it, and the
   # next install overwrites it. KillMode=process is load-bearing: the daemon's
   # run children detach into their own sessions and must outlive it, so
   # stopping or restarting this unit may signal only the daemon itself — it
-  # adopts the survivors when it next boots. The default control-group kill
+  # survivors account for themselves; reconcile settles orphaned routine runs. The default control-group kill
   # would take mid-turn runs down with the unit. The restart pacing is
   # load-bearing too: a daemon spawned outside the service holds the per-user
   # claim and this unit's daemon then exits nonzero, so the manager must retry

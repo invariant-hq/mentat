@@ -110,9 +110,9 @@ type listener = {
       under a sticky directory a non-owner cannot unlink, rename, or replace the
       entry we verified, so no other uid can swap a symlink in beneath us between
       the [lstat] and the [bind]. That premise is load-bearing, so we check it: we
-      [lstat] the parent and refuse loudly (naming [--socket]) when it is
+      [lstat] the parent and refuse loudly (naming [--socket-dir]) when it is
       world-writable {b without} the sticky bit. The default [/tmp] parent always
-      passes; a [--socket] override into an unsafe location is caught here.
+      passes; a [--socket-dir] override into an unsafe location is caught here.
 
    The residual is the same-uid boundary the RFC concedes: a process running as
    the same user is trusted. Uses [Unix] directly; the library takes no filesystem
@@ -147,8 +147,8 @@ let ensure_private_dir dir =
         invalid_arg
           (Printf.sprintf
              "mentat_server: parent directory %s is world-writable without the \
-              sticky bit; refusing to bind a socket there (use --socket to \
-              choose a private directory)"
+              sticky bit; refusing to bind a socket there (use --socket-dir \
+              to choose a private directory)"
              parent)
 
 let listen ~sw ~net bind =
@@ -160,7 +160,7 @@ let listen ~sw ~net bind =
           (Printf.sprintf
              "mentat_server: socket path %S is %d bytes, at or over the \
               %d-byte unix-socket limit; choose a shorter directory (the \
-              --socket flag, or a shallower data home)"
+              --socket-dir flag, or a shallower data home)"
              path (String.length path) sun_path_max);
       ensure_private_dir dir;
       (try Unix.unlink path with Unix.Unix_error _ -> ());
