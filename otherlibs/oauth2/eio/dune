@@ -14,4 +14,5 @@
   tls
   domain-name
   ipaddr
-  mirage-crypto-rng.unix))
+  mirage-crypto-rng.unix
+  unix))

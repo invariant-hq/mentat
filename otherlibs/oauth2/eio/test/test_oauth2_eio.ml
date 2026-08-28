@@ -532,6 +532,259 @@ let test_device_authorization_reserved_extra_is_pure_error env () =
       equal string ~msg:"reserved parameter" "client_id" name
   | Ok _request -> failf "expected invalid request"
 
+(* The loopback redirect listener. Each test binds an ephemeral port first,
+   then aims the listener at it; the browser's dial is a plain [post] against
+   the same loopback, so the listener's answers are asserted as raw
+   responses. *)
+
+let free_port env =
+  Eio.Switch.run @@ fun sw ->
+  let socket =
+    Eio.Net.listen env#net ~sw ~backlog:1 ~reuse_addr:true
+      (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
+  in
+  match Eio.Net.listening_addr socket with
+  | `Tcp (_, port) -> port
+  | `Unix path -> failf "expected TCP listening socket, got Unix path %S" path
+
+let string_of_loopback_error error =
+  Format.asprintf "%a" Oauth2_eio.Loopback.pp_error error
+
+(* Dial each target in order once the listener is ready, recording the raw
+   answers; the requests ride [on_ready] so no request can race the bind,
+   and [join] holds the test until the last answer is read — the listener
+   settles the moment it accepts a callback, before the browser's fiber has
+   necessarily read the final page. *)
+let dialing env sw targets =
+  let answers = ref [] in
+  let http = client env in
+  let finished, finish = Eio.Promise.create () in
+  let on_ready () =
+    Eio.Fiber.fork ~sw (fun () ->
+        List.iter
+          (fun target ->
+            match
+              Oauth2_eio.post http ~sw ~uri:(Uri.of_string target) ~body:"" ()
+            with
+            | Ok response -> answers := response :: !answers
+            | Error error ->
+                failf "loopback dial failed: %s" (string_of_transport error))
+          targets;
+        Eio.Promise.resolve finish ())
+  in
+  let join () = Eio.Promise.await finished in
+  (answers, join, on_ready)
+
+let test_loopback_grant_round_trip env () =
+  Eio.Switch.run @@ fun sw ->
+  let port = free_port env in
+  let redirect_uri =
+    Uri.of_string (Printf.sprintf "http://127.0.0.1:%d/callback" port)
+  in
+  let answers, join, on_ready =
+    dialing env sw
+      [
+        Printf.sprintf "http://127.0.0.1:%d/callback?code=abc&state=s1" port;
+      ]
+  in
+  match
+    Oauth2_eio.Loopback.await_once ~net:env#net ~clock:env#clock ~on_ready
+      ~redirect_uri ~timeout_s:5.0 ()
+  with
+  | Error error -> failf "await_once: %s" (string_of_loopback_error error)
+  | Ok callback -> (
+      join ();
+      equal (option string) ~msg:"the callback carries the code" (Some "abc")
+        (Uri.get_query_param callback "code");
+      equal (option string) ~msg:"the callback carries the state" (Some "s1")
+        (Uri.get_query_param callback "state");
+      equal string ~msg:"the callback keeps the redirect URI's authority"
+        (Printf.sprintf "http://127.0.0.1:%d/callback" port)
+        (Uri.to_string (Uri.with_query callback []));
+      match !answers with
+      | [ response ] ->
+          equal int ~msg:"a grant answers 200" 200
+            response.Oauth2.Response.status;
+          is_true ~msg:"the default page names the grant"
+            (let body = response.Oauth2.Response.body in
+             let sub = "Authorization received" in
+             let n = String.length sub and h = String.length body in
+             let rec go i =
+               i + n <= h
+               && (String.equal (String.sub body i n) sub || go (i + 1))
+             in
+             go 0)
+      | answers -> failf "expected one answer, got %d" (List.length answers))
+
+let contains_sub body sub =
+  let n = String.length sub and h = String.length body in
+  let rec go i =
+    i + n <= h && (String.equal (String.sub body i n) sub || go (i + 1))
+  in
+  go 0
+
+let test_loopback_denial_settles env () =
+  Eio.Switch.run @@ fun sw ->
+  let port = free_port env in
+  let redirect_uri =
+    Uri.of_string (Printf.sprintf "http://127.0.0.1:%d/callback" port)
+  in
+  let answers, join, on_ready =
+    dialing env sw
+      [
+        Printf.sprintf
+          "http://127.0.0.1:%d/callback?error=access_denied&error_description=nope&state=s1"
+          port;
+      ]
+  in
+  match
+    Oauth2_eio.Loopback.await_once ~net:env#net ~clock:env#clock ~on_ready
+      ~redirect_uri ~timeout_s:5.0 ()
+  with
+  | Error error -> failf "await_once: %s" (string_of_loopback_error error)
+  | Ok callback -> (
+      join ();
+      equal (option string) ~msg:"the denial is returned, not swallowed"
+        (Some "access_denied")
+        (Uri.get_query_param callback "error");
+      match !answers with
+      | [ response ] ->
+          equal int ~msg:"a denial still answers 200" 200
+            response.Oauth2.Response.status;
+          is_true ~msg:"the default page names the denial"
+            (contains_sub response.Oauth2.Response.body
+               "access_denied: nope")
+      | answers -> failf "expected one answer, got %d" (List.length answers))
+
+let test_loopback_unverified_keeps_the_shot env () =
+  Eio.Switch.run @@ fun sw ->
+  let port = free_port env in
+  let redirect_uri =
+    Uri.of_string (Printf.sprintf "http://127.0.0.1:%d/callback" port)
+  in
+  let answers, join, on_ready =
+    dialing env sw
+      [
+        Printf.sprintf "http://127.0.0.1:%d/callback?code=evil&state=forged"
+          port;
+        Printf.sprintf "http://127.0.0.1:%d/callback?code=abc&state=s1" port;
+      ]
+  in
+  let accept callback =
+    Uri.get_query_param callback "state" = Some "s1"
+  in
+  match
+    Oauth2_eio.Loopback.await_once ~net:env#net ~clock:env#clock ~on_ready
+      ~accept ~redirect_uri ~timeout_s:5.0 ()
+  with
+  | Error error -> failf "await_once: %s" (string_of_loopback_error error)
+  | Ok callback -> (
+      join ();
+      equal (option string)
+        ~msg:"the refused callback never consumed the shot" (Some "abc")
+        (Uri.get_query_param callback "code");
+      match List.rev !answers with
+      | [ refused; accepted ] ->
+          equal int ~msg:"a refused callback answers 400" 400
+            refused.Oauth2.Response.status;
+          is_true ~msg:"the refused page says unverified"
+            (contains_sub refused.Oauth2.Response.body "verified");
+          equal int ~msg:"the accepted callback answers 200" 200
+            accepted.Oauth2.Response.status
+      | answers -> failf "expected two answers, got %d" (List.length answers))
+
+let test_loopback_serve_seam env () =
+  Eio.Switch.run @@ fun sw ->
+  let port = free_port env in
+  let redirect_uri =
+    Uri.of_string (Printf.sprintf "http://127.0.0.1:%d/callback" port)
+  in
+  let answers, join, on_ready =
+    dialing env sw
+      [
+        Printf.sprintf "http://127.0.0.1:%d/" port;
+        Printf.sprintf "http://127.0.0.1:%d/elsewhere" port;
+        Printf.sprintf "http://127.0.0.1:%d/callback?code=abc" port;
+      ]
+  in
+  let serve ~path =
+    if String.equal path "/" then Some "<html>entry</html>" else None
+  in
+  match
+    Oauth2_eio.Loopback.await_once ~net:env#net ~clock:env#clock ~on_ready
+      ~serve ~redirect_uri ~timeout_s:5.0 ()
+  with
+  | Error error -> failf "await_once: %s" (string_of_loopback_error error)
+  | Ok _ -> (
+      join ();
+      match List.rev !answers with
+      | [ served; missed; _callback ] ->
+          equal int ~msg:"a served page answers 200" 200
+            served.Oauth2.Response.status;
+          equal string ~msg:"the served page is the caller's"
+            "<html>entry</html>" served.Oauth2.Response.body;
+          equal int ~msg:"an unserved path answers 404" 404
+            missed.Oauth2.Response.status
+      | answers ->
+          failf "expected three answers, got %d" (List.length answers))
+
+let test_loopback_custom_respond env () =
+  Eio.Switch.run @@ fun sw ->
+  let port = free_port env in
+  let redirect_uri =
+    Uri.of_string (Printf.sprintf "http://127.0.0.1:%d/callback" port)
+  in
+  let answers, join, on_ready =
+    dialing env sw
+      [ Printf.sprintf "http://127.0.0.1:%d/callback?code=abc" port ]
+  in
+  let respond = function
+    | Oauth2_eio.Loopback.Granted -> "<html>branded</html>"
+    | Oauth2_eio.Loopback.Denied _ | Oauth2_eio.Loopback.Unverified
+    | Oauth2_eio.Loopback.Not_found ->
+        "<html>other</html>"
+  in
+  match
+    Oauth2_eio.Loopback.await_once ~net:env#net ~clock:env#clock ~on_ready
+      ~respond ~redirect_uri ~timeout_s:5.0 ()
+  with
+  | Error error -> failf "await_once: %s" (string_of_loopback_error error)
+  | Ok _ -> (
+      join ();
+      match !answers with
+      | [ response ] ->
+          equal string ~msg:"the injected page is served"
+            "<html>branded</html>" response.Oauth2.Response.body
+      | answers -> failf "expected one answer, got %d" (List.length answers))
+
+let test_loopback_times_out env () =
+  let port = free_port env in
+  let redirect_uri =
+    Uri.of_string (Printf.sprintf "http://127.0.0.1:%d/callback" port)
+  in
+  match
+    Oauth2_eio.Loopback.await_once ~net:env#net ~clock:env#clock
+      ~redirect_uri ~timeout_s:0.05 ()
+  with
+  | Error `Timed_out -> ()
+  | Error error -> failf "await_once: %s" (string_of_loopback_error error)
+  | Ok _ -> failf "expected a timeout"
+
+let test_loopback_refuses_bad_redirect_uris env () =
+  let refuse uri =
+    match
+      Oauth2_eio.Loopback.await_once ~net:env#net ~clock:env#clock
+        ~redirect_uri:(Uri.of_string uri) ~timeout_s:1.0 ()
+    with
+    | Error (`Invalid_redirect_uri _) -> ()
+    | Error error ->
+        failf "%s: unexpected error %s" uri (string_of_loopback_error error)
+    | Ok _ -> failf "%s: expected a refusal" uri
+  in
+  refuse "http://127.0.0.1/callback";
+  refuse "http://example.com:8917/callback";
+  refuse "http:///callback"
+
 let with_eio test () = Eio_main.run @@ fun env -> test env ()
 
 let () =
@@ -583,5 +836,22 @@ let () =
           test ~timeout:3.0
             "device authorization rejects reserved extra before transport"
             (with_eio test_device_authorization_reserved_extra_is_pure_error);
+        ];
+      group "loopback"
+        [
+          test ~timeout:10.0 "a granted callback round-trips"
+            (with_eio test_loopback_grant_round_trip);
+          test ~timeout:10.0 "a provider denial settles the shot"
+            (with_eio test_loopback_denial_settles);
+          test ~timeout:10.0 "an unaccepted callback keeps the shot"
+            (with_eio test_loopback_unverified_keeps_the_shot);
+          test ~timeout:10.0 "the serve seam answers off-path requests"
+            (with_eio test_loopback_serve_seam);
+          test ~timeout:10.0 "an injected respond replaces the pages"
+            (with_eio test_loopback_custom_respond);
+          test ~timeout:10.0 "the wait expires loudly"
+            (with_eio test_loopback_times_out);
+          test ~timeout:3.0 "malformed redirect URIs refuse"
+            (with_eio test_loopback_refuses_bad_redirect_uris);
         ];
     ]

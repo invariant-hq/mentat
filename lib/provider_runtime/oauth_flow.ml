@@ -144,8 +144,6 @@ module Http = struct
 end
 
 module Local_callback = struct
-  exception Callback_failed of exn * Printexc.raw_backtrace
-
   (* The loopback callback is the only mentat surface a browser ever renders, so
      it earns the brand rather than a bare sentence: the paprika heap mark and
      wordmark, a monospace terminal face, and an outcome-tinted ❯
@@ -329,163 +327,30 @@ module Local_callback = struct
       ~message:"this is the mentat sign-in callback."
       ~guide:"nothing to do here — you can close this tab." ()
 
-  let callback_absolute_uri ~redirect_uri request_uri =
-    redirect_uri |> fun uri ->
-    Uri.with_path uri (Uri.path request_uri) |> fun uri ->
-    Uri.with_query uri (Uri.query request_uri) |> fun uri ->
-    Uri.with_fragment uri (Uri.fragment request_uri)
-
-  let callback_port redirect_uri =
-    match Uri.port redirect_uri with
-    | Some port -> Ok port
-    | None ->
-        Error
-          (Error.Invalid_request
-             "browser redirect URI must include an explicit port")
-
-  let callback_hosts redirect_uri =
-    match Uri.host redirect_uri with
-    | Some "127.0.0.1" -> Ok [ Eio.Net.Ipaddr.V4.loopback ]
-    | Some "::1" -> Ok [ Eio.Net.Ipaddr.V6.loopback ]
-    | Some "localhost" ->
-        Ok [ Eio.Net.Ipaddr.V4.loopback; Eio.Net.Ipaddr.V6.loopback ]
-    | Some host ->
-        Error
-          (Error.Invalid_request ("unsupported browser redirect host: " ^ host))
-    | None ->
-        Error (Error.Invalid_request "browser redirect URI must include a host")
-
-  let respond_html ~status body =
-    Cohttp_eio.Server.respond_string
-      ~headers:
-        (Cohttp.Header.of_list [ ("Content-Type", "text/html; charset=utf-8") ])
-      ~status ~body ()
-
-  let listen_all stdenv sw hosts port =
-    let listen host =
-      Eio.Net.listen (Eio.Stdenv.net stdenv) ~sw ~backlog:4 ~reuse_addr:true
-        (`Tcp (host, port))
-    in
-    let rec loop sockets bind_failed = function
-      | [] -> (
-          match (sockets, bind_failed) with
-          | [], true -> Error (Error.Network "callback listener unavailable")
-          | [], false ->
-              Error (Error.Network "no callback hosts were available")
-          | _ :: _, _ -> Ok (List.rev sockets))
-      | host :: hosts -> (
-          match listen host with
-          | socket -> loop (socket :: sockets) bind_failed hosts
-          | exception (Eio.Io _ | Unix.Unix_error _) ->
-              Log.debug (fun m -> m "callback host bind failed");
-              loop sockets true hosts)
-    in
-    loop [] false hosts
-
-  let await_once ~stdenv ?provider ?(on_ready = fun () -> ())
-      ?(accept = fun _ -> true) ?(serve = fun ~path:_ -> None) ~redirect_uri
+  (* The listener mechanics live in [Oauth2_eio.Loopback]; this wrapper
+     injects the branded pages and folds the listener's errors into this
+     leaf's error sum. *)
+  let await_once ~stdenv ?provider ?on_ready ?accept ?serve ~redirect_uri
       ~timeout_s () =
-    let* hosts = callback_hosts redirect_uri in
-    let* port = callback_port redirect_uri in
-    Eio.Switch.run ~name:"oauth2-local-callback" @@ fun sw ->
-    let stop, stop_resolver = Eio.Promise.create () in
-    let result, result_resolver = Eio.Promise.create () in
-    let server_failure, server_failure_resolver = Eio.Promise.create () in
-    let resolve_server_failure exn =
-      if not (Eio.Promise.is_resolved result) then
-        let failure =
-          match exn with
-          | Callback_failed (exn, backtrace) -> `Raise (exn, backtrace)
-          | Eio.Cancel.Cancelled _ -> `Raise (exn, Printexc.get_raw_backtrace ())
-          | Eio.Io _ | Unix.Unix_error _ -> `Network
-          | exn -> `Raise (exn, Printexc.get_raw_backtrace ())
-        in
-        ignore (Eio.Promise.try_resolve server_failure_resolver failure)
+    let respond = function
+      | Oauth2_eio.Loopback.Granted -> html_success ~provider ()
+      | Oauth2_eio.Loopback.Denied { error; description } ->
+          html_denied ~provider ~error ~description ()
+      | Oauth2_eio.Loopback.Unverified -> html_unverified ~provider ()
+      | Oauth2_eio.Loopback.Not_found -> html_not_found ()
     in
-    let accept callback =
-      match accept callback with
-      | accepted -> accepted
-      | exception exn ->
-          let backtrace = Printexc.get_raw_backtrace () in
-          raise (Callback_failed (exn, backtrace))
-    in
-    let serve ~path =
-      match serve ~path with
-      | page -> page
-      | exception exn ->
-          let backtrace = Printexc.get_raw_backtrace () in
-          raise (Callback_failed (exn, backtrace))
-    in
-    let server =
-      Cohttp_eio.Server.make
-        ~callback:(fun connection request body ->
-          ignore connection;
-          ignore body;
-          let request_uri = Cohttp.Request.uri request in
-          if String.equal (Uri.path request_uri) (Uri.path redirect_uri) then
-            let callback = callback_absolute_uri ~redirect_uri request_uri in
-            if not (accept callback) then (
-              Log.info (fun m -> m "unaccepted authorization callback ignored");
-              respond_html ~status:`Bad_request (html_unverified ~provider ()))
-            else if Eio.Promise.try_resolve result_resolver (Ok callback) then (
-              Log.info (fun m -> m "authorization callback received");
-              (* A provider that denies the request still redirects to the
-                 callback — with [?error=] in place of a code and a matching
-                 state, so it is accepted and settled here as failed. The page
-                 must show the denial, not a success. *)
-              match Uri.get_query_param callback "error" with
-              | Some error when not (String.equal error "") ->
-                  respond_html ~status:`OK
-                    (html_denied ~provider ~error
-                       ~description:
-                         (Uri.get_query_param callback "error_description")
-                       ())
-              | Some _ | None ->
-                  respond_html ~status:`OK (html_success ~provider ()))
-            else
-              respond_html ~status:`Bad_request (html_unverified ~provider ())
-          else
-            match serve ~path:(Uri.path request_uri) with
-            | Some page -> respond_html ~status:`OK page
-            | None -> respond_html ~status:`Not_found (html_not_found ()))
-        ()
-    in
-    let* sockets = listen_all stdenv sw hosts port in
-    List.iter
-      (fun socket ->
-        Eio.Fiber.fork_daemon ~sw (fun () ->
-            (match
-               Cohttp_eio.Server.run ~stop ~on_error:resolve_server_failure
-                 socket server
-             with
-            | () -> ()
-            | exception exn -> resolve_server_failure exn);
-            `Stop_daemon))
-      sockets;
-    on_ready ();
-    Log.info (fun m -> m "local callback server listening port=%d" port);
-    Fun.protect
-      ~finally:(fun () -> ignore (Eio.Promise.try_resolve stop_resolver ()))
-      (fun () ->
-        let settled =
-          Eio.Fiber.first
-            (fun () ->
-              `Settled
-                (Eio.Fiber.first
-                   (fun () -> `Callback (Eio.Promise.await result))
-                   (fun () ->
-                     `Server_failure (Eio.Promise.await server_failure))))
-            (fun () ->
-              Eio.Time.sleep (Eio.Stdenv.clock stdenv) timeout_s;
-              `Timed_out)
-        in
-        match settled with
-        | `Timed_out -> Error (Error.Timeout "browser authorization timed out")
-        | `Settled (`Callback callback) -> callback
-        | `Settled (`Server_failure `Network) ->
-            Error (Error.Network "callback listener unavailable")
-        | `Settled (`Server_failure (`Raise (exn, backtrace))) ->
-            Printexc.raise_with_backtrace exn backtrace)
+    match
+      Oauth2_eio.Loopback.await_once ~net:(Eio.Stdenv.net stdenv)
+        ~clock:(Eio.Stdenv.clock stdenv) ?on_ready ?accept ?serve ~respond
+        ~redirect_uri ~timeout_s ()
+    with
+    | Ok callback -> Ok callback
+    | Error (`Invalid_redirect_uri reason) ->
+        Error (Error.Invalid_request ("browser redirect URI: " ^ reason))
+    | Error `Listener_unavailable ->
+        Error (Error.Network "callback listener unavailable")
+    | Error `Timed_out ->
+        Error (Error.Timeout "browser authorization timed out")
 end
 
 module Openai_chatgpt = struct
