@@ -248,6 +248,53 @@ module Run_policy : sig
       invariants as {!make}. *)
 end
 
+module Goal : sig
+  (** Recorded goal intent — "keep working toward this, within these bounds,
+      until you declare it done."
+
+      A goal is standing owner intent on a session, written and retired by
+      owner verbs alone. It grants nothing and drives nothing by itself: the
+      steward process serving the session reads it at each finished judgment
+      and decides whether to mail another continuation. Progress is never
+      written back here — done-ness is derived from the journal, so no second
+      record can disagree with it. *)
+
+  type t = private {
+    objective : string;  (** What the session is working toward; non-empty. *)
+    max_turns : int option;
+        (** The continuation bound, counted in goal continuations; positive. *)
+    budget : float option;
+        (** The spend bound in dollars, metered against the journal's whole
+            cost fold; positive. *)
+  }
+
+  val make : objective:string -> ?max_turns:int -> ?budget:float -> unit -> t
+  (** [make ~objective ()] is goal intent. Bounds are optional; absence means
+      the owner is the only bound.
+
+      Raises [Invalid_argument] if [objective] is empty, [max_turns] is not
+      positive, or [budget] is not positive. *)
+
+  val objective : t -> string
+  (** [objective t] is what the session is working toward. *)
+
+  val max_turns : t -> int option
+  (** [max_turns t] is [t]'s continuation bound. *)
+
+  val budget : t -> float option
+  (** [budget t] is [t]'s spend bound in dollars. *)
+
+  val equal : t -> t -> bool
+  (** [equal a b] is [true] iff [a] and [b] record the same intent. *)
+
+  val pp : Format.formatter -> t -> unit
+  (** [pp] formats goal intent for diagnostics. *)
+
+  val jsont : t Jsont.t
+  (** [jsont] maps goal intent to JSON values. Decoding validates the same
+      invariants as {!make}. *)
+end
+
 type t = private {
   title : string option;  (** Optional non-empty user-facing title. *)
   status : Status.t;  (** Saved lifecycle status. *)
@@ -259,6 +306,8 @@ type t = private {
       (** Trigger provenance, if a trigger host created this session. *)
   run_policy : Run_policy.t option;
       (** The recorded run contract, if the session was created under one. *)
+  goal : Goal.t option;
+      (** Standing goal intent, if the owner has recorded one. *)
   root : Mentat_workspace.Root.t;
       (** The workspace the session was created under. {!Mentat_workspace.Root}
           is the one owner of a session's workspace identity; the absolute
@@ -286,24 +335,27 @@ val make :
   ?delegated_from:Delegated_from.t ->
   ?triggered_from:Triggered_from.t ->
   ?run_policy:Run_policy.t ->
+  ?goal:Goal.t ->
   cwd:Lpath.Abs.t ->
   created_at:Time.t ->
   updated_at:Time.t ->
   unit ->
   t
 (** [make ?title ?status ?forked_from ?delegated_from ?triggered_from
-     ?run_policy ~cwd ~created_at ~updated_at ()] is metadata whose workspace
-    identity is {!Mentat_workspace.Root.of_dir} [cwd] — the v1 injective
-    minting of a directory into a durable root.
+     ?run_policy ?goal ~cwd ~created_at ~updated_at ()] is metadata whose
+    workspace identity is {!Mentat_workspace.Root.of_dir} [cwd] — the v1
+    injective minting of a directory into a durable root.
 
     [status] defaults to {!Status.Active}. [title], when present, must be a
     non-empty display title; no trimming or normalization is performed.
 
     Raises [Invalid_argument] if [title] is empty, [updated_at] is before
     [created_at], more than one of [forked_from], [delegated_from], and
-    [triggered_from] is supplied, or [run_policy] is supplied together with
+    [triggered_from] is supplied, [run_policy] is supplied together with
     [delegated_from] — a delegated child's contract is its parent edge's,
-    never a recorded policy. *)
+    never a recorded policy — or [goal] is supplied together with
+    [delegated_from] or [triggered_from]: a delegation edge owns its child's
+    contract, and a trigger-born run already has a steward. *)
 
 val title : t -> string option
 (** [title t] is [t]'s optional user-facing title. *)
@@ -328,6 +380,9 @@ val run_policy : t -> Run_policy.t option
 (** [run_policy t] is [t]'s recorded run contract, if it was created under
     one. Fixed at construction and never updated. *)
 
+val goal : t -> Goal.t option
+(** [goal t] is [t]'s standing goal intent, if the owner has recorded one. *)
+
 val root : t -> Mentat_workspace.Root.t
 (** [root t] is the workspace [t] was created under — the owner of [t]'s
     workspace identity. Scope and membership decisions compare
@@ -349,6 +404,15 @@ val with_title : string option -> t -> t
 (** [with_title title t] is [t] with title [title].
 
     Raises [Invalid_argument] if [title] is [Some ""]. *)
+
+val with_goal : Goal.t option -> t -> t
+(** [with_goal goal t] is [t] with goal intent [goal] — recorded by the owner
+    verb, retired ([None]) by the same. Unlike the creation lineages a goal is
+    a standing intent the owner declares and withdraws over a session's life.
+
+    Raises [Invalid_argument] if [goal] is supplied on metadata carrying
+    [delegated_from] or [triggered_from] — the same exclusivity {!make}
+    enforces. *)
 
 val with_status : Status.t -> t -> t
 (** [with_status status t] is [t] with status [status]. *)

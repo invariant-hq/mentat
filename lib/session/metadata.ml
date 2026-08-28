@@ -204,6 +204,51 @@ module Run_policy = struct
     |> Jsont.Object.error_unknown |> Jsont.Object.finish
 end
 
+module Goal = struct
+  type t = {
+    objective : string;
+    max_turns : int option;
+    budget : float option;
+  }
+
+  let make ~objective ?max_turns ?budget () =
+    if String.is_empty objective then
+      invalid "Goal.make" "objective must not be empty";
+    (match max_turns with
+    | Some n when n <= 0 -> invalid "Goal.make" "max_turns must be positive"
+    | Some _ | None -> ());
+    (match budget with
+    | Some b when not (b > 0.) -> invalid "Goal.make" "budget must be positive"
+    | Some _ | None -> ());
+    { objective; max_turns; budget }
+
+  let objective t = t.objective
+  let max_turns t = t.max_turns
+  let budget t = t.budget
+
+  let equal a b =
+    String.equal a.objective b.objective
+    && Option.equal Int.equal a.max_turns b.max_turns
+    && Option.equal Float.equal a.budget b.budget
+
+  let pp ppf t =
+    Format.fprintf ppf
+      "@[<hov>{ objective = %s; max_turns = %a; budget = %a }@]" t.objective
+      (Format.pp_print_option Format.pp_print_int)
+      t.max_turns
+      (Format.pp_print_option Format.pp_print_float)
+      t.budget
+
+  let jsont =
+    Jsont.Object.map ~kind:"session goal intent"
+      (fun objective max_turns budget ->
+        decode_invalid_arg (fun () -> make ~objective ?max_turns ?budget ()))
+    |> Jsont.Object.mem "objective" Jsont.string ~enc:objective
+    |> Jsont.Object.opt_mem "max_turns" Jsont.int ~enc:max_turns
+    |> Jsont.Object.opt_mem "budget" Jsont.number ~enc:budget
+    |> Jsont.Object.error_unknown |> Jsont.Object.finish
+end
+
 type t = {
   title : string option;
   status : Status.t;
@@ -211,6 +256,7 @@ type t = {
   delegated_from : Delegated_from.t option;
   triggered_from : Triggered_from.t option;
   run_policy : Run_policy.t option;
+  goal : Goal.t option;
   root : Mentat_workspace.Root.t;
   created_at : Time.t;
   updated_at : Time.t;
@@ -225,8 +271,20 @@ let check_times fn ~created_at ~updated_at =
   if Time.compare updated_at created_at < 0 then
     invalid fn "updated_at must not be before created_at"
 
+(* A delegation edge owns its child's contract, and a trigger-born run
+   already has a steward — the fire. Standing goal intent on either would
+   hand the loop a second master. Shared by [make] and [with_goal], the two
+   writers. *)
+let check_goal fn ~goal ~delegated_from ~triggered_from =
+  match (goal, delegated_from, triggered_from) with
+  | Some _, Some _, _ ->
+      invalid fn "a delegated session cannot carry a goal"
+  | Some _, _, Some _ ->
+      invalid fn "a trigger-born session cannot carry a goal"
+  | _ -> ()
+
 let make ?title ?(status = Status.Active) ?forked_from ?delegated_from
-    ?triggered_from ?run_policy ~cwd ~created_at ~updated_at () =
+    ?triggered_from ?run_policy ?goal ~cwd ~created_at ~updated_at () =
   check_title "make" title;
   check_times "make" ~created_at ~updated_at;
   (match (forked_from, delegated_from, triggered_from) with
@@ -241,6 +299,7 @@ let make ?title ?(status = Status.Active) ?forked_from ?delegated_from
          granted. *)
       invalid "make" "a delegated session cannot carry a run policy"
   | _ -> ());
+  check_goal "make" ~goal ~delegated_from ~triggered_from;
   let root = Mentat_workspace.Root.of_dir cwd in
   {
     title;
@@ -249,6 +308,7 @@ let make ?title ?(status = Status.Active) ?forked_from ?delegated_from
     delegated_from;
     triggered_from;
     run_policy;
+    goal;
     root;
     created_at;
     updated_at;
@@ -260,6 +320,7 @@ let fork t = t.forked_from
 let delegated_from t = t.delegated_from
 let triggered_from t = t.triggered_from
 let run_policy t = t.run_policy
+let goal t = t.goal
 let root t = t.root
 let cwd t = Mentat_workspace.Root.dir t.root
 let created_at t = t.created_at
@@ -268,6 +329,11 @@ let updated_at t = t.updated_at
 let with_title title t =
   check_title "with_title" title;
   { t with title }
+
+let with_goal goal t =
+  check_goal "with_goal" ~goal ~delegated_from:t.delegated_from
+    ~triggered_from:t.triggered_from;
+  { t with goal }
 
 let with_status status t = { t with status }
 
@@ -289,6 +355,7 @@ let equal a b =
   && Option.equal Delegated_from.equal a.delegated_from b.delegated_from
   && Option.equal Triggered_from.equal a.triggered_from b.triggered_from
   && Option.equal Run_policy.equal a.run_policy b.run_policy
+  && Option.equal Goal.equal a.goal b.goal
   && Mentat_workspace.Root.equal a.root b.root
   && Time.equal a.created_at b.created_at
   && Time.equal a.updated_at b.updated_at
@@ -296,8 +363,8 @@ let equal a b =
 let pp ppf t =
   Format.fprintf ppf
     "@[<hov>{ title = %a; status = %a; forked_from = %a; delegated_from = %a; \
-     triggered_from = %a; run_policy = %a; cwd = %a; created_at = %a; \
-     updated_at = %a }@]"
+     triggered_from = %a; run_policy = %a; goal = %a; cwd = %a; created_at = \
+     %a; updated_at = %a }@]"
     (Format.pp_print_option Format.pp_print_string)
     t.title Status.pp t.status
     (Format.pp_print_option Forked_from.pp)
@@ -307,7 +374,9 @@ let pp ppf t =
     (Format.pp_print_option Triggered_from.pp)
     t.triggered_from
     (Format.pp_print_option Run_policy.pp)
-    t.run_policy Mentat_workspace.Root.pp t.root Time.pp t.created_at Time.pp
+    t.run_policy
+    (Format.pp_print_option Goal.pp)
+    t.goal Mentat_workspace.Root.pp t.root Time.pp t.created_at Time.pp
     t.updated_at
 
 let absolute_path_jsont =
@@ -320,11 +389,11 @@ let absolute_path_jsont =
 
 let jsont =
   Jsont.Object.map ~kind:"session metadata"
-    (fun title status forked_from delegated_from triggered_from run_policy cwd
-         created_at updated_at ->
+    (fun title status forked_from delegated_from triggered_from run_policy
+         goal cwd created_at updated_at ->
       decode_invalid_arg (fun () ->
           make ?title ~status ?forked_from ?delegated_from ?triggered_from
-            ?run_policy ~cwd ~created_at ~updated_at ()))
+            ?run_policy ?goal ~cwd ~created_at ~updated_at ()))
   |> Jsont.Object.opt_mem "title" Jsont.string ~enc:title
   |> Jsont.Object.mem "status" Status.jsont ~enc:status
   |> Jsont.Object.opt_mem "forked_from" Forked_from.jsont ~enc:fork
@@ -333,6 +402,7 @@ let jsont =
   |> Jsont.Object.opt_mem "triggered_from" Triggered_from.jsont
        ~enc:triggered_from
   |> Jsont.Object.opt_mem "run_policy" Run_policy.jsont ~enc:run_policy
+  |> Jsont.Object.opt_mem "goal" Goal.jsont ~enc:goal
   |> Jsont.Object.mem "cwd" absolute_path_jsont ~enc:cwd
   |> Jsont.Object.mem "created_at" Time.jsont ~enc:created_at
   |> Jsont.Object.mem "updated_at" Time.jsont ~enc:updated_at

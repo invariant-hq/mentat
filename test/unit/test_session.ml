@@ -4978,6 +4978,92 @@ let document_group =
                     ("key", Json.string "k");
                   ])
                json));
+      test "goal intent round-trips, validates, and keeps its exclusivity"
+        (fun () ->
+          let goal =
+            Session.Metadata.Goal.make ~objective:"get the suite green"
+              ~max_turns:20 ~budget:5.0 ()
+          in
+          let bare =
+            Session.Metadata.Goal.make ~objective:"finish the refactor" ()
+          in
+          let metadata =
+            Session.Metadata.make ~goal ~cwd ~created_at:(time 10)
+              ~updated_at:(time 20) ()
+          in
+          let json = encode Session.Metadata.jsont metadata in
+          is_true ~msg:"the member round-trips"
+            (Session.Metadata.equal metadata
+               (decode Session.Metadata.jsont json));
+          is_true ~msg:"absent bounds round-trip as absent"
+            (Session.Metadata.Goal.equal bare
+               (decode Session.Metadata.Goal.jsont
+                  (encode Session.Metadata.Goal.jsont bare)));
+          expect_invalid_arg "empty objective" (fun () ->
+              Session.Metadata.Goal.make ~objective:"" ());
+          expect_invalid_arg "non-positive turn bound" (fun () ->
+              Session.Metadata.Goal.make ~objective:"o" ~max_turns:0 ());
+          expect_invalid_arg "non-positive budget" (fun () ->
+              Session.Metadata.Goal.make ~objective:"o" ~budget:0. ());
+          (* The exclusivity family grows a fourth member: a goal refuses the
+             delegated and trigger-born lineages — a delegation edge owns its
+             child's contract, and a trigger-born run already has a steward —
+             while fork lineage and a recorded run policy coexist with it. *)
+          let delegated =
+            Session.Metadata.Delegated_from.make ~parent:(session_id "p")
+              ~delegation:(Session.Delegation.Id.of_string "d-1")
+          in
+          let provenance =
+            Session.Metadata.Triggered_from.make ~source:"pr-review"
+              ~digest:"d1" ~key:"k1"
+          in
+          expect_invalid_arg "a goal on a delegated session" (fun () ->
+              Session.Metadata.make ~delegated_from:delegated ~goal ~cwd
+                ~created_at:(time 10) ~updated_at:(time 10) ());
+          expect_invalid_arg "a goal on a trigger-born session" (fun () ->
+              Session.Metadata.make ~triggered_from:provenance ~goal ~cwd
+                ~created_at:(time 10) ~updated_at:(time 10) ());
+          is_true ~msg:"fork lineage coexists with a goal"
+            (Option.is_some
+               (Session.Metadata.goal
+                  (Session.Metadata.make
+                     ~forked_from:
+                       (Session.Metadata.Forked_from.make
+                          ~parent:(session_id "p") ~copied_events:0)
+                     ~goal ~cwd ~created_at:(time 10) ~updated_at:(time 10) ())));
+          (* The owner verb's write and retire, and its exclusivity. *)
+          let plain =
+            Session.Metadata.make ~cwd ~created_at:(time 10)
+              ~updated_at:(time 10) ()
+          in
+          is_true ~msg:"with_goal records intent"
+            (Option.is_some
+               (Session.Metadata.goal
+                  (Session.Metadata.with_goal (Some goal) plain)));
+          is_true ~msg:"with_goal None retires it"
+            (Option.is_none
+               (Session.Metadata.goal
+                  (Session.Metadata.with_goal None
+                     (Session.Metadata.with_goal (Some goal) plain))));
+          expect_invalid_arg "with_goal on a trigger-born session" (fun () ->
+              Session.Metadata.with_goal (Some goal)
+                (Session.Metadata.make ~triggered_from:provenance ~cwd
+                   ~created_at:(time 10) ~updated_at:(time 10) ()));
+          (* Decoding validates the same invariants as make. *)
+          assert_decode_error "empty objective on decode" Session.Metadata.jsont
+            (set_member "goal"
+               (json_object [ ("objective", Json.string "") ])
+               json);
+          assert_decode_error "a decoded goal beside trigger provenance"
+            Session.Metadata.jsont
+            (add_member "triggered_from"
+               (json_object
+                  [
+                    ("source", Json.string "s");
+                    ("digest", Json.string "d");
+                    ("key", Json.string "k");
+                  ])
+               json));
       test "jsont rejects unsupported versions and unknown members" (fun () ->
           let json = encode Session.jsont (saved (journal ()).events) in
           (* Versions 2 (structured-output), 3 (durable workspace notices), 4

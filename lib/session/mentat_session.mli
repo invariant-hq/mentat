@@ -161,23 +161,26 @@ val create :
   ?delegated_from:Metadata.Delegated_from.t ->
   ?triggered_from:Metadata.Triggered_from.t ->
   ?run_policy:Metadata.Run_policy.t ->
+  ?goal:Metadata.Goal.t ->
   cwd:Lpath.Abs.t ->
   created_at:Time.t ->
   unit ->
   t
-(** [create ~id ?title ?delegated_from ?triggered_from ?run_policy ~cwd
+(** [create ~id ?title ?delegated_from ?triggered_from ?run_policy ?goal ~cwd
      ~created_at ()] is a new active session with no semantic events.
     [delegated_from] records the parent edge an independently attached
     subagent must verify before execution. [triggered_from] records the
     trigger a scheduling host created the session for, and [run_policy] the
     run contract it was created under; the two are how a trigger-born
     session's mail admission and serving boot re-derive their shape from the
-    document alone.
+    document alone. [goal] records standing owner intent on a session created
+    to pursue it ([mentat run --goal]).
 
     Raises [Invalid_argument] if [title] is empty, both [delegated_from]
-    and [triggered_from] are supplied, or [run_policy] is supplied together
+    and [triggered_from] are supplied, [run_policy] is supplied together
     with [delegated_from] — a delegated child's contract is its parent
-    edge's, never a recorded policy. *)
+    edge's, never a recorded policy — or [goal] is supplied together with
+    [delegated_from] or [triggered_from]. *)
 
 val make :
   id:Id.t -> metadata:Metadata.t -> events:Event.t list -> (t, Error.t) result
@@ -506,6 +509,13 @@ val set_title : string option -> t -> t
 (** [set_title title t] is [t] with title [title]. Does not change [updated_at].
 
     Raises [Invalid_argument] if [title] is [Some ""]. *)
+
+val set_goal : Metadata.Goal.t option -> t -> t
+(** [set_goal goal t] is [t] with goal intent [goal] — the owner verb's write,
+    [None] retiring a standing goal. Does not change [updated_at].
+
+    Raises [Invalid_argument] if [goal] is supplied on a delegated or
+    trigger-born session ({!Metadata.with_goal}'s exclusivity). *)
 
 val touch : Time.t -> t -> t
 (** [touch time t] is [t] with its saved update time set to [time].

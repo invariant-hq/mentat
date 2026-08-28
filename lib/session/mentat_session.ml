@@ -158,13 +158,13 @@ let make ~id ~metadata ~events =
           | Error _ as error -> error
           | Ok () -> Ok { id; metadata; events_rev = List.rev events; state }))
 
-let create ~id ?title ?delegated_from ?triggered_from ?run_policy ~cwd
+let create ~id ?title ?delegated_from ?triggered_from ?run_policy ?goal ~cwd
     ~created_at () =
   {
     id;
     metadata =
-      Metadata.make ?title ?delegated_from ?triggered_from ?run_policy ~cwd
-        ~created_at ~updated_at:created_at ();
+      Metadata.make ?title ?delegated_from ?triggered_from ?run_policy ?goal
+        ~cwd ~created_at ~updated_at:created_at ();
     events_rev = [];
     state = State.empty;
   }
@@ -299,6 +299,8 @@ let append_all events t =
 
 let set_title title t =
   { t with metadata = Metadata.with_title title t.metadata }
+
+let set_goal goal t = { t with metadata = Metadata.with_goal goal t.metadata }
 
 let touch time t = { t with metadata = Metadata.touch time t.metadata }
 
