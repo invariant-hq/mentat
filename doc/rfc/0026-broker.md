@@ -744,11 +744,11 @@ this RFC implies nothing about priority or scheduling.
   reconcile settle is asynchronous — the boot-fold window between a
   watch's arming and its first poll is covered by the run-claim's dup
   authority, not by a synchronous settle.
-- **R4 — recursion and eviction, gated.** Before this rung:
-  measure activation spawn-to-socket and spawn-to-first-token, and
-  run the process-heavy suites repeatedly; the RFC's gate is that the
-  measured boot cost and suite wall-time stay within the bounds the
-  maintainer accepts at that point. Then: engines materialize
+- **R4 — recursion and eviction, gated. GATE PASSED 2026-08-28**
+  (maintainer accepted): activation spawn-to-socket ~40 ms,
+  spawn-to-provider-request ~83 ms (medians of 12 warm runs, isolated
+  store, scripted provider); the all-process subagent family runs in
+  4.1 s forced. Per-child cost is per lifecycle, not per turn. Then: engines materialize
   children via their own broker; `In_process` and the send's local
   arm deleted; mentatd sheds engines and routing; the TUI spawns and
   dials its own activation; `find_or_spawn` deleted; the serve-mount
