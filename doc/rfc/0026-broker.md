@@ -15,7 +15,7 @@
 One shared library gives every mentat process the same two abilities:
 supervise the agent processes it spawns, and send messages to other
 agents. An agent is a session; its id is its address; its process is an
-activation — one `mentat serve-session` process serving the session
+activation — one `mentat serve` process serving the session
 over a socket derived from the id, holding its run fence, exiting when
 idle. Every process supervises the sessions in its own table; mentatd
 is the same library plus root policy and nothing else. A message is a
@@ -63,7 +63,7 @@ becomes eleven.
 **An agent is a session.** Everything about it derives from its session
 id: its journal (the truth), its socket path (the door), its run fence
 (one driver at a time). When a session needs to run, some process spawns
-`mentat serve-session --session ID --cwd DIR` and watches the pid. That
+`mentat serve --session ID --cwd DIR` and watches the pid. That
 is the only way any agent runs — your interactive session, a subagent,
 a routine's PR review. The process exits when the session is idle; the
 session remains, durable, addressable, resumable.
@@ -104,7 +104,7 @@ which exists because every run serves one.
 
 ### The activation
 
-`mentat serve-session --session ID --cwd DIR [--spawned]` is the one
+`mentat serve --session ID --cwd DIR [--spawned]` is the one
 boot. No mode flags: the boot reads the session document and derives
 the shape —
 
@@ -193,7 +193,7 @@ val cancel : t -> Mentat_session.Id.t -> unit
 ```
 
 Supervision recurses: an engine's `spawn` verb materializes the child
-through its own process's broker; a serve-session process therefore
+through its own process's broker; a serve process therefore
 supervises its session's delegation children as processes, at every
 depth. mentatd holds one broker for its roots.
 
