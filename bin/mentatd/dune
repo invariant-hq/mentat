@@ -1,3 +1,4 @@
+; CR: need to align the structure of mentatd with the mentat bin: check if we want a cli_common module, and name the cli module with cli_ and follow the mentat structure.
 (executable
  (name main)
  (public_name mentatd)

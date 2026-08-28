@@ -1,3 +1,4 @@
+; CR: not sure why we have both a connector and boot. Should this move to boot?
 (library
  (name mentat_connector)
  (modules review_finding publication)

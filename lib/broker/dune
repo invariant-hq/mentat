@@ -10,6 +10,8 @@
   eio.unix
   unix
   lpath
+  ; CR: very surprised to see some of these dependencies here, 
+  ; we need a design pass on broker, no idea why we depend on the store, the server, the client, etc.
   mentat_client
   mentat_digest
   mentat_llm

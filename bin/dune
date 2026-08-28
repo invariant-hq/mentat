@@ -1,3 +1,4 @@
+; CR: move to a mentat/ subdir
 (executable
  (name main)
  (public_name mentat)
