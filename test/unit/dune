@@ -421,6 +421,8 @@
   eio
   eio_main
   unix
+  jsont
+  jsont.bytesrw
   lpath
   mentat_broker
   mentat_digest
@@ -473,6 +475,29 @@
   lpath
   jsont
   jsont.bytesrw))
+
+; The confinement door is a boot-library module; its suite links the
+; library exactly as test_routine_fire does.
+
+(test
+ (name test_serve_mount)
+ (modules test_serve_mount)
+ (flags
+  (:standard -open Mentat_boot))
+ (libraries
+  windtrap
+  mentat_boot
+  mentat_client
+  mentat_diagnostic
+  mentat_permission
+  mentat_protocol
+  mentat_provider
+  mentat_session
+  mentat_store
+  lpath
+  eio
+  eio_main
+  unix))
 
 ; The routine store is a boot-library module too, so its suite links the
 ; library exactly as test_routine_fire does — no flat-directory copies.

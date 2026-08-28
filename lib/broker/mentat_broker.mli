@@ -74,6 +74,15 @@ val serve_owner_label : string
     never preempted. One constant, shared through this library, because the
     two sides must agree or the ladder never fires. *)
 
+val serve_linger_s : float
+(** How long a settled session's server lingers before its clean exit, so a
+    follow-up delivery landing just after settlement still finds a live
+    server. One constant, shared like {!serve_owner_label}: the serve
+    process pays it as its default linger (tests shorten the paid linger
+    with MENTAT_CHILD_LINGER), and an offline command's bounded fence
+    patience is derived from it — the patience must clear the linger or the
+    run-then-offline-command race it exists to kill returns. *)
+
 val send_owner_label : string
 (** The custodial run-fence owner label {!send} appends mail to a dormant
     session under. A custodial hold is a brief labeled hold that releases on

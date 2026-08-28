@@ -33,6 +33,15 @@ let socket_dir ~base ~session =
    tell a preemptable child server from a holder it must never signal. *)
 let serve_owner_label = "serve-session"
 
+(* Shared vocabulary again: how long a settled session's server lingers
+   before its clean exit, so a follow-up delivery landing just after
+   settlement still finds a live server. Spelled here because both sides
+   lean on it — the serve process pays it as its default linger, and an
+   offline command's bounded fence patience is derived from it; a drifted
+   copy would silently reopen the run-then-offline-command Busy that
+   patience exists to kill. *)
+let serve_linger_s = 3.0
+
 (* Transitional (dies at the eviction rung, with the in-process drivers it
    labels): the serving label an in-process driver host — an interactive
    process or a daemon-hosted engine — holds its fences under while its
@@ -437,7 +446,12 @@ let give_up t entry message =
     | Some pid ->
         entry.pid <- None;
         destroy t pid;
-        remove_endpoint entry);
+        (* The dead child's own lock died with it, so a fence still held
+           here names another process's live agent behind the socket — a
+           removal would sever it. Remove only the free-fence residue. *)
+        (match probe_fence t ~session:entry.child () with
+        | `Free | `Io _ -> remove_endpoint entry
+        | `Held _ | `Held_self | `Custodial -> ()));
     trace_abandoned entry message;
     fail_shape entry (Gave_up message)
   end
@@ -628,43 +642,67 @@ let rec settle_exit t entry =
   if current t entry then begin
     Hashtbl.remove t.entries (key entry.child);
     match integrate t entry with
-    | `Integrated | `Unbound -> remove_endpoint entry
-    | `Not_settled ->
-        (* A cancelled delegation is respawned so its successor can mint the
-           terminal interrupted fact; the interrupt carry is the delegated
-           boot's alone — a root activation refuses the flag — so a cancelled
-           root is abandoned loudly instead of resumed. *)
-        let respawn_refused =
-          match entry.shape with
-          | Root _ -> entry.cancelled
-          | Delegated _ -> false
-        in
-        if entry.respawns >= entry.budget || respawn_refused then begin
-          remove_endpoint entry;
-          let message =
-            Printf.sprintf
-              "the child process died before settling, %d times over"
-              (entry.respawns + 1)
-          in
-          trace_abandoned entry message;
-          fail_shape entry (Gave_up message)
-        end
-        else begin
-          (* A fresh record, honoring [current]'s discipline: the
-             re-materialization installs a new physical entry, so the
-             predecessor's still-running observer fibers fail their guards
-             and die instead of racing a second observation against the
-             successor. *)
-          let successor =
-            { entry with pid = None; respawns = entry.respawns + 1 }
-          in
-          Hashtbl.replace t.entries (key entry.child) successor;
-          (* The predecessor's socket must go before the successor spawns: a
-             stale file that refuses connections must never answer a
-             readiness probe for a server that is still booting. *)
-          remove_endpoint successor;
-          spawn_child t successor
-        end
+    | `Integrated | `Unbound -> (
+        (* Remove the endpoint only under a free fence: an exit funnels here
+           for boot-race losers too, and a held fence means the session's
+           winner — possibly another process's agent — is live behind the
+           socket this would unlink by path. The stale-socket residue the
+           removal exists for always presents as free, because a dead
+           holder's lock died with it. *)
+        match probe_fence t ~session:entry.child () with
+        | `Free | `Io _ -> remove_endpoint entry
+        | `Held _ | `Held_self | `Custodial -> ())
+    | `Not_settled -> (
+        (* The exit alone does not prove the endpoint or the session were
+           this entry's own: a boot-race loser dies unsettled while the
+           winner holds the fence and serves. Probe the fence before any
+           removal or spawn — a held fence installs an uncharged successor
+           and re-enters the decision loop, which adopts the reachable
+           winner or rides the foreign watch; only a free fence charges the
+           respawn budget. *)
+        match probe_fence t ~session:entry.child () with
+        | `Held _ | `Held_self | `Custodial | `Io _ ->
+            let successor = { entry with pid = None } in
+            Hashtbl.replace t.entries (key entry.child) successor;
+            (match successor.shape with
+            | Delegated _ -> launch t successor
+            | Root _ -> launch_root t successor)
+        | `Free ->
+            (* A cancelled delegation is respawned so its successor can mint
+               the terminal interrupted fact; the interrupt carry is the
+               delegated boot's alone — a root activation refuses the flag —
+               so a cancelled root is abandoned loudly instead of resumed. *)
+            let respawn_refused =
+              match entry.shape with
+              | Root _ -> entry.cancelled
+              | Delegated _ -> false
+            in
+            if entry.respawns >= entry.budget || respawn_refused then begin
+              remove_endpoint entry;
+              let message =
+                Printf.sprintf
+                  "the child process died before settling, %d times over"
+                  (entry.respawns + 1)
+              in
+              trace_abandoned entry message;
+              fail_shape entry (Gave_up message)
+            end
+            else begin
+              (* A fresh record, honoring [current]'s discipline: the
+                 re-materialization installs a new physical entry, so the
+                 predecessor's still-running observer fibers fail their guards
+                 and die instead of racing a second observation against the
+                 successor. *)
+              let successor =
+                { entry with pid = None; respawns = entry.respawns + 1 }
+              in
+              Hashtbl.replace t.entries (key entry.child) successor;
+              (* The predecessor's socket must go before the successor spawns:
+                 a stale file that refuses connections must never answer a
+                 readiness probe for a server that is still booting. *)
+              remove_endpoint successor;
+              spawn_child t successor
+            end)
   end
 
 and spawn_child t entry =
@@ -843,8 +881,12 @@ and foreign_watch t entry =
    hold is bounded by its owner's brief work and owner death releases the
    fence, so the loop always makes progress — but a wedged custodial holder
    must not be polled at the initial cadence forever, so the reprobe interval
-   doubles to a one-second ceiling. *)
-let rec launch ?(reprobe_s = 0.05) t entry =
+   doubles to a one-second ceiling. A preemptable holder gets the boot wait
+   first: held-without-endpoint is also every booting server between its
+   fence-taking attach and its bind, so the ladder fires only on a holder
+   that stays unbound past the bound — the table stays pure; the patience is
+   this loop's. *)
+and launch ?(reprobe_s = 0.05) ?(preempt_s = 0.) t entry =
   match
     Reconcile.decide
       ~fence:(probe_fence t ~session:entry.child)
@@ -853,14 +895,23 @@ let rec launch ?(reprobe_s = 0.05) t entry =
   with
   | Reconcile.Observe -> observe t entry
   | Reconcile.Preempt pid ->
-      Eio.traceln
-        "broker: child %s is fenced by pid %d with no endpoint; preempting"
-        (key entry.child) pid;
-      if ladder_foreign t entry pid then spawn_child t entry
-      else
-        give_up t entry
-          (Printf.sprintf "pid %d holds the child's fence and would not yield"
-             pid)
+      if preempt_s >= boot_wait_s then begin
+        Eio.traceln
+          "broker: child %s is fenced by pid %d with no endpoint; preempting"
+          (key entry.child) pid;
+        if ladder_foreign t entry pid then spawn_child t entry
+        else
+          give_up t entry
+            (Printf.sprintf
+               "pid %d holds the child's fence and would not yield" pid)
+      end
+      else begin
+        sleep t reprobe_s;
+        if current t entry then
+          launch
+            ~reprobe_s:(Float.min 1.0 (reprobe_s *. 2.))
+            ~preempt_s:(preempt_s +. reprobe_s) t entry
+      end
   | Reconcile.Respawn -> spawn_child t entry
   | Reconcile.Dispose ->
       (* The child settled between the engine's ruling and this probe: the
@@ -873,6 +924,60 @@ let rec launch ?(reprobe_s = 0.05) t entry =
       if current t entry then
         launch ~reprobe_s:(Float.min 1.0 (reprobe_s *. 2.)) t entry
   | Reconcile.Fail message -> give_up t entry message
+
+(* Root supervision: the pure table decides over live probes, exactly as the
+   delegated launch does, differing on the arms the two verbs rule
+   differently. A holder the supervisor may neither adopt nor preempt is
+   observed for a bounded patience — an interactive driver may settle the
+   work under the watch, and the head read ends the wait early — and past the
+   bound the supervision fails loudly naming the holder. A preemptable holder
+   shares the same patience before its ladder: held-without-endpoint is also
+   every booting agent between its attach and its bind. Both reuse the boot
+   wait — the same "how long may an opaque state stand before it is wedged"
+   judgment — and the reprobe backs off exactly as a custodial hold's does. *)
+and launch_root ?(reprobe_s = 0.05) ?(held_s = 0.) t entry =
+  match
+    Reconcile.supervise_action
+      ~fence:(probe_root_fence t ~session:entry.child)
+      ~reachable:(endpoint_reachable t entry)
+      ~head:(fun () -> cached_head t ~session:entry.child entry.head_cache)
+  with
+  | Reconcile.Adopt -> observe t entry
+  | Reconcile.Preempt_stale pid ->
+      if held_s >= boot_wait_s then begin
+        Eio.traceln
+          "broker: session %s is fenced by pid %d with no endpoint; preempting"
+          (key entry.child) pid;
+        if ladder_foreign t entry pid then spawn_child t entry
+        else
+          give_up t entry
+            (Printf.sprintf
+               "pid %d holds the session's fence and would not yield" pid)
+      end
+      else begin
+        sleep t reprobe_s;
+        if current t entry then
+          launch_root
+            ~reprobe_s:(Float.min 1.0 (reprobe_s *. 2.))
+            ~held_s:(held_s +. reprobe_s) t entry
+      end
+  | Reconcile.Spawn -> spawn_child t entry
+  | Reconcile.Settle -> settle_exit t entry
+  | Reconcile.Refuse message -> give_up t entry message
+  | Reconcile.Reprobe_hold | Reconcile.Hold -> (
+      if held_s >= boot_wait_s then
+        give_up t entry
+          (Printf.sprintf "the session's fence stayed held by %s"
+             (holder_name t ~session:entry.child))
+      else
+        match child_head t entry with
+        | `Terminal -> settle_exit t entry
+        | `Unfinished | `Absent ->
+            sleep t reprobe_s;
+            if current t entry then
+              launch_root
+                ~reprobe_s:(Float.min 1.0 (reprobe_s *. 2.))
+                ~held_s:(held_s +. reprobe_s) t entry)
 
 (* Admission: register the session in the node table and fork its work. A
    session already registered — running or observed — is left to its own
@@ -933,50 +1038,6 @@ let cancel t ~child =
                 match probe_fence t ~session:entry.child () with
                 | `Held (Some pid) -> ignore (ladder_foreign t entry pid)
                 | `Free | `Held_self | `Held None | `Custodial | `Io _ -> ()))
-
-(* Root supervision: the pure table decides over live probes, exactly as the
-   delegated launch does, differing on the arms the two verbs rule
-   differently. A holder the supervisor may neither adopt nor preempt is
-   observed for a bounded patience — an interactive driver may settle the
-   work under the watch, and the head read ends the wait early — and past the
-   bound the supervision fails loudly naming the holder. The patience reuses
-   the boot wait: the same "how long may an opaque state stand before it is
-   wedged" judgment, and the reprobe backs off exactly as a custodial hold's
-   does. *)
-let rec launch_root ?(reprobe_s = 0.05) ?(held_s = 0.) t entry =
-  match
-    Reconcile.supervise_action
-      ~fence:(probe_root_fence t ~session:entry.child)
-      ~reachable:(endpoint_reachable t entry)
-      ~head:(fun () -> cached_head t ~session:entry.child entry.head_cache)
-  with
-  | Reconcile.Adopt -> observe t entry
-  | Reconcile.Preempt_stale pid ->
-      Eio.traceln
-        "broker: session %s is fenced by pid %d with no endpoint; preempting"
-        (key entry.child) pid;
-      if ladder_foreign t entry pid then spawn_child t entry
-      else
-        give_up t entry
-          (Printf.sprintf "pid %d holds the session's fence and would not yield"
-             pid)
-  | Reconcile.Spawn -> spawn_child t entry
-  | Reconcile.Settle -> settle_exit t entry
-  | Reconcile.Refuse message -> give_up t entry message
-  | Reconcile.Reprobe_hold | Reconcile.Hold -> (
-      if held_s >= boot_wait_s then
-        give_up t entry
-          (Printf.sprintf "the session's fence stayed held by %s"
-             (holder_name t ~session:entry.child))
-      else
-        match child_head t entry with
-        | `Terminal -> settle_exit t entry
-        | `Unfinished | `Absent ->
-            sleep t reprobe_s;
-            if current t entry then
-              launch_root
-                ~reprobe_s:(Float.min 1.0 (reprobe_s *. 2.))
-                ~held_s:(held_s +. reprobe_s) t entry)
 
 (* The interrupt's grace at the deadline: exit releases the fence, so a
    child that heard the interrupt gets one bounded window to wind down
