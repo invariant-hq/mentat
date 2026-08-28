@@ -325,13 +325,10 @@ let fire_env t ~stop (loaded : Charter_store.Loaded.t) =
       (Daemon.resolve_sibling ~env:"MENTAT_BIN" ~name:"mentat"
          ~beside:"mentatd")
   in
-  (* Armed before any mail-only use could cache the refusing resolver: the
-     fire supervises run sessions, so its broker must spawn activations. *)
-  let broker =
-    Composition.process_broker t ~resolve_bin:(fun () ->
-        Daemon.resolve_sibling ~env:"MENTAT_BIN" ~name:"mentat"
-          ~beside:"mentatd")
-  in
+  (* The fire supervises run sessions, so its composition was staged with
+     the real resolver ([fire]'s [with_base ~resolve_bin]); the broker it
+     yields can spawn activations. *)
+  let broker = Composition.broker t in
   Ok
     ( {
         Charter_fire.dirs = Composition.dirs t;
@@ -355,7 +352,11 @@ let fire name event_file sweep =
      | _ -> Ok ()
    in
    Ok
-     (Composition.with_base ~cwd:None ~overrides:[] (fun t ->
+     (Composition.with_base ~cwd:None ~overrides:[]
+        ~resolve_bin:(fun () ->
+          Daemon.resolve_sibling ~env:"MENTAT_BIN" ~name:"mentat"
+            ~beside:"mentatd")
+        (fun t ->
           match Charter_store.load (Composition.dirs t) ~name with
           | Error e -> Exit_status.runtime (Charter_store.Error.message e)
           | Ok loaded -> (

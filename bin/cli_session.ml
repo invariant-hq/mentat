@@ -1815,8 +1815,7 @@ let send json session_arg text cwd =
             in
             let input = [ Mentat_llm.Content.text text ] in
             match
-              Mentat_broker.send (Composition.mail_broker t) ~target ~id ~input
-                ()
+              Mentat_broker.send (Composition.broker t) ~target ~id ~input ()
             with
             | `Undelivered reason -> Exit_status.runtime reason
             | `Delivered ->

@@ -33,6 +33,7 @@ val with_base :
   overrides:Mentat_config.t list ->
   ?data_home:string ->
   ?review_base:string ->
+  ?resolve_bin:(unit -> (string, string) result) ->
   (t -> Exit_status.t) ->
   Exit_status.t
 (** [with_base ~cwd ~overrides ?data_home ?review_base f] stages the base for a
@@ -50,7 +51,11 @@ val with_base :
     [review_base] is the base revision spec the review cone diffs the worktree
     against — the [mentat review BASE] argument. Absent, the review base falls
     back to [MENTAT_REVIEW_BASE] and then [HEAD]. It is the clean threading path
-    for a review command, so callers need not set an environment variable. *)
+    for a review command, so callers need not set an environment variable.
+
+    [resolve_bin] resolves the activation binary this process's {!val-broker}
+    spawns — a staging fact, passed by a caller that supervises sessions (the
+    charter fire). Absent, the broker can send but refuses to spawn. *)
 
 (** {1:daemon Daemon composition}
 
@@ -105,6 +110,7 @@ val instance :
   ?owner_label:string ->
   ?child_backend:(t -> Mentat_agent.Ports.child_backend) ->
   ?broker:Mentat_broker.t ->
+  ?resolve_bin:(unit -> (string, string) result) ->
   ?serve_mount:bool ->
   unit ->
   (t, Exit_status.t) result
@@ -132,8 +138,10 @@ val instance :
     instance being staged. Absent, children run in-process — every
     single-runtime path. [broker] is the process broker the instance's engine
     sends recorded child messages through; a daemon passes its one node
-    broker, and an instance without one gets its own at engine assembly —
-    able to send, refusing to spawn. [serve_mount] (default [false];
+    broker, and an instance without one gets its own on first use, built
+    over [resolve_bin] — the staging fact that decides whether the broker
+    can spawn activations ({!val-broker}); absent, it can send but refuses
+    to spawn. [serve_mount] (default [false];
     {!with_base} sets it) is the transitional serve-mount bridge: the
     instance's engine serves each driven session's derived socket beside its
     driver, and the instance's fence owner carries
@@ -281,23 +289,17 @@ val driver : t -> (Mentat_client.Driver.t, Exit_status.t) result
     the daemon serves it over the wire, so a frontend only ever receives a
     {!Mentat_client.t}. [Error] exactly as {!client}'s prefix. *)
 
-val process_broker :
-  t -> resolve_bin:(unit -> (string, string) result) -> Mentat_broker.t
-(** [process_broker t ~resolve_bin] is this process's one broker — the
-    daemon-passed node broker when the instance was staged with one, else an
-    instance-owned broker built (and cached) on first use, whose spawns
-    resolve their activation binary through [resolve_bin]. The first
-    construction wins: a caller that supervises sessions (the charter fire)
-    must build the broker with a real resolver before any mail-only use
-    caches the refusing one. An owned broker's fibers live under the
-    instance switch and are stopped by {!shutdown}. *)
-
-val mail_broker : t -> Mentat_broker.t
-(** [mail_broker t] is {!process_broker} with the mail-only resolver: able
-    to send — the fence-held append, the socket dial — while refusing to
-    spawn. It is the same broker engine assembly links, and it never
-    assembles the engine: an engine-free command ([mentat session send])
-    reaches {!Mentat_broker.send} through it directly. *)
+val broker : t -> Mentat_broker.t
+(** [broker t] is this process's one broker — the daemon-passed node broker
+    when the instance was staged with one, else an instance-owned broker
+    built (and cached) on first use. Spawn-capable iff the instance was
+    staged with [resolve_bin]; the default resolver refuses, so a pure
+    sender that is handed a child to run fails loudly into the
+    supervision's named sink. The same broker engine assembly links, and an
+    engine-free command ([mentat session send]) reaches
+    {!Mentat_broker.send} through it without assembling the engine. An
+    owned broker's fibers live under the instance switch and are stopped by
+    {!shutdown}. *)
 
 (** {2:broker The child broker's engine reach}
 
