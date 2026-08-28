@@ -54,8 +54,10 @@ val with_base :
     for a review command, so callers need not set an environment variable.
 
     [resolve_bin] resolves the activation binary this process's {!val-broker}
-    spawns — a staging fact, passed by a caller that supervises sessions (the
-    routine fire). Absent, the broker can send but refuses to spawn. *)
+    spawns — a staging fact, fixed when the base is staged. Absent, the
+    broker spawns the running executable itself ([mentat serve] is a
+    subcommand of this very binary); [MENTAT_BIN] overrides that default,
+    the same escape the daemon's sibling policy honors. *)
 
 (** {1:daemon Daemon composition}
 
@@ -108,7 +110,6 @@ val instance :
   ?environment:(string * string) list ->
   ?review_base:string ->
   ?owner_label:string ->
-  ?child_backend:(t -> Mentat_agent.Ports.child_backend) ->
   ?broker:Mentat_broker.t ->
   ?resolve_bin:(unit -> (string, string) result) ->
   ?serve_mount:bool ->
@@ -131,17 +132,14 @@ val instance :
     run-lock owner identity this instance acquires fences under (absent by
     default); a per-session child server passes
     {!Mentat_broker.serve_owner_label} so the broker can tell it apart from an
-    interactive holder. [child_backend] names
-    where this instance's delegated children materialize
-    ({!Mentat_agent.Ports.child_backend}); it is applied to the instance at
-    engine assembly, so a brokered backend's ops can close over the very
-    instance being staged. Absent, children run in-process — every
-    single-runtime path. [broker] is the process broker the instance's engine
-    sends recorded child messages through; a daemon passes its one node
-    broker, and an instance without one gets its own on first use, built
-    over [resolve_bin] — the staging fact that decides whether the broker
-    can spawn activations ({!val-broker}); absent, it can send but refuses
-    to spawn. [serve_mount] (default [false];
+    interactive holder. [broker] is the process broker the instance's engine
+    sends recorded child messages through and hands every delegated child to
+    (each child a [mentat serve] process of its own, reported back through
+    {!val-broker_engine}); a daemon passes its one node broker, and an
+    instance without one gets its own on first use, built over [resolve_bin]
+    — the staging fact naming the binary the broker spawns ({!val-broker});
+    absent, it spawns the running executable itself, with [MENTAT_BIN] as
+    the escape. [serve_mount] (default [false];
     {!with_base} sets it) is the transitional serve-mount bridge: the
     instance's engine serves each driven session's derived socket beside its
     driver, and the instance's fence owner carries
@@ -292,10 +290,9 @@ val driver : t -> (Mentat_client.Driver.t, Exit_status.t) result
 val broker : t -> Mentat_broker.t
 (** [broker t] is this process's one broker — the daemon-passed node broker
     when the instance was staged with one, else an instance-owned broker
-    built (and cached) on first use. Spawn-capable iff the instance was
-    staged with [resolve_bin]; the default resolver refuses, so a pure
-    sender that is handed a child to run fails loudly into the
-    supervision's named sink. The same broker engine assembly links, and an
+    built (and cached) on first use. It spawns whatever binary the
+    instance's [resolve_bin] names — the running executable itself under
+    the default. The same broker engine assembly links, and an
     engine-free command ([mentat session send]) reaches
     {!Mentat_broker.send} through it without assembling the engine. An
     owned broker's fibers live under the instance switch and are stopped by
@@ -305,8 +302,10 @@ val broker : t -> Mentat_broker.t
 
     Thin wrappers over the engine's brokered observation seam
     ({!Mentat_agent.adopt}, {!Mentat_agent.integrate_brokered_child},
-    {!Mentat_agent.fail_brokered_child}), so the daemon's child broker acts on
-    an instance without ever holding the engine value. *)
+    {!Mentat_agent.fail_brokered_child}), so a child broker acts on an
+    instance without ever holding the engine value — and
+    {!val-broker_engine}, the same three sealed with the instance's
+    workspace identity into the record the broker consumes. *)
 
 val adopt_session :
   t -> Mentat_session.Id.t -> (unit, Mentat_protocol.Error.t) result
@@ -315,8 +314,7 @@ val adopt_session :
     the engine first if this instance has not assembled it yet. The restarted
     node's verb for re-adopting the parent of an orphaned child: recovery
     reconstructs the parked wait and re-drives unfinished edges through the
-    instance's child backend. [Busy] when another process drives the session.
-*)
+    instance's broker. [Busy] when another process drives the session. *)
 
 val integrate_child :
   t ->
@@ -333,6 +331,18 @@ val fail_child : t -> child:Mentat_session.Id.t -> message:string -> unit
     [t]'s engine: settle the parent's wait for [child] with the spawn-failure
     text carrying [message] — the loud floor for a child the broker has
     abandoned. A no-op when no engine is built. *)
+
+val broker_engine : t -> Mentat_broker.Engine.t
+(** [broker_engine t] is the broker's engine-reach seam for this instance
+    ({!Mentat_broker.Engine.t}): the workspace root and environment snapshot
+    a child is spawned and dialed under, and the three wrappers above as one
+    record. The instance's own engine is created holding it, so its brokered
+    children report back into it; a daemon's boot rediscovery builds it for
+    the instances it adopts orphans into. The record's closures answer
+    through the instance's assembled engine — {!driver} or {!client} is the
+    assembling step — and an instance that never assembled answers each
+    seam's null arm ([adopt_session] unavailable, [integrate_child]
+    [`Unbound], [fail_child] a no-op). *)
 
 val tool_declarations :
   t ->

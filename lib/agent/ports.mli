@@ -21,10 +21,10 @@
 
     Process spawn is deliberately not a port: the engine never spawns — tools
     close over the workspace-IO spawn boundary at construction, and a call's
-    cancellation is a read-only predicate. The child backend below keeps that
-    law: it is a policy value naming where a delegated child session
-    materializes, and any process behind its [Brokered] arm belongs to the
-    executable's broker, never to the engine. *)
+    cancellation is a read-only predicate. A delegated child session keeps
+    that law: the engine records the edge and creates the child document,
+    then hands one identity to the process broker it holds — the child's
+    process belongs to the broker, never to the engine. *)
 
 (** {1:store The store port} *)
 
@@ -310,49 +310,6 @@ val script :
     artifact to fetch, and no in-flight work to cancel. It is the shape a fake
     or scripted provider wants; a live transport, which streams deltas and
     honors cancellation, implements {!provider_call} directly. *)
-
-(** {1:children The child backend} *)
-
-type child_ops = {
-  materialize : child:Mentat_session.Id.t -> unit;
-      (** [materialize ~child] makes the recorded child run: the broker owns
-          admission, spawn, observation, and reaping. The call carries one
-          identity and nothing else — the child's own boot re-derives its
-          delegation edge from its document's lineage backlink and re-reads
-          the task and role from that durable edge, so no content crosses the
-          seam. It is idempotent on [child]: re-materializing a child that is
-          already running is a no-op, and a re-drive after a crash re-issues
-          the same identity. *)
-  cancel : child:Mentat_session.Id.t -> unit;
-      (** [cancel ~child] asks the broker to stop [child]'s work: a semantic
-          interrupt delivered to the child first, with a bounded escalation to
-          the child's own process as the floor for a child that cannot hear it
-          — never a signal to the delegation tree's process groups, whose
-          descendants are the child's own to stop. Non-blocking; completion is
-          observed through the child's journal, not through this call. *)
-}
-(** The calls an out-of-process child backend consumes.
-
-    The record is narrower than the whole cross-backend contract. The child's
-    own boot submits the child's first turn under the deterministic id of
-    {!Mentat_agent.child_first_turn} — the broker submits nothing, it only
-    makes the process exist. A parent-recorded message never crosses this
-    record: delivery is the runtime's own send through the broker it holds,
-    the same for every backend. And a brokered child's settlement never
-    crosses it either: it is the broker's own observation of the child
-    journal that reports the settled result back into the parent's
-    scheduler. *)
-
-(** Where a delegated child session materializes. The engine always records
-    the delegation edge, creates the child document, and keeps the semantic
-    capacity permit; the backend decides only who runs the child. *)
-type child_backend =
-  | In_process
-      (** The child attaches as a sibling driver in this runtime — the
-          engine's own registry, scheduler, and hubs carry it. *)
-  | Brokered of child_ops
-      (** Materialization is handed to the executable's broker through the
-          ops record; only running the child moves out of this process. *)
 
 (** {1:workspace The workspace port}
 

@@ -1371,6 +1371,18 @@ let make_engine ~sw ~store ~script =
       (Mentat_broker.for_tests
          ~send:(fun ~origin:_ ~target:_ ~id:_ ~input:_ -> `Delivered)
          ())
+    ~broker_engine:
+      {
+        Mentat_broker.Engine.root = Lpath.Abs.of_string_exn (Sys.getcwd ());
+        environment = [];
+        adopt_session =
+          (fun _ ->
+            Error
+              (Mentat_protocol.Error.unavailable
+                 "this fixture adopts no session"));
+        integrate_child = (fun ~child:_ -> `Unbound);
+        fail_child = (fun ~child:_ ~message:_ -> ());
+      }
     ~execution_for_mode ~delegated_execution ()
 
 let live_driver engine : Driver.t =

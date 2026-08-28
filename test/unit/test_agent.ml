@@ -530,7 +530,7 @@ let capped_script ~cap f =
 (* Runtime harness. *)
 
 let mk_engine ~sw ~store ?(script = default_script) ?(config = default_config)
-    ?max_children ?child_backend ?broker ?(catalog = catalog)
+    ?max_children ?materialize ?broker ?(catalog = catalog)
     ?(workspace = workspace) ?execution_for_mode ?background_probe
     ?running_view ?delegated_execution ?delegated_role_spy () =
   let now =
@@ -603,25 +603,119 @@ let mk_engine ~sw ~store ?(script = default_script) ?(config = default_config)
     in
     (select, Option.value running_view ~default:(fun () -> []))
   in
+  (* The engine cell late-binds the runtime into the broker stub's scripts
+     and the engine-reach record, both of which must exist before
+     [Agent.create] returns the runtime they reach into. *)
+  let engine_cell = ref None in
+  (* The harness's default materialization plays the broker running the
+     child as a sibling driver of this same runtime — adopt, then submit
+     the deterministic first turn from the durable edge — which is what the
+     real materialization (a spawned [mentat serve] process) does, folded
+     into the unit tier's one runtime. The fork keeps the drive off the
+     parent's controller fiber, the real verb's non-blocking contract. *)
+  let local_materialize _engine ~child =
+    match !engine_cell with
+    | None -> ()
+    | Some engine ->
+        Eio.Fiber.fork ~sw (fun () ->
+            match Agent.adopt engine child with
+            | Error _ -> ()
+            | Ok () -> (
+                let find id =
+                  Hashtbl.find_opt store.sessions (Session.Id.to_string id)
+                in
+                match find child with
+                | None -> ()
+                | Some child_session
+                  when Session.State.turns (Session.state child_session) <> []
+                  ->
+                    (* Already started: running or settled; the adopt's own
+                       recovery consumed any pending mail. *)
+                    ()
+                | Some child_session -> (
+                    match
+                      Session.Metadata.delegated_from
+                        (Session.metadata child_session)
+                    with
+                    | None -> ()
+                    | Some lineage -> (
+                        let parent =
+                          Session.Metadata.Delegated_from.parent lineage
+                        in
+                        let delegation =
+                          Session.Metadata.Delegated_from.delegation lineage
+                        in
+                        match find parent with
+                        | None -> ()
+                        | Some parent_session -> (
+                            match
+                              List.find_opt
+                                (fun edge ->
+                                  Session.Delegation.Id.equal
+                                    (Session.Delegation.id edge)
+                                    delegation)
+                                (Session.State.delegations
+                                   (Session.state parent_session))
+                            with
+                            | None -> ()
+                            | Some edge -> (
+                                match
+                                  Protocol.Command.prompt ~session:child
+                                    ~turn:(Agent.child_first_turn delegation)
+                                    ~input:(Session.Delegation.task edge) ()
+                                with
+                                | Error _ -> ()
+                                | Ok command ->
+                                    ignore
+                                      ((Agent.driver engine)
+                                         .Client.Driver.Session.submit command)))))))
+  in
   (* The mocked broker seam: the unit tier runs over the fake store, so a
      send's real fence-and-append effects have nowhere to land — the default
-     stub answers [`Delivered] and a test that cares injects its own
-     recording stub. *)
+     stub answers [`Delivered], materializes locally, and a test that cares
+     injects its own recording stubs. *)
   let broker =
     match broker with
     | Some broker -> broker
     | None ->
         Mentat_broker.for_tests
           ~send:(fun ~origin:_ ~target:_ ~id:_ ~input:_ -> `Delivered)
+          ~materialize:(Option.value materialize ~default:local_materialize)
           ()
   in
-  Agent.create ~sw ~store:(store_of store) ~provider:script ~config ~now
-    ?max_children ?child_backend ~broker ~execution_for_mode
-    ~delegated_execution ()
+  let broker_engine =
+    {
+      Mentat_broker.Engine.root = Lpath.Abs.of_string_exn (Sys.getcwd ());
+      environment = [];
+      adopt_session =
+        (fun session ->
+          match !engine_cell with
+          | Some engine -> Agent.adopt engine session
+          | None ->
+              Error (Protocol.Error.unavailable "the engine is not built yet"));
+      integrate_child =
+        (fun ~child ->
+          match !engine_cell with
+          | Some engine -> Agent.integrate_brokered_child engine ~child
+          | None -> `Unbound);
+      fail_child =
+        (fun ~child ~message ->
+          match !engine_cell with
+          | Some engine -> Agent.fail_brokered_child engine ~child ~message
+          | None -> ());
+    }
+  in
+  let engine =
+    Agent.create ~sw ~store:(store_of store) ~provider:script ~config ~now
+      ?max_children ~broker ~broker_engine ~execution_for_mode
+      ~delegated_execution ()
+  in
+  engine_cell := Some engine;
+  engine
 
 (* One engine over a freshly-seeded [root] session, torn down (shutdown, then
    switch cancellation) inside a real-clock deadlock guard. *)
-let with_engine ?script ?config ?max_children ?child_backend ?broker ?catalog
+let with_engine ?script ?config ?max_children ?materialize ?broker ?catalog
     ?workspace ?execution_for_mode ?background_probe ?running_view
     ?delegated_execution ?delegated_role_spy f =
   Eio_main.run @@ fun env ->
@@ -630,7 +724,7 @@ let with_engine ?script ?config ?max_children ?child_backend ?broker ?catalog
   let store = fresh_store () in
   seed_session store ~id:"root";
   let engine =
-    mk_engine ~sw ~store ?script ?config ?max_children ?child_backend ?broker
+    mk_engine ~sw ~store ?script ?config ?max_children ?materialize ?broker
       ?catalog ?workspace ?background_probe ?running_view ?execution_for_mode
       ?delegated_execution ?delegated_role_spy ()
   in
@@ -4822,24 +4916,20 @@ let an_observation_made_while_waiting_reaches_the_parent () =
       | requests ->
           failf "expected three parent requests, got %d" (List.length requests))
 
-(* Runtime: the brokered child backend.
+(* Runtime: the brokered child handoff.
 
-   Under [Brokered] the engine records the edge, creates the child document,
-   and holds the permit, then hands identity to the ops record; settlement
+   The engine records the edge, creates the child document, and holds the
+   permit, then hands identity to its broker's materialize; settlement
    arrives through the observation seam. The fixtures play the broker: a spy
-   ops record captures the handoff, a second engine over the same store plays
-   the out-of-process child server (the exact serve-session topology — shared
-   journals, separate runtimes), and the seam calls play the observer. *)
+   materialize script captures the handoff, a second engine over the same
+   store plays the out-of-process child server (the exact serve topology —
+   shared journals, separate runtimes), and the seam calls play the
+   observer. *)
 
 let brokered_spy () =
   let materialized = ref [] in
-  let ops =
-    {
-      Ports.materialize = (fun ~child -> materialized := child :: !materialized);
-      cancel = (fun ~child:_ -> ());
-    }
-  in
-  (materialized, Ports.Brokered ops)
+  let materialize _engine ~child = materialized := child :: !materialized in
+  (materialized, materialize)
 
 (* The parent's whole journey: spawn, then wait on the receipt handle, then a
    final answer once the wait delivers. *)
@@ -4881,8 +4971,8 @@ let root_edge store =
 
 let a_brokered_spawn_hands_identity_and_integrates_on_the_wake () =
   let requests = ref [] in
-  let materialized, child_backend = brokered_spy () in
-  with_engine ~script:(spawn_wait_script requests) ~child_backend
+  let materialized, materialize = brokered_spy () in
+  with_engine ~script:(spawn_wait_script requests) ~materialize
     (fun ~sw ~client ~store ~engine ->
       let feed = follow_ok client (sid "root") in
       submit_ok client
@@ -4903,7 +4993,7 @@ let a_brokered_spawn_hands_identity_and_integrates_on_the_wake () =
       is_true ~msg:"an unstarted brokered child probes Not_settled"
         (Agent.integrate_brokered_child engine ~child = `Not_settled);
       (* The child server: a second engine over the same store submits the
-         deterministic first turn, exactly as serve-session does. *)
+         deterministic first turn, exactly as the serve boot does. *)
       let engine2 =
         mk_engine ~sw ~store
           ~script:(Ports.script (fun _ -> Ok (plain_response "CHILD_DONE")))
@@ -4936,8 +5026,8 @@ let a_brokered_spawn_hands_identity_and_integrates_on_the_wake () =
 
 let a_brokered_failure_settles_the_parked_wait () =
   let requests = ref [] in
-  let _materialized, child_backend = brokered_spy () in
-  with_engine ~script:(spawn_wait_script requests) ~child_backend
+  let _materialized, materialize = brokered_spy () in
+  with_engine ~script:(spawn_wait_script requests) ~materialize
     (fun ~sw:_ ~client ~store ~engine ->
       let feed = follow_ok client (sid "root") in
       submit_ok client
@@ -4970,7 +5060,7 @@ let a_brokered_failure_settles_the_parked_wait () =
    first child holds the permit, and a follow-up turn spawns again once the
    broker reported the first child gone. *)
 let a_reaped_brokered_child_releases_capacity () =
-  let materialized, child_backend = brokered_spy () in
+  let materialized, materialize = brokered_spy () in
   (* Distinct call ids: two spawns of one turn must be two delegations, not a
      re-issue of one. *)
   let spawn_call ~id ~task =
@@ -4999,7 +5089,7 @@ let a_reaped_brokered_child_releases_capacity () =
     | 4 -> Ok (spawn_call ~id:"sp-third" ~task:"third")
     | _ -> Ok (plain_response "TURN_TWO_DONE")
   in
-  with_engine ~script ~max_children:1 ~child_backend
+  with_engine ~script ~max_children:1 ~materialize
     (fun ~sw:_ ~client ~store ~engine ->
       submit_ok client
         (prompt ~session:(sid "root") ~turn:(tid "t-one") "PLEASE_SPAWN");
@@ -5066,29 +5156,29 @@ let message_script ~verbs =
   end
   else Ok (plain_response "CHILD_SEEN")
 
-(* Under [Brokered], a message for a child this runtime does not drive is one
-   broker send with the derived queue id and the parent's agent origin —
-   never an in-process attach, never a prompt. The recording stub plays the
-   broker and answers [`Delivered], so the child journal must stay untouched
-   by this process. The [`Follow_up] additionally wakes the child through the
-   ops record's materialization — send then wake, two acts — while the
-   [`Context] sends without waking. *)
+(* A message for a child this runtime does not drive is one broker send with
+   the derived queue id and the parent's agent origin — never an in-process
+   attach, never a prompt. The recording stub plays the broker and answers
+   [`Delivered], so the child journal must stay untouched by this process.
+   The [`Follow_up] additionally wakes the child through the broker's
+   materialization — send then wake, two acts — while the [`Context] sends
+   without waking. *)
 let a_brokered_message_crosses_the_broker_send () =
   let sent = ref [] in
+  let materialized, materialize = brokered_spy () in
   let broker =
     Mentat_broker.for_tests
       ~send:(fun ~origin ~target ~id ~input:_ ->
         sent := (origin, target, id) :: !sent;
         `Delivered)
-      ()
+      ~materialize ()
   in
-  let materialized, child_backend = brokered_spy () in
   let script =
     message_script
       ~verbs:
         [ ("send", "extra context"); ("follow_up", "one more thing") ]
   in
-  with_engine ~script:(capped_script ~cap:20 script) ~child_backend ~broker
+  with_engine ~script:(capped_script ~cap:20 script) ~broker
     (fun ~sw:_ ~client ~store ~engine:_ ->
       submit_ok client
         (prompt ~session:(sid "root") ~turn:(tid "t-msg") "PLEASE_SPAWN");
@@ -5133,6 +5223,7 @@ let a_brokered_message_crosses_the_broker_send () =
 let same_edge_messages_deliver_in_order () =
   let delivered = ref [] in
   let calls = ref 0 in
+  let _materialized, materialize = brokered_spy () in
   let broker =
     Mentat_broker.for_tests
       ~send:(fun ~origin:_ ~target:_ ~id:_ ~input ->
@@ -5145,14 +5236,13 @@ let same_edge_messages_deliver_in_order () =
         | [ Llm.Content.Text text ] -> delivered := text :: !delivered
         | _ -> fail "mail carries one text block");
         `Delivered)
-      ()
+      ~materialize ()
   in
-  let _materialized, child_backend = brokered_spy () in
   let script =
     message_script
       ~verbs:[ ("send", "first"); ("send", "second") ]
   in
-  with_engine ~script:(capped_script ~cap:20 script) ~child_backend ~broker
+  with_engine ~script:(capped_script ~cap:20 script) ~broker
     (fun ~sw:_ ~client ~store:_ ~engine:_ ->
       submit_ok client
         (prompt ~session:(sid "root") ~turn:(tid "t-fifo") "PLEASE_SPAWN");
@@ -5201,19 +5291,19 @@ let an_undelivered_message_redrives_at_the_next_attach () =
   seed_session store ~id:"root";
   let run () =
     let first = ref [] in
+    let _materialized, materialize = brokered_spy () in
     let broker1 =
       Mentat_broker.for_tests
         ~send:(fun ~origin:_ ~target:_ ~id ~input:_ ->
           first := id :: !first;
           `Undelivered "the target's fence stayed held")
-        ()
+        ~materialize ()
     in
-    let _materialized, child_backend = brokered_spy () in
     let script = message_script ~verbs:[ ("send", "extra context") ] in
     let engine1 =
       mk_engine ~sw ~store
         ~script:(capped_script ~cap:20 script)
-        ~child_backend ~broker:broker1 ()
+        ~broker:broker1 ()
     in
     let client1 = { c = make_client engine1; sw } in
     submit_ok client1
@@ -5222,17 +5312,16 @@ let an_undelivered_message_redrives_at_the_next_attach () =
     await_yield (fun () -> List.length !first >= 1);
     Agent.shutdown engine1;
     let redriven = ref [] in
+    let _materialized2, materialize2 = brokered_spy () in
     let broker2 =
       Mentat_broker.for_tests
         ~send:(fun ~origin:_ ~target:_ ~id ~input:_ ->
           redriven := id :: !redriven;
           `Delivered)
-        ()
+        ~materialize:materialize2 ()
     in
-    let _materialized2, child_backend2 = brokered_spy () in
     let engine2 =
-      mk_engine ~sw ~store ~script:default_script
-        ~child_backend:child_backend2 ~broker:broker2 ()
+      mk_engine ~sw ~store ~script:default_script ~broker:broker2 ()
     in
     let client2 = { c = make_client engine2; sw } in
     submit_ok client2 (prompt ~session:(sid "root") ~turn:(tid "t-after") "hi");

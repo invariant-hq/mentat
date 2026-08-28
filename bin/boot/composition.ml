@@ -101,11 +101,6 @@ type t = {
   (* Miss-path listing refreshes are rate-limited per provider: a selector
      that keeps missing must not probe the network on every resolution. *)
   listing_refresh_at : (string, float) Hashtbl.t;
-  (* Where this instance's delegated children materialize, resolved lazily at
-     engine assembly so a backend whose ops close over the instance can be
-     supplied before the instance exists. [None] is the in-process default —
-     the CLI's single-runtime shape; the daemon supplies a brokered backend. *)
-  child_backend : (t -> Engine.Ports.child_backend) option;
   (* Transitional, with the serve-mount bridge itself: whether this instance's
      engine serves each driven session's derived socket beside its driver.
      When set, the instance's fence owner carries the serve-mount label, so a
@@ -115,10 +110,11 @@ type t = {
      node broker; absent, an instance-owned one is built on first use over
      [resolve_bin] — a staging fact, so what the broker can do is fixed
      when the instance is staged, never by which caller reaches it first.
-     The default resolver refuses: this process materializes no
-     per-session servers of its own, it only sends. An owned broker is
-     stopped by {!shutdown}: its reaper fiber lives under the instance
-     switch, which could not close otherwise. *)
+     The default resolver is the running executable itself
+     ([self_resolve_bin]), so every mentat composition can materialize its
+     own children. An owned broker is stopped by {!shutdown}: its reaper
+     fiber lives under the instance switch, which could not close
+     otherwise. *)
   broker : Mentat_broker.t option;
   resolve_bin : unit -> (string, string) result;
   mutable owned_broker : Mentat_broker.t option;
@@ -499,12 +495,45 @@ let stage_store_reported ~stdenv ~sw ~dirs ~getenv ?data_home () =
         | Some path -> Printf.sprintf "%s (report saved: %s)" message path
         | None -> message)
 
-let refusing_resolve_bin () =
-  Error "this process materializes no per-session servers"
+(* The default activation-binary resolution: the running executable itself.
+   [mentat serve] is a subcommand of this very binary, so every mentat
+   composition can spawn its own children with nothing to find:
+   [Sys.executable_name] is the platform's self-exe path on both supported
+   platforms (/proc/self/exe on Linux, _NSGetExecutablePath on macOS),
+   captured at startup — the argv[0]/PATH heuristic is only the runtime's
+   fallback where that facility is missing. MENTAT_BIN overrides it, the
+   same escape the daemon's sibling policy honors, so a harness or a split
+   layout can name the binary to spawn. A path that is absent, a directory,
+   or not executable — a binary deleted or replaced underneath a running
+   process — is refused loudly here: [Unix.create_process] reports an exec
+   failure only inside the forked child, invisibly. *)
+let self_resolve_bin () =
+  let is_program path =
+    Sys.file_exists path
+    && (not (Sys.is_directory path))
+    &&
+    match Unix.access path [ Unix.X_OK ] with
+    | () -> true
+    | exception Unix.Unix_error _ -> false
+  in
+  match Sys.getenv_opt "MENTAT_BIN" with
+  | Some bin when not (String.equal bin "") ->
+      if is_program bin then Ok bin
+      else
+        Error (Printf.sprintf "MENTAT_BIN names %s, which is not a program" bin)
+  | _ ->
+      let self = Sys.executable_name in
+      if is_program self then Ok self
+      else
+        Error
+          (Printf.sprintf
+             "the running executable is gone: %s no longer names a program; \
+              set MENTAT_BIN to the mentat binary to spawn"
+             self)
 
 let make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
-    ~review_base ?owner_label ?child_backend ?broker
-    ?(resolve_bin = refusing_resolve_bin) ?(serve_mount = false) () : t =
+    ~review_base ?owner_label ?broker ?(resolve_bin = self_resolve_bin)
+    ?(serve_mount = false) () : t =
   let owner_label =
     match owner_label with
     | Some _ as label -> label
@@ -525,7 +554,6 @@ let make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
     overrides;
     staged_default = None;
     listing_refresh_at = Hashtbl.create 4;
-    child_backend;
     serve_mount;
     broker;
     resolve_bin;
@@ -584,8 +612,7 @@ let stage_shared ~stdenv ~sw ?data_home () : (shared, Exit_status.t) result =
    one switch). No store is opened here — the shared handle is reused, which is
    what keeps the fence's same-process half honest. *)
 let instance shared ~sw ~cwd ~overrides ?environment ?review_base ?owner_label
-    ?child_backend ?broker ?resolve_bin ?serve_mount () :
-    (t, Exit_status.t) result =
+    ?broker ?resolve_bin ?serve_mount () : (t, Exit_status.t) result =
   let ( let* ) = Result.bind in
   let environment = Option.value environment ~default:shared.environment in
   let getenv = environment_get environment in
@@ -597,8 +624,7 @@ let instance shared ~sw ~cwd ~overrides ?environment ?review_base ?owner_label
   in
   Ok
     (make_instance ~shared ~sw ~root ~trusted ~config ~environment ~overrides
-       ~review_base ?owner_label ?child_backend ?broker ?resolve_bin
-       ?serve_mount ())
+       ~review_base ?owner_label ?broker ?resolve_bin ?serve_mount ())
 
 (* The engine's drivers are long-lived fibers under the instance switch; shut
    them down so the switch can close instead of blocking on idle drivers. The
@@ -3243,9 +3269,8 @@ let expand_command_responder t ~name ~arguments =
    instance was staged for: the resolver is a staging argument
    ([?resolve_bin] at {!instance} and {!with_base}), so which caller
    reaches the broker first never decides what it can do. The default
-   resolver refuses — nothing hands a pure sender a child to materialize,
-   and a consulted resolver there means a wiring bug, failed loudly into
-   the supervision's named sink. An owned broker is stopped by
+   resolver is the running executable itself, so any composition can
+   materialize the children it records. An owned broker is stopped by
    {!shutdown}, its fibers living under the instance switch. *)
 let broker t =
   match t.broker with
@@ -3263,6 +3288,39 @@ let broker t =
           in
           t.owned_broker <- Some broker;
           broker)
+
+(* The broker's engine-reach seam for this instance: the workspace identity a
+   child is spawned and dialed under, and the wrappers every brokered
+   observation reports through. The closures dispatch through the instance's
+   cached engine rather than through {!adopt_session} and friends below:
+   the record is handed to the engine at assembly, textually above those
+   wrappers, and it can only be reached — through the engine's own broker,
+   or through a booted daemon instance — after assembly has stored the
+   engine, so an absent engine is answered with each seam's null arm
+   instead of by forcing assembly from underneath it. *)
+let broker_engine t =
+  {
+    Mentat_broker.Engine.root = t.root;
+    environment = t.ambient;
+    adopt_session =
+      (fun session ->
+        match t.engine with
+        | Some engine -> Engine.adopt engine session
+        | None ->
+            Error
+              (Mentat_protocol.Error.unavailable
+                 "the workspace instance has not assembled its engine"));
+    integrate_child =
+      (fun ~child ->
+        match t.engine with
+        | Some engine -> Engine.integrate_brokered_child engine ~child
+        | None -> `Unbound);
+    fail_child =
+      (fun ~child ~message ->
+        match t.engine with
+        | Some engine -> Engine.fail_brokered_child engine ~child ~message
+        | None -> ());
+  }
 
 (* The raw multi-source driver record and the two execution-layer handles the
    TUI needs alongside it, built once and cached in [t.assembled]. It assembles
@@ -3315,11 +3373,6 @@ let build_driver t :
   let max_children =
     Cfg.Resolved.get Cfg.Field.run_subagent_max_concurrent t.config
   in
-  let child_backend =
-    match t.child_backend with
-    | None -> Engine.Ports.In_process
-    | Some backend -> backend t
-  in
   let broker = broker t in
   (* The transitional serve-mount hook: the engine applies it at each driver
      registration, so a session this instance drives is dialable over its
@@ -3343,8 +3396,8 @@ let build_driver t :
     Engine.create ~sw:t.switch ~store:store_port ~provider:provider_call
       ~config:(config_callback t ~product_rules:build_product_rules)
       ~now:(fun () -> now_time t)
-      ~max_children ~child_backend ~broker ?serve_mount ~execution_for_mode
-      ~delegated_execution ()
+      ~max_children ~broker ~broker_engine:(broker_engine t) ?serve_mount
+      ~execution_for_mode ~delegated_execution ()
   in
   t.engine <- Some engine;
   let driver_record : Client.Driver.t =

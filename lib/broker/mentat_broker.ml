@@ -101,7 +101,7 @@ end
 
 (* Every timing constant in one place. The boot wait bounds only how long a
    spawned child may take to bind its endpoint before the ladder treats it as
-   wedged (a cold serve-session boot stages a full composition; tens of
+   wedged (a cold serve boot stages a full composition; tens of
    seconds is generous without deferring a real wedge forever). The grace is
    the pause between escalation rungs. Re-materialization is bounded at two
    respawns beyond the first spawn — enough to ride out one unlucky crash plus
@@ -1522,6 +1522,8 @@ type supervise_stub =
   respawns:int ->
   [ `Settled | `Failed of failure ]
 
+type materialize_stub = Engine.t -> child:Mentat_session.Id.t -> unit
+
 (* The stub keeps the real send's per-target serialization — its own lock
    registry — so an ordering-sensitive engine test observes the primitive's
    contract, not a mock's looser one. It has no clock, so the lock wait is
@@ -1530,10 +1532,15 @@ type supervise_stub =
    outcome; the stub fires exactly one of the caller's sinks per call — the
    real verb's contract — and holds no table, so it never dedups a
    re-supervision, exactly as the real broker re-governs a session whose
-   previous supervision has drained. *)
+   previous supervision has drained. The optional materialize script
+   receives the full request — the engine record and the child — and,
+   table-less again, sees every re-materialization; the real verb's
+   per-child idempotence and its forked, non-blocking observation are the
+   script's to model. *)
 type stub = {
   send : send_stub;
   supervise : supervise_stub option;
+  materialize : materialize_stub option;
   locks : (string, Eio.Mutex.t) Hashtbl.t;
 }
 
@@ -1546,13 +1553,14 @@ let no_processes op =
 let create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir ~now =
   Real (create ~sw ~stdenv ~store ~resolve_bin ~socket_base ~log_dir ~now)
 
-let for_tests ?supervise ~send () =
-  Stub { send; supervise; locks = Hashtbl.create 4 }
+let for_tests ?supervise ?materialize ~send () =
+  Stub { send; supervise; materialize; locks = Hashtbl.create 4 }
 
 let materialize t engine ~child =
   match t with
   | Real b -> materialize b engine ~child
-  | Stub _ -> no_processes "materialize"
+  | Stub { materialize = None; _ } -> no_processes "materialize"
+  | Stub { materialize = Some script; _ } -> script engine ~child
 
 let supervise t ~session ~environment ?deadline_s ?respawns ~on_settled
     ~on_failure () =

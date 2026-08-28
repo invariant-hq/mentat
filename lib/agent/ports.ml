@@ -110,13 +110,6 @@ module type STORE = sig
   val export : guard -> (string, Store_error.t) result
 end
 
-type child_ops = {
-  materialize : child:Mentat_session.Id.t -> unit;
-  cancel : child:Mentat_session.Id.t -> unit;
-}
-
-type child_backend = In_process | Brokered of child_ops
-
 type provider_call =
   Mentat_llm.Request.t ->
   on_event:(Mentat_llm.Event.t -> unit) ->

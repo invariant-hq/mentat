@@ -373,6 +373,7 @@ val for_tests :
     deadline_s:float option ->
     respawns:int ->
     [ `Settled | `Failed of failure ]) ->
+  ?materialize:(Engine.t -> child:Mentat_session.Id.t -> unit) ->
   send:
     (origin:Mentat_session.Origin.t option ->
     target:Mentat_session.Id.t ->
@@ -397,7 +398,15 @@ val for_tests :
     session whose previous supervision has drained. {!val-children} answers
     the empty list: the stub supervises no process.
 
-    Every process-facing operation left unstubbed — {!materialize},
-    {!val-watch}, {!cancel}, {!rediscover}, and {!val-supervise} without a
-    script — raises [Invalid_argument]: the stub performs no process work,
-    and a test that reaches one of those has wired the wrong seam. *)
+    [materialize], when given, scripts {!val-materialize}: each call hands
+    the full request — the engine record and the child — to the script,
+    synchronously on the caller's fiber. Table-less again, so every
+    re-materialization reaches the script; the real verb's per-child
+    idempotence and its forked, non-blocking observation are the script's
+    to model — a script that drives the child forks its own fiber.
+
+    Every process-facing operation left unstubbed — {!val-watch},
+    {!cancel}, {!rediscover}, and {!val-materialize} or {!val-supervise}
+    without a script — raises [Invalid_argument]: the stub performs no
+    process work, and a test that reaches one of those has wired the wrong
+    seam. *)

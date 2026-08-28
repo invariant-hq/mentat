@@ -63,7 +63,7 @@ type registry = {
   store : Store.t;
   parent_sw : Eio.Switch.t;
   (* Every daemon-hosted instance delegates through the node's one child
-     broker; the ops close over the instance at boot. *)
+     broker, passed to it at boot. *)
   broker : Mentat_broker.t;
   mutex : Eio.Mutex.t;
   entries : (string, entry) Hashtbl.t;
@@ -84,28 +84,6 @@ let make_registry ~shared ~parent_sw ~broker =
     active = Atomic.make 0;
   }
 
-(* The broker's engine-reach seam for one instance: the workspace identity a
-   child is spawned and dialed under, and the engine wrappers every
-   observation reports through. *)
-let broker_engine instance =
-  {
-    Mentat_broker.Engine.root = Composition.root instance;
-    environment = Composition.environment instance;
-    adopt_session = Composition.adopt_session instance;
-    integrate_child =
-      (fun ~child -> Composition.integrate_child instance ~child);
-    fail_child =
-      (fun ~child ~message -> Composition.fail_child instance ~child ~message);
-  }
-
-let broker_ops broker instance =
-  let engine = broker_engine instance in
-  {
-    Mentat_agent.Ports.materialize =
-      (fun ~child -> Mentat_broker.materialize broker engine ~child);
-    cancel = (fun ~child -> Mentat_broker.cancel broker ~child);
-  }
-
 (* Boot one instance under a fiber that holds the instance switch open until the
    returned [release] runs — the detached scope eviction closes. Runs the
    staging and driver assembly synchronously and reports the ready entry (or the
@@ -119,10 +97,7 @@ let boot registry ~root ~environment =
       Eio.Switch.run @@ fun instance_sw ->
       match
         Composition.instance registry.shared ~sw:instance_sw ~cwd:(Some root)
-          ~overrides:[] ?environment
-          ~child_backend:(fun instance ->
-            Mentat_agent.Ports.Brokered (broker_ops registry.broker instance))
-          ~broker:registry.broker
+          ~overrides:[] ?environment ~broker:registry.broker
             (* The transitional serve-mount: a session this instance's engine
                drives — a brokered child's parent above all — is dialable
                over its derived socket, so a child's reply crosses the wire
@@ -1007,7 +982,7 @@ let serve ~socket_override ~spawned ~web ~web_port ~ingress_port
                                   | None -> ());
                               sweep registry
                             in
-                            Ok (broker_engine entry.instance, release));
+                            Ok (Composition.broker_engine entry.instance, release));
                     (* The boot reconcile, settle-only: whatever record a
                        previous life left open is settled before the first
                        delivery is admitted — locally, with no network — so

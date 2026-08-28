@@ -85,8 +85,8 @@ val create :
     (Config.t, Mentat_diagnostic.t) result) ->
   now:(unit -> Mentat_session.Time.t) ->
   ?max_children:int ->
-  ?child_backend:Ports.child_backend ->
   broker:Mentat_broker.t ->
+  broker_engine:Mentat_broker.Engine.t ->
   ?serve_mount:(session:Mentat_session.Id.t -> (unit -> unit) option) ->
   execution_for_mode:Execution.factory ->
   delegated_execution:Execution.delegated_factory ->
@@ -125,26 +125,27 @@ val create :
     an empty background-process view. Independently attached children verify
     their metadata backlink against the parent delegation edge before a driver
     is created. [max_children] bounds the scheduler's tree-wide capacity permit
-    (default [4]). [child_backend] names where a delegated child session
-    materializes once its edge and document are durable
-    ({!Ports.child_backend}, default {!Ports.In_process}): under [In_process]
-    the runtime attaches the child as a sibling driver and submits its
-    deterministic first turn ({!child_first_turn}) itself; under [Brokered] the
-    runtime still records the edge, creates the child document, and holds the
-    capacity permit, then hands the child's identity to the ops record — the
-    broker owns spawn, observation, and reaping, and reports what it observes
-    back through {{!section-brokered}the observation seam}. A child this
-    runtime already drives in-process is never handed to the broker: its own
-    driver and fence are the materialization, and a second process racing that
-    fence could only lose. [broker] is the process's one
-    {!Mentat_broker.t}, through which every recorded parent-to-child message
-    for a child this runtime does not itself drive is sent
-    ({!Mentat_broker.send}), one delegation edge's messages delivered in
-    receipt order — durable in the child's journal or loudly undelivered,
-    re-driven from the durable receipt at the next attach or the observed
-    child exit; sending never wakes the child, a follow-up's wake is the
-    separate materialization act. A recorded message to the session's own
-    parent rides the same lanes with no wake at all.
+    (default [4]). [broker] is the process's one {!Mentat_broker.t}, and every
+    delegated child session is its to run: once the edge and the child
+    document are durable, the runtime hands the child's identity to
+    {!Mentat_broker.materialize} — the broker owns spawn, observation, and
+    reaping, and reports what it observes back through
+    {{!section-brokered}the observation seam} — while the runtime keeps the
+    edge record, the child document, and the semantic capacity permit. A
+    child this runtime already drives (a resumed session holding a sibling
+    driver) is never handed to the broker: its own driver and fence are the
+    materialization, and a second process racing that fence could only lose.
+    [broker_engine] is this runtime as the broker reaches back into it
+    ({!Mentat_broker.Engine.t}) — the workspace identity a child is spawned
+    and dialed under, and the wrappers every brokered observation reports
+    through; the composition that owns both halves builds it. Every recorded
+    parent-to-child message for a child this runtime does not itself drive
+    is sent through the broker ({!Mentat_broker.send}), one delegation
+    edge's messages delivered in receipt order — durable in the child's
+    journal or loudly undelivered, re-driven from the durable receipt at the
+    next attach or the observed child exit; sending never wakes the child, a
+    follow-up's wake is the separate materialization act. A recorded message
+    to the session's own parent rides the same lanes with no wake at all.
 
     [serve_mount] is transitional, dying with the in-process drivers it
     exists for: applied at each driver registration, it may open the driven
@@ -158,10 +159,10 @@ val child_first_turn :
   Mentat_session.Delegation.Id.t -> Mentat_session.Turn.Id.t
 (** [child_first_turn delegation] is the deterministic id of a delegated
     child's first turn: a keyed digest over [delegation] alone. It is the one
-    cross-backend mint rule — every child backend submits the child's first
-    turn under this id, so a crash re-drive or a re-materialization resubmits
-    the same turn and the byte-identical task prompt is idempotent rather
-    than duplicated. *)
+    cross-process mint rule — every minter, the child's own serve boot above
+    all, submits the child's first turn under this id, so a crash re-drive
+    or a re-materialization resubmits the same turn and the byte-identical
+    task prompt is idempotent rather than duplicated. *)
 
 (** {1:brokered The brokered observation seam}
 
@@ -178,7 +179,7 @@ val adopt : t -> Mentat_session.Id.t -> (unit, Mentat_protocol.Error.t) result
     accompanying command: acquire the fence, load, and recover to quiescence,
     leaving the driver resident. Recovery's own consequences run as they would
     under any attach — a parked children-wait is reconstructed, unfinished
-    delegation edges re-drive through the configured backend, settled ones are
+    delegation edges re-drive through the broker, settled ones are
     folded into the scheduler buffer, and undelivered recorded messages are
     re-driven. It is the verb a restarted node uses to re-adopt the parent of
     an orphaned child so the child's eventual settlement has a driver to wake.

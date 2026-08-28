@@ -43,8 +43,12 @@ type t = {
   now : unit -> Mentat_session.Time.t;
   execution_for_mode : Execution.factory;
   delegated_execution : Execution.delegated_factory;
-  child_backend : Ports.child_backend;
   broker : Mentat_broker.t;
+  broker_engine : Mentat_broker.Engine.t;
+      (* This runtime, as its broker reaches back into it: the workspace
+         identity a child is spawned and dialed under, and the wrappers a
+         brokered observation reports through. Handed at creation by the
+         composition that owns both halves. *)
   serve_mount : (session:Mentat_session.Id.t -> (unit -> unit) option) option;
   scheduler : Scheduler.t;
   drivers : (string, Driver.t) Hashtbl.t;
@@ -63,18 +67,17 @@ type t = {
   mutable shutting_down : bool;
 }
 
-(* The cross-backend mint rule for a delegated child's first turn: every
-   backend derives the same turn id from the delegation id alone, so a crash
-   re-drive or a re-materialization resubmits the same turn and the
-   byte-identical prompt is idempotent. *)
+(* The cross-process mint rule for a delegated child's first turn: every
+   minter — the child's own serve boot, a crash re-drive — derives the same
+   turn id from the delegation id alone, so a re-materialization resubmits
+   the same turn and the byte-identical prompt is idempotent. *)
 let child_first_turn delegation =
   Mentat_session.Turn.Id.of_string
     (Mentat_digest.key ~length:20 ~domain:"mentat.agent.child-turn.v1"
        [ Mentat_session.Delegation.Id.to_string delegation ])
 
-let create ~sw ~store ~provider ~config ~now ?(max_children = 4)
-    ?(child_backend = Ports.In_process) ~broker ?serve_mount
-    ~execution_for_mode ~delegated_execution () =
+let create ~sw ~store ~provider ~config ~now ?(max_children = 4) ~broker
+    ~broker_engine ?serve_mount ~execution_for_mode ~delegated_execution () =
   {
     sw;
     store;
@@ -83,8 +86,8 @@ let create ~sw ~store ~provider ~config ~now ?(max_children = 4)
     now;
     execution_for_mode;
     delegated_execution;
-    child_backend;
     broker;
+    broker_engine;
     serve_mount;
     scheduler = Scheduler.create ~capacity:max_children;
     drivers = Hashtbl.create 8;
@@ -538,9 +541,9 @@ and hooks t ~id =
   }
 
 (* Idempotent on the parent-minted child id: create the child session if
-   absent, then materialize it through the configured backend.
-   A child never runs before its edge is durable — this is called only after
-   the [Delegation_recorded] commit, or from recovery's re-drive. *)
+   absent, then hand it to the broker to run. A child never runs before its
+   edge is durable — this is called only after the [Delegation_recorded]
+   commit, or from recovery's re-drive. *)
 and observe_delegation t ~parent ~parent_cwd edge =
   let child = Mentat_session.Delegation.child edge in
   let delegation = Mentat_session.Delegation.id edge in
@@ -552,44 +555,15 @@ and observe_delegation t ~parent ~parent_cwd edge =
   in
   match ensure_child_session t ~parent ~delegation ~cwd:parent_cwd child with
   | Error e -> fail_spawn (Ports.Store_error.message e)
-  | Ok () -> (
-      match t.child_backend with
-      | Ports.In_process -> materialize_in_process t ~fail_spawn edge
-      | Ports.Brokered ops ->
-          (* Identity only crosses: the broker re-reads the task and role from
-             the durable edge. A child this runtime already drives in-process
-             (a message delivery attached it) is skipped — its own driver and
-             fence are the materialization, and handing its identity to the
-             broker would race a second process against a fence this process
-             holds. *)
-          if Option.is_none (find_driver t child) then
-            ops.Ports.materialize ~child)
-
-(* In-process materialization: attach a child driver as a sibling and submit
-   its first turn. The started guard makes a re-drive idempotent — a child
-   whose journal already holds a turn is running or settled, never
-   re-prompted. *)
-and materialize_in_process t ~fail_spawn edge =
-  let child = Mentat_session.Delegation.child edge in
-  let delegation = Mentat_session.Delegation.id edge in
-  match attach t child with
-  | Error e -> fail_spawn (Error.message e)
-  | Ok driver ->
-      let head = Feed.Hub.head (Driver.hub driver) in
-      let started =
-        Mentat_session.State.turns (Mentat_session.state head) <> []
-      in
-      if not started then begin
-        let turn = child_first_turn delegation in
-        let input = Mentat_session.Delegation.task edge in
-        match Mentat_protocol.Command.prompt ~session:child ~turn ~input () with
-        | Error invalid ->
-            fail_spawn (Mentat_protocol.Command.Invalid.message invalid)
-        | Ok command ->
-            (* Eager drive; never on the parent's controller fiber. *)
-            Eio.Fiber.fork ~sw:t.sw (fun () ->
-                ignore (Driver.submit driver command))
-      end
+  | Ok () ->
+      (* Identity only crosses: the broker re-reads the task and role from
+         the durable edge. A child this runtime already drives (a resumed
+         session holding a sibling driver) is skipped — its own driver and
+         fence are the materialization, and handing its identity to the
+         broker would race a second process against a fence this process
+         holds. *)
+      if Option.is_none (find_driver t child) then
+        Mentat_broker.materialize t.broker t.broker_engine ~child
 
 and ensure_child_session t ~parent ~delegation ~cwd child =
   let module S = (val t.store : Ports.STORE) in
@@ -631,8 +605,8 @@ and rebuild_children t ~parent session =
           | Some result -> Scheduler.note_settled t.scheduler delegation result))
     (Mentat_session.State.delegations (Mentat_session.state session))
 
-(* Delivery of a recorded message — one story for every backend and both
-   directions. The idempotency id derives from the recording (turn, call), so
+(* Delivery of a recorded message — one story for both directions. The
+   idempotency id derives from the recording (turn, call), so
    an at-least-once re-drive lands the same queue entry once; both kinds are
    mail. Delivery is queued on the (sender, target) lane and performed by its
    one drain fiber, in receipt order — recovery's re-drives fold into the
@@ -757,17 +731,13 @@ and deliver_one t lane (message : Mentat_agent_step.Step.Mail.t) =
   | `Follow_up, To_parent _ | `Context, _ -> ()
 
 (* The wake half of a follow-up: make the child run so it consumes the mail.
-   Under [In_process] attaching is the wake — the attach's own admission (or
-   an already-attached driver's idle boundary) consumes the pending entry,
-   and a child some other process drives answers Busy, whose driver consumes
-   the mail itself. Under [Brokered] materialization is the wake, and the
-   broker's unfinished-work probe sees the queued mail. *)
+   Materialization is the wake — the broker's unfinished-work probe sees the
+   queued mail. A child this runtime drives needs no wake: its driver's own
+   idle boundary consumes the entry the delivery enqueued. *)
 and wake_child t edge =
   let child = Mentat_session.Delegation.child edge in
-  match t.child_backend with
-  | Ports.In_process -> ignore (attach t child)
-  | Ports.Brokered ops ->
-      if Option.is_none (find_driver t child) then ops.Ports.materialize ~child
+  if Option.is_none (find_driver t child) then
+    Mentat_broker.materialize t.broker t.broker_engine ~child
 
 (* Recovery's message re-drive (the idempotent pattern): a settled receipt
    whose derived id is not recorded as an enqueue in the target journal was
@@ -859,20 +829,17 @@ and cancel_children t ~parent children =
       | Some edge -> (
           let child = Mentat_session.Delegation.child edge in
           match find_driver t child with
-          | None -> (
-              match t.child_backend with
-              | Ports.In_process -> ()
-              | Ports.Brokered ops ->
-                  let module S = (val t.store : Ports.STORE) in
-                  let active =
-                    match S.view child with
-                    | Error _ -> false
-                    | Ok loaded ->
-                        Option.is_some
-                          (Mentat_session.State.active_turn
-                             (Mentat_session.state (S.session_of loaded)))
-                  in
-                  if active then ops.Ports.cancel ~child)
+          | None ->
+              let module S = (val t.store : Ports.STORE) in
+              let active =
+                match S.view child with
+                | Error _ -> false
+                | Ok loaded ->
+                    Option.is_some
+                      (Mentat_session.State.active_turn
+                         (Mentat_session.state (S.session_of loaded)))
+              in
+              if active then Mentat_broker.cancel t.broker ~child
           | Some child_driver ->
               let hub = Driver.hub child_driver in
               let quiescent () =
