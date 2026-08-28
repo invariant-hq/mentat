@@ -113,7 +113,10 @@ the shape —
   to the delegation subtree (today's behavior, byte-for-byte; the
   `--interrupted` carry stays with this shape);
 - a charter-born session → apply the charter's recorded run policy —
-  mode, sandbox, step cap, wall clock, output schema — from the store;
+  mode, sandbox, step cap, output schema, and the model, reasoning,
+  and permission spellings — from the store; the wall clock is not
+  recorded: it is the supervising fire's deadline (§ the supervisor —
+  one budget must not have two clocks);
 - a plain root session → serve plainly; confinement is "this session
   and anything it delegates."
 
@@ -245,7 +248,7 @@ an exit code.
    it); the broker consumes it. *)
 type origin =
   | Agent of Mentat_session.Id.t
-  | Trigger of { charter : string; digest : string; key : string }
+  | Trigger of { source : string; digest : string; key : string }
 (* An absent origin means the owner — the human. There is exactly one
    spelling of "the owner sent this": absence. *)
 
@@ -273,7 +276,8 @@ Delivery is one bounded loop, decided by the fence's owner label:
    the enqueued fact through the store's ordinary path, release.
    `` `Delivered ``. (Acquisition *is* the liveness probe; there is no
    read-then-act race.)
-2. **Fence held by a serving label** (`serve-session`) → dial the
+2. **Fence held by a serving label** (the child server's
+   `serve-session`, or the transitional serve-mount) → dial the
    derived socket, submit `Queue_next` on a short-lived, grace-bounded
    connection. The driver's dedup makes redelivery idempotent.
 3. **Fence held by a custodial label** (`send`, the store's `remove`)
@@ -312,10 +316,11 @@ policy allows.
 entry's origin into the turn it starts: an entry with a `Trigger`
 origin mints the turn as `Triggered` (recording the entry id), and a
 charter-born session's admission applies the charter's recorded
-contract — mode, step cap, output schema — never the plain Build
-defaults. This is the third journal-encoding change (§ wire and store)
-and what keeps receipts, projections, and the triggered discipline
-working when the trigger prompt arrives as mail.
+contract — mode and output schema at admission, the step cap through
+the boot's overlay — never the plain Build defaults. This is the
+second journal-encoding change (§ wire and store) and what keeps
+receipts, projections, and the triggered discipline working when the
+trigger prompt arrives as mail.
 
 **The receiver's experience.** Queued input at a turn boundary. The
 engine renders the sender's name into the prompt framing from the
@@ -436,15 +441,15 @@ new settlement kinds:
 |---|---|---|
 | activation crashes | reaper observes; respawn within budget re-serves the same session; `recover` settles open claims | child journal |
 | respawn budget exhausted | the named sink: delegation → parent settlement; root/charter → receipt + alert | parent journal / receipts |
-| parent process dies | children finish, self-idle, self-exit; mail and results wait durably; re-adoption restores deadline enforcement | child journals |
+| parent process dies | children finish, self-idle, self-exit; mail and results wait durably; a dead run is folded at the node's next pass — a live orphan's deadline is not re-armed (the supervisor section's admitted residue) | child journals |
 | mentatd dies | roots keep running and self-terminate on idle; boot rediscovery adopts live roots, folds exited ones | receipts, endpoint tree |
 | send to unknown session | loud error / failed tool call | sender transcript |
 | mailbox full | loud send failure | sender transcript |
 | unauthorized handle | unrepresentable — the handle does not resolve | sender transcript |
-| unauthorized origin at admission | durable refusal fact; content never read | target journal |
+| unauthorized origin at admission | structured refusal to the sender; the durable refusal fact is unresolved q2 — content never reaches the model either way | sender transcript |
 | undelivered send | `` `Undelivered `` against the sender's record; re-driven per origin (above) | sender receipts |
 | sender dies mid-append | fence releases on owner death; at worst the store's usual crash-truncated tail in the target's journal, healed at the next load | target journal |
-| wedged orphan | idle exit; re-adoption re-arms the deadline | journals, fences |
+| wedged orphan | idle exit; a dead orphan is folded by reconcile; a live wedged orphan is watched, never re-clocked — ending it is the owner's cancel | journals, fences |
 
 The two silent arms today — the parentless failure no-op, and "settled
 and orphaned look identical" — are structurally impossible: every
@@ -455,12 +460,12 @@ and orphaned look identical" — are structurally impossible: every
 - **Wire**: zero new commands. `Queue_next` gains an optional origin
   member (additive; corpus extended). Commands still carry no
   principal; the origin rides the entry.
-- **Journal** (the real compatibility surface), three changes, all
-  decoder-first — old journals stay readable forever: the enqueued
-  event gains the optional origin member; queue admission records the
-  origin into the turn it starts (a `Trigger` origin mints a
-  `Triggered` turn with the entry id); one new event kind, the
-  delivery refusal fact.
+- **Journal** (the real compatibility surface), two changes landed,
+  all decoder-first — old journals stay readable forever: the
+  enqueued event gains the optional origin member; queue admission
+  records the origin into the turn it starts (a `Trigger` origin
+  mints a `Triggered` turn with the entry id). The third — the
+  delivery refusal fact — is unresolved q2, unshipped.
 - **Store**: nothing new. No spool, no registry files, no persisted
   grants store (grants are journal facts).
 
@@ -479,10 +484,11 @@ and orphaned look identical" — are structurally impossible: every
   broker must never ladder the owner's terminal). Brief custodial
   holds (a send append, a store removal) carry a custodial label and
   are bounded; the probe decides by label, never by bare heldness.
-  The law binds fully once the eviction rung lands; until then,
-  unlabeled holders (interactive drivers, daemon-hosted engines) are
-  reachable only inside their own process, which is what the send's
-  transitional local arm exists for. *Prevents:* the unreachable
+  The law binds fully once the eviction rung lands; since R-mail,
+  interactive drivers and daemon-hosted engines hold under the
+  serve-mount label and are dialable — an unlabeled holder is now
+  only a host whose mount failed to bind, and the send's transitional
+  local arm survives on same-process preference, not unreachability. *Prevents:* the unreachable
   driven session, and the misread of a millisecond hold as a foreign
   driver.
 - **L-B3 — One boot, no modes.** The activation derives its shape from
@@ -624,6 +630,10 @@ intensity bound.
    so an old binary reading a trigger-born document fails on member
    decode instead of a clean unsupported-version refusal. Adjudicate
    once, for the whole vocabulary, before it widens further at R5.
+   Note for that ruling: the run-policy members are deliberately
+   textual — strings decode forever and refuse only where applied —
+   so any future move to typed members must ride a version bump,
+   never a decode change.
 
 **Out of scope (tiered to their own work):**
 7. The web frontend's dialing path (the eviction campaign's wave D).
