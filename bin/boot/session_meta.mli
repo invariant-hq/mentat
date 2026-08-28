@@ -35,7 +35,12 @@ val with_fence :
   ('a, Mentat_protocol.Error.t) result
 (** [with_fence ~store ~sw ~owner session f] runs [f] under a short-lived run
     fence over [session] (the "one driver per session" lock), releasing it on
-    exit. A held fence is {!Mentat_protocol.Error.Busy} (with the owner); an IO
+    exit. A hold that releases on its own — a custodial hold, or a settled
+    session's agent lingering toward its own exit — is waited out on a
+    bounded patience rather than refused, so an offline command issued right
+    after a run does not race the agent's linger. Any other held fence — an
+    agent actively driving, or a lingering one still held open past the
+    patience — is {!Mentat_protocol.Error.Busy} (with the owner); an IO
     failure is [Unavailable]. *)
 
 val commit_transform :

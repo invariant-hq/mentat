@@ -28,13 +28,3 @@ val session_arg : string option Term.t
 
 val last : bool Term.t
 (** [--last]: target the newest resumable session in the workspace. *)
-
-val attach : bool Term.t
-(** [--attach]: run against the per-user daemon (local socket), starting it if
-    needed. Config, trust, and command expansion stay local. *)
-
-val daemon_envs : Cmd.Env.info list
-(** The environment variables the attaching client reads —
-    [MENTAT_DAEMON_SOCKET] and [MENTATD_BIN] — for the [envs] of every
-    command that offers {!attach}. They are client-side: the daemon itself
-    reads neither. *)

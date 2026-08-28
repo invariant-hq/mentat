@@ -8,6 +8,7 @@ a foreign watch, never fought for. The quiet window is zero because the
 whole exchange is local and instantaneous.
 
   $ use_trusted_workspace
+  $ SOCK_BASE="$(child_sock_base)"
   $ mentat config set dune.lint_command '[]' >/dev/null
   $ touch dune-project
   $ use_fake_dune
@@ -24,6 +25,7 @@ registered there is nothing to hear.
   $ MENTAT_DUNE_WATCH=observe mentat run "observe prompt" --cwd "$PWD" --permission bypass --id observe-turn 2>/dev/null
   observed
   $ wait_fake_server
+  $ wait_child_exit observe-turn
   $ test -f fake-dune-argv
   [1]
 
@@ -41,6 +43,7 @@ carries the watch's own failing reading.
   $ MENTAT_DUNE_WATCH=auto mentat run "own prompt" --cwd "$PWD" --permission bypass --id own-turn 2>/dev/null
   owned
   $ wait_fake_server
+  $ wait_child_exit own-turn
   $ cat fake-dune-argv
   build --root . --watch @check
   $ grep -c 'Build failing (1 error: 1 new)' capture-own/request-2.json
@@ -71,6 +74,7 @@ spawns.
   $ MENTAT_DUNE_WATCH=auto mentat run "respawn prompt" --cwd "$PWD" --permission bypass --id respawn-turn 2>/dev/null
   respawned
   $ wait_fake_server
+  $ wait_child_exit respawn-turn
   $ wc -l < fake-dune-argv | tr -d ' '
   2
 
@@ -87,6 +91,7 @@ supervisor gives up and never spawns a third.
   $ MENTAT_DUNE_WATCH=auto mentat run "giveup prompt" --cwd "$PWD" --permission bypass --id giveup-turn 2>/dev/null
   gave up
   $ wait_fake_server
+  $ wait_child_exit giveup-turn
   $ wc -l < fake-dune-argv | tr -d ' '
   2
 
@@ -110,6 +115,7 @@ sleeps forever, as a build forwarded into a wedged watch would.
   $ MENTAT_DUNE_WATCH_FLUSH_S=0.5 MENTAT_DUNE_WATCH=auto mentat run "hang prompt" --cwd "$PWD" --permission bypass --id hang-turn 2>/dev/null
   hung
   $ wait_fake_server
+  $ wait_child_exit hang-turn
 
 Three shim invocations: the first life, the hung forwarder, and the
 respawned life the supervisor started after verification failed.
@@ -133,6 +139,7 @@ no notice, no third shim invocation.
   $ MENTAT_DUNE_WATCH=auto mentat run "slow prompt" --cwd "$PWD" --permission bypass --id slow-turn 2>/dev/null
   slow
   $ wait_fake_server
+  $ wait_child_exit slow-turn
 
 Two shim invocations only — the first life and the forwarder; verification
 cleared the report, so no respawn and no restart notice anywhere in the
@@ -159,6 +166,7 @@ notice — and never a second spawn.
   $ MENTAT_DUNE_WATCH_FLUSH_S=0.5 MENTAT_DUNE_WATCH=auto mentat run "blocked prompt" --cwd "$PWD" --permission bypass --id blocked-turn 2>/dev/null
   blocked
   $ wait_fake_server
+  $ wait_child_exit blocked-turn
   $ wc -l < fake-dune-argv | tr -d ' '
   1
   $ rm -f fake-dune-mode
@@ -180,6 +188,7 @@ watch's build error.
   $ MENTAT_DUNE_WATCH=auto mentat run "foreign prompt" --cwd "$PWD" --permission bypass --id foreign-turn 2>/dev/null
   attached
   $ wait_fake_server
+  $ wait_child_exit foreign-turn
   $ stop_fake_dune
   $ test -f fake-dune-argv
   [1]

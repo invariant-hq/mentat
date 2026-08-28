@@ -16,6 +16,7 @@ request gpt-5.4-mini. The model a run actually requests is visible in the provid
 capture as the request body's "model" member.
 
   $ use_trusted_workspace
+  $ SOCK_BASE="$(child_sock_base)"
 
 Turn 1 runs session `precedence` with the config default set to gpt-5.4-mini, so its
 contract model — the durable fact the engine replays as latest_model — is
@@ -60,6 +61,7 @@ reject it.
   > {"expect":{"body_contains":["\"model\":\"gpt-5.4-mini\"","resumed prompt"],"body_not_contains":["\"model\":\"gpt-5.6-sol\""]},"response":{"id":"precedence-2","status":"completed","model":"gpt-5.4-mini","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"resumed answer"}]}]}}
   > JSONL
   $ start_fake_openai resume.jsonl capture-resume port-resume
+  $ wait_child_exit precedence
   $ mentat run resume precedence "resumed prompt" --cwd "$PWD" 2>/dev/null
   resumed answer
   $ wait_fake_server

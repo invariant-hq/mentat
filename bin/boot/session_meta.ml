@@ -33,15 +33,49 @@ let session_error_to_protocol session (e : Session.Error.t) : Protocol_error.t =
   | Session.Error.Unsupported_version _ ->
       Protocol_error.unavailable (Session.Error.message e)
 
+(* A hold that releases on its own, worth a bounded wait instead of a Busy:
+   a custodial hold (a send appending mail, the store removing a session), or
+   a settled session's agent lingering toward its own exit — the serving
+   label over a concluded head. An agent actively driving (an unfinished
+   head) is a real driver, refused immediately; one held open by a live
+   connection past the patience is refused too, naming the holder. *)
+let transient_hold ~store session holder =
+  let serving_label label =
+    String.equal label Mentat_broker.serve_owner_label
+    || String.equal label Mentat_broker.serve_mount_owner_label
+  in
+  match Option.bind holder Store.Run_lock.Owner.label with
+  | None -> false
+  | Some label ->
+      Mentat_broker.custodial_label label
+      || serving_label label
+         &&
+         (match Store.Session.load store session with
+         | Error _ -> false
+         | Ok doc ->
+             Session.State.finished
+               (Session.state (Store.Session.Document.session doc)))
+
+let fence_patience_s = 4.0
+
 let with_fence ~store ~sw ~owner session f =
-  match Store.Run_lock.try_acquire ~sw store ~session ~owner with
-  | Error (`Held holder) ->
-      Error (Protocol_error.Busy { session; owner = owner_display holder })
-  | Error (`Io io) -> Error (Protocol_error.unavailable (Store.Io.message io))
-  | Ok guard ->
-      Fun.protect
-        ~finally:(fun () -> Store.Run_lock.release guard)
-        (fun () -> f guard)
+  let rec acquire waited =
+    match Store.Run_lock.try_acquire ~sw store ~session ~owner with
+    | Error (`Held holder) ->
+        if waited < fence_patience_s && transient_hold ~store session holder
+        then begin
+          Unix.sleepf 0.1;
+          acquire (waited +. 0.1)
+        end
+        else
+          Error (Protocol_error.Busy { session; owner = owner_display holder })
+    | Error (`Io io) -> Error (Protocol_error.unavailable (Store.Io.message io))
+    | Ok guard ->
+        Fun.protect
+          ~finally:(fun () -> Store.Run_lock.release guard)
+          (fun () -> f guard)
+  in
+  acquire 0.
 
 let commit_transform ~store ~sw ~owner ~now session ~transform =
   with_fence ~store ~sw ~owner session (fun guard ->

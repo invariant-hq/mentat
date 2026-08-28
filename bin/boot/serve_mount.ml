@@ -160,11 +160,21 @@ let confined ~store ~cache ~served (driver : Driver.t) : Driver.t =
       model_readiness = (fun ?refresh:_ () -> cone_refused ());
     }
   in
+  (* The one confinement door: the two session-scoped settings writes are
+     overlays held by the session's driving process — this process — so the
+     frontend that opened the session must reach them here. Member-guarded
+     like every session-cone call; the sessionless settings stay refused. *)
+  let st = driver.Driver.settings in
   let settings : Driver.Settings.t =
     {
       Driver.Settings.set_model =
-        (fun ~session:_ ?reasoning_effort:_ _ -> cone_refused ());
-      set_permission_review = (fun ~session:_ _ -> cone_refused ());
+        (fun ~session ?reasoning_effort selector ->
+          admit session (fun () ->
+              st.Driver.Settings.set_model ~session ?reasoning_effort selector));
+      set_permission_review =
+        (fun ~session behavior ->
+          admit session (fun () ->
+              st.Driver.Settings.set_permission_review ~session behavior));
       configuration = (fun () -> cone_refused ());
       set_default_model = (fun ?reasoning_effort:_ _ -> cone_refused ());
       set_ui_theme = (fun ~theme:_ -> cone_refused ());

@@ -407,10 +407,11 @@ let run ~stdenv ~client ~(startup : Startup.t) ~(local : Local.t)
           | Ok () -> ()
           | Error error -> deliver (App.command_failed ~request error))
     in
-    (* Auto-title must persist before the prompt is submitted: submission attaches
-       the turn's driver, which holds the session's exclusive guard for the rest
-       of the process, and the rename needs that guard. So it runs inline on the
-       admission fiber, ahead of [submit_prompt], under a best-effort contract so
+    (* Auto-title must persist before the first session-scoped call: that
+       call starts the session's agent, which adopts the session and holds
+       its fence for its whole life, and the rename commits through the
+       offline twin, which needs a free fence. So it runs inline on the
+       admission fiber, right after create, under a best-effort contract so
        a titling failure never disturbs the session. *)
     let auto_title ~session ~prompt =
       match local.Local.auto_title with
@@ -544,27 +545,31 @@ let run ~stdenv ~client ~(startup : Startup.t) ~(local : Local.t)
               (* A staged pre-session selection binds between create and the
                  first submit so that turn seals on the chosen model; a refusal
                  fails the start like a create failure rather than letting the
-                 turn silently run on the default model. *)
+                 turn silently run on the default model. It is the start's
+                 first session-scoped call, so it lands on the agent it
+                 starts — after the auto-title's offline rename, which needs
+                 the fence the agent will hold. *)
               let staged_selection () =
                 match model with
                 | None -> Ok ()
                 | Some (selector, reasoning_effort) ->
                     Client.set_model client ~session ?reasoning_effort selector
               in
-              match
-                Result.bind
-                  (Client.create client ~id:session ())
-                  staged_selection
-              with
+              match Client.create client ~id:session () with
               | Error error when latest request ->
                   deliver (App.command_failed ~request error)
               | Error _ -> ()
               | Ok () -> (
-                  match follow ~request session ~from:`Now with
-                  | `Admitted ->
-                      auto_title ~session ~prompt;
-                      submit_prompt ~request ~session ~prompt ~media ~mode
-                  | `Failed | `Stale -> ()))
+                  auto_title ~session ~prompt;
+                  match staged_selection () with
+                  | Error error when latest request ->
+                      deliver (App.command_failed ~request error)
+                  | Error _ -> ()
+                  | Ok () -> (
+                      match follow ~request session ~from:`Now with
+                      | `Admitted ->
+                          submit_prompt ~request ~session ~prompt ~media ~mode
+                      | `Failed | `Stale -> ())))
       | App.Prompt { request; session; prompt; media; mode } ->
           perform (fun _ ->
               submit_prompt ~request ~session ~prompt ~media ~mode)

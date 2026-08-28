@@ -1,12 +1,14 @@
-Background terminals end to end: a run starts a background shell command, reads
-its new output, and stops it — the three short tool calls (shell with
-background, shell_output, shell_kill) over one long-lived process. A resumed
-session honestly reports a prior-engine handle as gone, because the registry is
-ephemeral runtime state that does not survive the engine. While an engine does
-hold one, every turn it starts tells the model what is running and how to stop
-it.
+Background terminals end to end: a run starts a background shell command,
+reads its new output, and stops it — the three short tool calls (shell with
+background, shell_output, shell_kill) over one long-lived process. A
+background terminal lives while its session's agent lives: the registry is
+ephemeral runtime state of the driving process, so a session resumed under
+a fresh agent honestly reports the prior agent's handle as gone. (The old
+cross-command property — one daemon engine holding one registry across
+separate runs — retired with the daemon attach.)
 
   $ use_trusted_workspace
+  $ SOCK_BASE="$(child_sock_base)"
 
 The background start returns a handle immediately; shell_output reads it while it
 runs; shell_kill stops it. The command prints a line then blocks, so the read
@@ -39,10 +41,11 @@ The three background tools ran in order and the turn completed.
   $ grep '"type":"turn.finished"' bg.out | mentat_cram json .outcome
   completed
 
-A background process is ephemeral runtime state: it does not survive the engine.
-Start one in a first run, then resume the session in a fresh engine and poll the
-same handle — the registry is empty, so the poll is a structured not-found and
-the model is told the process did not survive the restart.
+A background process is ephemeral runtime state: it does not survive the
+session's agent. Start one in a first run, wait for that agent to idle out
+(the suite's short linger), then resume the session — a fresh agent — and
+poll the same handle: the registry is empty, so the poll is a structured
+not-found and the model is told the process did not survive the restart.
 
   $ cat > start.jsonl <<'JSONL'
   > {"response":{"id":"s1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"j1","call_id":"d1","name":"shell","arguments":"{\"command\":\"printf hi; sleep 30\",\"background\":true}"}]}}
@@ -51,9 +54,11 @@ the model is told the process did not survive the restart.
   $ start_fake_openai start.jsonl capture-start port-start
   $ mentat run start --permission bypass "start a background command" --cwd "$PWD" --id resume-session >/dev/null 2>&1
   $ wait_fake_server
+  $ wait_child_exit resume-session
 
-The resumed turn polls bg_1 in a new engine; the not-found result carries the
-restart explanation, which the [expect] guard asserts reached the model.
+The resumed turn polls bg_1 under a fresh agent; the not-found result
+carries the restart explanation, which the [expect] guard asserts reached
+the model.
 
   $ cat > resume.jsonl <<'JSONL'
   > {"response":{"id":"u1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"k1","call_id":"e1","name":"shell_output","arguments":"{\"handle\":\"bg_1\"}"}]}}
@@ -71,34 +76,3 @@ the turn completed on the model's answer.
   returned
   $ grep '"type":"turn.finished"' resume.out | mentat_cram json .outcome
   completed
-
-A turn's context is built when the turn starts, so a process an earlier turn
-left running is stated to the model driving the next one — the handle and the
-command, with the call that stops it. The note asks for no read: a standing
-instruction to read output is answered by a read that usually returns nothing,
-and every one of those spends a step of the turn.
-
-The daemon holds one engine, and therefore one background registry, across both
-turns; the fake provider is wired before it starts, per the captured-env rule.
-
-  $ trap stop_daemon EXIT
-  $ mkdir -p "$XDG_CONFIG_HOME/mentat"
-  $ printf '%s\n' '{"permission":{"rules":{"version":1,"items":[{"action":"allow","matcher":{"type":"any"}}]}}}' > "$XDG_CONFIG_HOME/mentat/config.json"
-  $ cat > across.jsonl <<'JSONL'
-  > {"expect":{"body_contains":["start a watcher"]},"response":{"id":"a1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"m1","call_id":"n1","name":"shell","arguments":"{\"command\":\"printf watching; sleep 30\",\"background\":true}"}]}}
-  > {"response":{"id":"a2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"watching"}]}]}}
-  > {"expect":{"body_contains":["still running in this session","- bg_1: printf watching; sleep 30","shell_kill(handle)"]},"response":{"id":"a3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"noted"}]}]}}
-  > JSONL
-  $ start_fake_openai across.jsonl capture-across port-across
-  $ start_daemon
-  $ mentat run start --attach --id across "start a watcher" --cwd "$PWD" 2>/dev/null
-  watching
-  $ mentat run resume across --attach "anything new" --cwd "$PWD" 2>/dev/null
-  noted
-  $ wait_fake_server
-
-The [expect] guard above asserts the note reached the model. Nothing in that
-request tells it to read the handle.
-
-  $ grep -c 'shell_output(handle)' capture-across/request-3.json || true
-  0

@@ -72,18 +72,13 @@ val of_exn : exn -> t
     and maps to {!Internal} (exit 125). No raw exception repr the exe mints
     reaches the user through the first three. *)
 
-val of_protocol_error :
-  ?daemon_live:(unit -> bool) -> Mentat_protocol.Error.t -> t
+val of_protocol_error : Mentat_protocol.Error.t -> t
 (** [of_protocol_error e] maps a client operation error onto the contract:
     caller/protocol misuse ([Invalid_position], [Turn_id_reused],
     [No_active_turn], [Active_turn_exists], [Decision_not_pending],
     [Already_resolved]) is a {!Usage_error}; everything else ([Busy],
     [Session_not_found], [Archived], [Deleted], [Unavailable]) is a
-    {!Runtime_error}. Rendering is always [Error.diagnostic].
-
-    [daemon_live] (default: always [false]) is consulted only for a [Busy]: when
-    it returns [true] — a per-user daemon is running and holds the fence — the
-    message gains a "re-run with --attach" hint (4e). It is a thunk so the
-    liveness probe (a discovery-file + claim check) runs only on the [Busy]
-    path, never on the common case; with no daemon the message is
-    byte-identical, so offline goldens do not move. *)
+    {!Runtime_error}. Rendering is always [Error.diagnostic] — a [Busy]'s
+    diagnostic already names the fence holder (its label, pid, and host) on
+    the owner line, which is the whole story: the session's agent, or another
+    process, is driving it. *)

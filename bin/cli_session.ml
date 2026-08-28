@@ -191,35 +191,13 @@ let create_cmd =
 
 (* list. *)
 
-let list json all archived deleted limit attach cwd =
+let list json all archived deleted limit cwd =
   match Argv.limit limit with
   | Error status -> status
   | Ok limit ->
       Composition.with_base ~cwd ~overrides:[] (fun t ->
           let listing = listing ~all ~archived ~deleted ~search:None ~limit in
-          if attach then
-            (* Parity/diagnostic: route the read through the daemon's
-               [sessions] responder, which applies the same [Listing] against the
-               bound workspace. It reports corrupt entries as diagnostics (on
-               stderr) rather than the offline scan's [Corrupt] channel. *)
-            match
-              Result.map (Composition.attach_client t) (Daemon.find_or_spawn t)
-            with
-            | Error status -> status
-            | Ok client -> (
-                match Client.sessions client listing with
-                | Error e -> Exit_status.of_protocol_error e
-                | Ok (summaries, diagnostics) ->
-                    List.iter
-                      (fun d ->
-                        Output.stderr_printf "mentat: %s\n"
-                          (Mentat_diagnostic.to_string d))
-                      diagnostics;
-                    render_summaries ~json ~type_:"sessions" ~all ~archived
-                      ~deleted ~corrupt:[] t summaries;
-                    Exit_status.Success)
-          else
-            match Store.Session.scan (Composition.store t) with
+          match Store.Session.scan (Composition.store t) with
             | Error error ->
                 Exit_status.of_diagnostic (Store.Session.Error.diagnostic error)
             | Ok (all_docs, corrupt) ->
@@ -249,12 +227,11 @@ let limit_opt =
 let list_cmd =
   let doc = "List sessions." in
   Cmd.v
-    (Cmd.info "list" ~doc ~docs ~envs:Cli_common.daemon_envs
-       ~exits:Cli_common.exits)
+    (Cmd.info "list" ~doc ~docs ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const list $ Cli_common.json $ all_flag $ archived_flag $ deleted_flag
-         $ limit_opt $ Cli_common.attach $ Cli_common.cwd))
+         $ limit_opt $ Cli_common.cwd))
 
 (* search. — the same offline-store twin as [list], narrowed by a
    case-insensitive substring over the [Summary]'s id, title, preview, and cwd.
@@ -481,56 +458,34 @@ let show_cmd =
    Lifecycle cone and this offline twin, so their behaviour cannot drift; a store
    or session-library error reaches the user through the protocol ladder, never a
    flattened string. *)
-let target_action ~report ~make_transform ~attach_op ~attach session_opt last
-    cwd =
+let target_action ~report ~make_transform session_opt last cwd =
   Composition.with_base ~cwd ~overrides:[] (fun t ->
       match Session_locate.resolve t ~session:session_opt ~last with
       | Error error -> Session_locate.status error
       | Ok d -> (
           let id = Document.id d in
-          if attach then
-            (* --attach routes the write through the daemon's Lifecycle cone,
-               which commits under the fence the daemon already holds. The id is
-               still resolved from the offline store, which is
-               readable fence-free even while the daemon drives the session. *)
-            match
-              Result.map (Composition.attach_client t) (Daemon.find_or_spawn t)
-            with
-            | Error status -> status
-            | Ok client -> (
-                match attach_op client id with
-                | Ok () ->
-                    report id ();
-                    Exit_status.Success
-                | Error e -> Exit_status.of_protocol_error e)
-          else
-            match
-              Session_meta.commit_transform ~store:(Composition.store t)
-                ~sw:(Composition.sw t) ~owner:(Composition.owner t)
-                ~now:(Composition.now_time t) id ~transform:(make_transform id)
-            with
-            | Ok () ->
-                report id ();
-                Exit_status.Success
-            | Error e ->
-                Exit_status.of_protocol_error
-                  ~daemon_live:(fun () ->
-                    Daemon.is_running (Composition.dirs t))
-                  e))
+          match
+            Session_meta.commit_transform ~store:(Composition.store t)
+              ~sw:(Composition.sw t) ~owner:(Composition.owner t)
+              ~now:(Composition.now_time t) id ~transform:(make_transform id)
+          with
+          | Ok () ->
+              report id ();
+              Exit_status.Success
+          | Error e -> Exit_status.of_protocol_error e))
 
 let session_transform id f s =
   Result.map_error (Session_meta.session_error_to_protocol id) (f s)
 
 let report_id id () = Output.stdout_printf "%s\n" (Id.to_string id)
 
-let rename title session_opt last attach cwd =
+let rename title session_opt last cwd =
   match Argv.title title with
   | Error status -> status
   | Ok title ->
       target_action ~report:report_id
         ~make_transform:(fun _id s -> Ok (Session.set_title (Some title) s))
-        ~attach_op:(fun client id -> Client.rename client ~session:id ~title)
-        ~attach session_opt last cwd
+        session_opt last cwd
 
 let title_req =
   Arg.(
@@ -541,66 +496,59 @@ let title_req =
 let rename_cmd =
   let doc = "Rename a session." in
   Cmd.v
-    (Cmd.info "rename" ~doc ~docs ~envs:Cli_common.daemon_envs
-       ~exits:Cli_common.exits)
+    (Cmd.info "rename" ~doc ~docs ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const rename $ title_req $ Cli_common.session_arg $ Cli_common.last
-         $ Cli_common.attach $ Cli_common.cwd))
+         $ Cli_common.cwd))
 
-let archive session_opt last attach cwd =
+let archive session_opt last cwd =
   target_action ~report:report_id
     ~make_transform:(fun id -> session_transform id Session.archive)
-    ~attach_op:(fun client id -> Client.archive client ~session:id)
-    ~attach session_opt last cwd
+    session_opt last cwd
 
 let archive_cmd =
   let doc = "Archive a session." in
   Cmd.v
-    (Cmd.info "archive" ~doc ~docs ~envs:Cli_common.daemon_envs
-       ~exits:Cli_common.exits)
+    (Cmd.info "archive" ~doc ~docs ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const archive $ Cli_common.session_arg $ Cli_common.last
-         $ Cli_common.attach $ Cli_common.cwd))
+         $ Cli_common.cwd))
 
-let restore session_opt last attach cwd =
+let restore session_opt last cwd =
   target_action ~report:report_id
     ~make_transform:(fun id -> session_transform id Session.restore)
-    ~attach_op:(fun client id -> Client.restore client ~session:id)
-    ~attach session_opt last cwd
+    session_opt last cwd
 
 let restore_cmd =
   let doc = "Restore an archived session." in
   Cmd.v
-    (Cmd.info "restore" ~doc ~docs ~envs:Cli_common.daemon_envs
-       ~exits:Cli_common.exits)
+    (Cmd.info "restore" ~doc ~docs ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const restore $ Cli_common.session_arg $ Cli_common.last
-         $ Cli_common.attach $ Cli_common.cwd))
+         $ Cli_common.cwd))
 
-let delete yes session_opt last attach cwd =
+let delete yes session_opt last cwd =
   if not yes then
     Composition.with_base ~cwd ~overrides:[] (fun _ ->
         Exit_status.usage "refusing to delete without --yes")
   else
     target_action ~report:report_id
       ~make_transform:(fun id -> session_transform id Session.delete)
-      ~attach_op:(fun client id -> Client.delete client ~session:id)
-      ~attach session_opt last cwd
+      session_opt last cwd
 
 let yes_flag = Arg.(value & flag & info [ "yes" ] ~doc:"Confirm the deletion.")
 
 let delete_cmd =
   let doc = "Delete a session (recoverable tombstone)." in
   Cmd.v
-    (Cmd.info "delete" ~doc ~docs ~envs:Cli_common.daemon_envs
-       ~exits:Cli_common.exits)
+    (Cmd.info "delete" ~doc ~docs ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const delete $ yes_flag $ Cli_common.session_arg $ Cli_common.last
-         $ Cli_common.attach $ Cli_common.cwd))
+         $ Cli_common.cwd))
 
 (* purge. — permanent reclamation of the disk a deleted session still holds.
    [delete] only records a recoverable tombstone; the document, its event log,
@@ -1144,19 +1092,6 @@ let render_revert_settled ~json ~session settled =
           recorded"
          confirmed total)
 
-(* Both revert paths — the offline twin and the --attach route — render the
-   settlement identically: a settled apply names its confirmed count, a clean
-   no-op says so, and a refusal prints the preparation messages on stderr. *)
-let render_revert_outcome ~json ~session = function
-  | Revert.Outcome.Nothing_to_revert ->
-      Output.stdout_printf "nothing to revert\n";
-      Exit_status.Success
-  | Revert.Outcome.Refused messages ->
-      List.iter (fun m -> Output.stderr_printf "%s\n" m) messages;
-      Exit_status.runtime "revert refused; no files were changed"
-  | Revert.Outcome.Applied settled ->
-      render_revert_settled ~json ~session settled
-
 (* The offline revert-apply lifecycle lives in {!Mentat_store.Mutation}; this
    command resolves the workspace-write capability, wires the three workspace
    effects as ports, holds the run fence, and renders the outcome. *)
@@ -1222,10 +1157,7 @@ let revert_apply t ~json ~document ~latest ~change ~path ~force =
                   | other -> other))
           in
           match result with
-          | Error e ->
-              Exit_status.of_protocol_error
-                ~daemon_live:(fun () -> Daemon.is_running (Composition.dirs t))
-                e
+          | Error e -> Exit_status.of_protocol_error e
           | Ok (Mutation.Applied settled) ->
               render_revert_settled ~json ~session settled
           | Ok Mutation.Nothing_to_revert ->
@@ -1350,43 +1282,7 @@ let revert_preview t ~json ~document ~latest ~change ~path =
                   (revert_apply_hint ~latest ~change ~path session));
             Exit_status.Success)
 
-(* The wire [Scope.t] the --attach apply route carries. [--latest]/[--change]
-   map directly; [--path] needs a workspace-keyed path the offline twin
-   string-matches against recorded net paths instead, and the no-scope
-   whole-session revert has no wire arm — both are a usage refusal under --attach,
-   not a silent offline fallback (the daemon holds the fence; falling back offline
-   would only earn a Busy). *)
-let attach_scope ~latest ~change ~path =
-  match (latest, change, path) with
-  | true, _, _ -> Ok Revert.Scope.Latest
-  | _, Some change, _ -> Ok (Revert.Scope.Change (Change.Id.of_string change))
-  | _, _, Some _ ->
-      Error
-        (Exit_status.usage
-           "revert --attach --path is not yet supported; scope with --latest \
-            or --change, or revert offline")
-  | _ ->
-      Error
-        (Exit_status.usage
-           "revert --attach requires an explicit scope: --latest or --change")
-
-(* --apply over the daemon's fence: resolve the scope, route through the online
-   revert cone, and render the settlement exactly as the offline twin does. *)
-let revert_apply_attach t ~json ~document ~latest ~change ~path =
-  let session = Document.id document in
-  match attach_scope ~latest ~change ~path with
-  | Error status -> status
-  | Ok scope -> (
-      match
-        Result.map (Composition.attach_client t) (Daemon.find_or_spawn t)
-      with
-      | Error status -> status
-      | Ok client -> (
-          match Client.revert client ~session ~scope with
-          | Error e -> Exit_status.of_protocol_error e
-          | Ok outcome -> render_revert_outcome ~json ~session outcome))
-
-let revert json apply latest change path session_opt last attach force cwd =
+let revert json apply latest change path session_opt last force cwd =
   match revert_scope_usage ~latest ~change ~path with
   | Error status -> status
   | Ok () ->
@@ -1395,10 +1291,7 @@ let revert json apply latest change path session_opt last attach force cwd =
           | Error error -> Session_locate.status error
           | Ok d ->
               if apply then
-                if attach then
-                  revert_apply_attach t ~json ~document:d ~latest ~change ~path
-                else
-                  revert_apply t ~json ~document:d ~latest ~change ~path ~force
+                revert_apply t ~json ~document:d ~latest ~change ~path ~force
               else revert_preview t ~json ~document:d ~latest ~change ~path)
 
 let change_opt =
@@ -1426,13 +1319,12 @@ let revert_cmd =
     "Revert Mentat-authored workspace changes from the mutation ledger."
   in
   Cmd.v
-    (Cmd.info "revert" ~doc ~docs ~envs:Cli_common.daemon_envs
-       ~exits:Cli_common.exits)
+    (Cmd.info "revert" ~doc ~docs ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const revert $ Cli_common.json $ apply_flag $ latest_flag $ change_opt
-         $ path_opt $ Cli_common.session_arg $ Cli_common.last
-         $ Cli_common.attach $ force_flag $ Cli_common.cwd))
+         $ path_opt $ Cli_common.session_arg $ Cli_common.last $ force_flag
+         $ Cli_common.cwd))
 
 (* export. — the offline-store twin over the export bundle.
    [--format json] streams the store's complete, integrity-verified bundle under
@@ -1487,39 +1379,34 @@ let write_output ~output content =
       Ok ()
   | Some path -> Fs.atomic_write ~perms:0o644 path content
 
-(* The json export over the daemon's fence: the whole bundle arrives as one
-   value (the engine size-guards it), written to the same sink the offline
-   streaming json path writes — byte-identical output. Only json takes the attach
-   route; text/markdown/html render offline from a fence-free read. *)
-let export_json_attach t ~session ~output =
-  match Result.map (Composition.attach_client t) (Daemon.find_or_spawn t) with
-  | Error status -> status
-  | Ok client -> (
-      match Client.export client ~session with
-      | Error e -> Exit_status.of_protocol_error e
-      | Ok bundle -> (
-          match output with
-          | None ->
-              Output.stdout_printf "%s" bundle;
-              Exit_status.Success
-          | Some path -> (
-              match Fs.atomic_write ~perms:0o644 path bundle with
-              | Ok () -> Exit_status.Success
-              | Error msg -> Exit_status.runtime msg)))
-
 let export format output no_timestamp max_bytes max_tool_bytes max_image_bytes
-    quiet session_opt last attach cwd =
+    quiet session_opt last cwd =
   Composition.with_base ~cwd ~overrides:[] (fun t ->
       match Session_locate.resolve t ~session:session_opt ~last with
       | Error error -> Session_locate.status error
       | Ok d -> (
           let session = Document.id d in
           match String.lowercase_ascii format with
-          | "json" when attach -> export_json_attach t ~session ~output
-          | _ when attach ->
-              Exit_status.usage
-                "--attach is only supported with --format json; text, \
-                 markdown, and html export run offline"
+          | "json" when Agent_client.serving t session -> (
+              (* The session's agent holds the fence (running, parked, or
+                 lingering), so the offline fenced stream cannot run; the
+                 online export cone over the agent's socket serves the same
+                 integrity-verified bundle — the driven half of the export
+                 contract. *)
+              match Agent_client.client t with
+              | Error status -> status
+              | Ok client -> (
+                  match Client.export client ~session with
+                  | Error e -> Exit_status.of_protocol_error e
+                  | Ok bundle -> (
+                      match output with
+                      | None ->
+                          Output.stdout_printf "%s" bundle;
+                          Exit_status.Success
+                      | Some path -> (
+                          match Fs.atomic_write ~perms:0o644 path bundle with
+                          | Ok () -> Exit_status.Success
+                          | Error msg -> Exit_status.runtime msg))))
           | "json" -> (
               let store = Composition.store t in
               let buf = Buffer.create 4096 in
@@ -1543,11 +1430,7 @@ let export format output no_timestamp max_bytes max_tool_bytes max_image_bytes
                              (Mutation.Error.diagnostic ~session e)))
               in
               match result with
-              | Error e ->
-                  Exit_status.of_protocol_error
-                    ~daemon_live:(fun () ->
-                      Daemon.is_running (Composition.dirs t))
-                    e
+              | Error e -> Exit_status.of_protocol_error e
               | Ok () -> (
                   match output with
                   | None -> Exit_status.Success
@@ -1678,14 +1561,12 @@ let quiet_opt =
 let export_cmd =
   let doc = "Export a session as a self-describing bundle." in
   Cmd.v
-    (Cmd.info "export" ~doc ~docs ~envs:Cli_common.daemon_envs
-       ~exits:Cli_common.exits)
+    (Cmd.info "export" ~doc ~docs ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const export $ format_opt $ output_opt $ no_timestamp_opt
          $ max_bytes_opt $ max_tool_bytes_opt $ max_image_bytes_opt $ quiet_opt
-         $ Cli_common.session_arg $ Cli_common.last $ Cli_common.attach
-         $ Cli_common.cwd))
+         $ Cli_common.session_arg $ Cli_common.last $ Cli_common.cwd))
 
 (* compact. — manual compaction. Client-routed: the engine
    admits a compaction-only turn whose single billable summary call the driver

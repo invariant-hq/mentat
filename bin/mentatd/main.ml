@@ -121,18 +121,16 @@ let man =
   [
     `S "DESCRIPTION";
     `P
-      "$(b,mentatd) runs the per-user mentat daemon in the foreground: one \
-       process serving many workspaces over a local unix socket, so an \
-       attached client shares its engine, fence, and provider runtime.";
+      "$(b,mentatd) runs the per-user mentat daemon in the foreground. \
+       Sessions are driven by their own per-session agents, which \
+       $(b,mentat) starts and dials directly; the daemon hosts the standing \
+       surfaces around them — the web dashboard and the webhook ingress — \
+       and adopts orphaned runs at boot.";
+    `P "The daemon is $(b,opt-in); nothing in $(b,mentat) starts one.";
     `P
-      "The daemon is $(b,opt-in). The in-process client remains the default; a \
-       $(b,mentat) command reaches the daemon only with $(b,--attach), which \
-       starts one if none is running. The standalone-versus-attach default is \
-       not decided here.";
-    `P
-      "The daemon's captured environment makes the provider calls, so an \
-       attaching client's $(b,MENTAT_*) overrides do not reach a daemon that \
-       is already running with a different environment.";
+      "The daemon's captured environment makes its provider calls, so a \
+       shell's $(b,MENTAT_*) overrides do not reach a daemon that is \
+       already running with a different environment.";
     `P
       "A first SIGTERM or SIGINT stops the daemon gracefully (it settles every \
        instance durable-first). Send the signal a second time to force an \
@@ -157,11 +155,6 @@ let man =
        never stops itself as idle — the routine is a standing commission, and \
        the service manager restarts failures only, so a clean idle-stop would \
        leave later deliveries bouncing.";
-    `S "ENVIRONMENT";
-    `P
-      "$(b,MENTAT_DAEMON_SOCKET) and $(b,MENTATD_BIN) are read by the \
-       attaching $(b,mentat) client, not by this daemon; they are documented \
-       on the $(b,mentat) commands that offer $(b,--attach).";
   ]
 
 let envs =
@@ -271,8 +264,8 @@ let install_cmd =
          ($(b,launchctl bootstrap) into the $(b,gui) domain), a systemd user \
          unit at $(b,~/.config/systemd/user/mentatd.service) on Linux \
          ($(b,systemctl --user enable)). The daemon's standard output and \
-         error are appended to the same $(b,daemon.log) the $(b,--attach) \
-         spawn path writes. Any other platform is refused.";
+         error are appended to $(b,daemon.log) under the per-user daemon \
+         home. Any other platform is refused.";
       `P
         "The unit pins the setting that lets the daemon's run children \
          outlive it — $(b,KillMode=process) under systemd, \
@@ -292,8 +285,8 @@ let install_cmd =
          was not written by $(b,mentatd install) is named and refused, never \
          overwritten.";
       `P
-        "A daemon already running outside the service (spawned by \
-         $(b,--attach)) holds the per-user claim, so the service's daemon \
+        "A daemon already running outside the service (started by hand) \
+         holds the per-user claim, so the service's daemon \
          exits at startup and the manager retries until the claim frees; \
          $(b,mentatd stop) the spawned daemon to let the service take over. \
          A service manager call that fails is a loud error naming the \

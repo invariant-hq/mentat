@@ -5,6 +5,7 @@ freezes the plan before any IO, applies the all-or-nothing edit, and records the
 per-path settlement. A stale preflight changes no file.
 
   $ use_trusted_workspace
+  $ SOCK_BASE="$(child_sock_base)"
   $ mkdir -p "$XDG_CONFIG_HOME/mentat"
   $ printf '%s\n' '{"permission":{"rules":{"version":1,"items":[{"action":"allow","matcher":{"type":"any"}}]}},"tools":{"editor":"string-replace"}}' > "$XDG_CONFIG_HOME/mentat/config.json"
 
@@ -20,6 +21,7 @@ change rows the revert reads back.
   $ mentat run start --id rev-run "change the greeting" --cwd "$PWD" 2>/dev/null
   edited
   $ wait_fake_server
+  $ wait_child_exit rev-run
   $ cat note.txt
   goodbye world
 
@@ -142,6 +144,7 @@ into a fresh session, then mutate the target out of band before applying.
   $ mentat run start --id rev-stale "change note2" --cwd "$PWD" 2>/dev/null
   edited
   $ wait_fake_server
+  $ wait_child_exit rev-stale
   $ printf 'diverged\n' > note2.txt
   $ mentat session revert rev-stale --apply >stale.out 2>&1; echo "exit: $?"
   exit: 1
@@ -167,6 +170,7 @@ second (line 4), which stays.
   $ mentat run start --id rev-merge "edit two lines" --cwd "$PWD" 2>/dev/null
   edited
   $ wait_fake_server
+  $ wait_child_exit rev-merge
   $ cat merge.txt
   alpha
   BETA
@@ -217,6 +221,7 @@ carries no override and refuses Needs_override.
   $ start_fake_openai nc-edit1.jsonl capture-nc1 port-nc1
   $ mentat run start --id rev-nc "first edit" --cwd "$PWD" >/dev/null 2>&1
   $ wait_fake_server
+  $ wait_child_exit rev-nc
   $ cat note3.txt
   two
   $ printf 'two\nEXTERNAL\n' > note3.txt
@@ -227,6 +232,7 @@ carries no override and refuses Needs_override.
   $ start_fake_openai nc-edit2.jsonl capture-nc2 port-nc2
   $ mentat run resume rev-nc "second edit" --cwd "$PWD" >/dev/null 2>&1
   $ wait_fake_server
+  $ wait_child_exit rev-nc
   $ cat note3.txt
   three
   EXTERNAL

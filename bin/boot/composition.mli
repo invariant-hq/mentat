@@ -270,13 +270,13 @@ val client : t -> (Mentat_client.t, Exit_status.t) result
     boundary. *)
 
 val attach_client : t -> Mentat_client.Driver.t -> Mentat_client.t
-(** [attach_client t driver] wraps a [driver] the daemon filled over the wire
-    (via [--attach]) into a frontend client, giving it [t]'s {b local} command
-    expansion — [/name] listing and expansion read this workspace's own command
-    files, exactly as an in-process client's do. The engine behind [driver] is
-    remote; the command responders are engine-free, so they stay local. Used
-    only on the attach path; the in-process path builds its client through
-    {!client}. *)
+(** [attach_client t driver] wraps a wire-filled [driver] into a frontend
+    client, giving it [t]'s {b local} command expansion and image attach —
+    [/name] listing and expansion read this workspace's own command files, and
+    [-i] attach stores into the shared store's fence-free attachment
+    namespace, exactly as an in-process client's do. The engine behind
+    [driver] is another process on the same store — a per-session agent — so
+    the local responders stay faithful. *)
 
 val driver : t -> (Mentat_client.Driver.t, Exit_status.t) result
 (** [driver t] is the raw multi-source driver record — the construction seam,
@@ -374,11 +374,11 @@ val client_with_tui_capabilities :
 
 val tui_capabilities :
   t -> (Mentat_workspace_io.t * Mentat_tool.t, Exit_status.t) result
-(** [tui_capabilities t] is the execution-layer-only projection the [--attach]
-    path needs: the read-only workspace capability for root-relative file
-    completion and the local-user shell tool definition, with {b no} engine —
-    when attached the engine is remote, but completion and the local shell stay
-    local. It is exactly the two handles {!client_with_tui_capabilities} returns
+(** [tui_capabilities t] is the execution-layer-only projection a
+    wire-driving frontend needs: the read-only workspace capability for
+    root-relative file completion and the local-user shell tool definition,
+    with {b no} engine — the engines are the sessions' own agents, but
+    completion and the local shell stay local. It is exactly the two handles {!client_with_tui_capabilities} returns
     beyond the client. Like {!tool_declarations} it re-seals the execution layer
     per call and caches nothing, and the same authority-boundary discipline as
     {!client_with_tui_capabilities} applies: project the narrow operations you

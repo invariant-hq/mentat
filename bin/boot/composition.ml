@@ -3532,14 +3532,6 @@ let attach_responder t ~session source =
     ~downscale:(Image_downscale.run ~stdenv:t.shared.stdenv)
     ~read_path ~session source
 
-(* A client attached to a remote daemon cannot store into the daemon's store from
-   here; image attach over the wire is the daemon campaign's to wire. *)
-let attach_declined ~session:_ _source =
-  Error
-    (Mentat_protocol.Attach.Error.Unavailable
-       (Mentat_diagnostic.make
-          "image attach is not supported over a remote daemon connection"))
-
 let client_with_tui_capabilities t =
   Result.map
     (fun (driver, read_capability, shell) ->
@@ -3554,21 +3546,22 @@ let client_with_tui_capabilities t =
 let client t =
   Result.map (fun (client, _, _) -> client) (client_with_tui_capabilities t)
 
-(* Wrap a driver the daemon filled over the wire with this workspace's {b local}
-   command expansion, so an attached client's [/name] completion and expansion
-   read the same local command files an in-process client would. The responders
-   are engine-free (they read the command snapshot), so they hold for a remote
-   engine. *)
+(* Wrap a wire-filled driver with this workspace's {b local} command expansion
+   and image attach, so a dialing client's [/name] completion, expansion, and
+   [-i] attach read the same local files an in-process client would. The
+   responders are engine-free — the command snapshot and the shared store's
+   fence-free attachment namespace — so they hold for a remote engine on the
+   same store, which every per-session agent is. *)
 let attach_client t driver =
   Client.make
     ~user_commands:(user_commands_responder t)
     ~expand_command:(expand_command_responder t)
-    ~attach:attach_declined driver
+    ~attach:(attach_responder t) driver
 
-(* The execution-layer-only projection the [--attach] path needs: the read-only
-   workspace capability (root-relative file completion) and the local-user shell
-   definition, with no engine — the engine is remote when attached, but
-   completion and the local shell stay local. Like {!tool_declarations} it
+(* The execution-layer-only projection a wire-driving frontend needs: the
+   read-only workspace capability (root-relative file completion) and the
+   local-user shell definition, with no engine — the engines are the
+   sessions' own agents, but completion and the local shell stay local. Like {!tool_declarations} it
    re-seals the execution layer per call and caches nothing, and the same
    authority-boundary discipline as {!client_with_tui_capabilities} applies:
    callers project the narrow operations they need and never pass either

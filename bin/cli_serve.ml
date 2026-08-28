@@ -148,11 +148,30 @@ let idle store cache served =
    closed — for the linger window. A session that has never run a turn is
    never idle (no settled head yet): a delegated boot cannot exit before its
    first-turn submit lands, and a root session with no work keeps serving
-   until mail or a connection drives it. *)
+   until mail or a connection drives it.
+
+   The gone backstop: a served session whose document stays unreadable is a
+   session this server can never again do useful work for — its store was
+   removed out from under it (a reclaimed harness sandbox, a deleted
+   ephemeral home). Without the backstop the idle predicate presumes
+   outstanding work forever and the server becomes immortal; with it, a
+   document continuously gone for a few seconds ends the serve. A transient
+   read failure resets the clock like any other sign of life. *)
+let gone_backstop_s = 5.0
+
 let idle_watchdog clock ~linger store cache served active stop =
   let idle_since = ref None in
+  let gone_since = ref None in
   let rec loop () =
     Eio.Time.sleep clock 0.25;
+    (match Store.Session.stamp store served with
+    | Some _ -> gone_since := None
+    | None -> (
+        match !gone_since with
+        | None -> gone_since := Some (Eio.Time.now clock)
+        | Some since ->
+            if Eio.Time.now clock -. since >= gone_backstop_s then
+              Stop_signal.request stop));
     (if Atomic.get active > 0 || not (idle store cache served) then
        idle_since := None
      else
@@ -223,17 +242,6 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
                   in
                   let net = Eio.Stdenv.net stdenv in
                   let clock = Eio.Stdenv.clock stdenv in
-                  let listener =
-                    Server.listen ~sw ~net
-                      (Server.Bind.unix
-                         ~dir:(Lpath.Abs.of_string_exn socket_dir))
-                  in
-                  bound_socket_dir := Some socket_dir;
-                  if not spawned then
-                    Printf.printf "mentat serve: serving %s at %s\n%!"
-                      session
-                      (Server.Bind.socket_path
-                         ~dir:(Lpath.Abs.of_string_exn socket_dir));
                   (* Every shape attaches its driver at boot, and the fence
                      is taken lazily inside that attach — never pre-acquired.
                      A delegated child attaches through its deterministic
@@ -308,6 +316,24 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd
                            | Root -> "attach")
                            message)
                   | Ok () ->
+                      (* The listener binds only after the attach holds the
+                         fence: the bind unlinks whatever stale socket a
+                         killed predecessor left, so a boot that would lose
+                         the fence race must never reach it — a loser that
+                         bound first would sever the winner's live endpoint
+                         and then remove the directory on its way out. The
+                         fence is the exclusivity; the endpoint follows it. *)
+                      let listener =
+                        Server.listen ~sw ~net
+                          (Server.Bind.unix
+                             ~dir:(Lpath.Abs.of_string_exn socket_dir))
+                      in
+                      bound_socket_dir := Some socket_dir;
+                      if not spawned then
+                        Printf.printf "mentat serve: serving %s at %s\n%!"
+                          session
+                          (Server.Bind.socket_path
+                             ~dir:(Lpath.Abs.of_string_exn socket_dir));
                       (* A carried interrupt intent (a cancelled child killed
                          at the escalation's final rung and re-materialized):
                          interrupt right behind the idempotent first-turn
@@ -441,8 +467,10 @@ let man =
     `P
       "The endpoint is confined to its one purpose: the session cone answers \
        only for the served session and its own delegation subtree, and the \
-       accounts, settings, lifecycle, review, and workspace cones are \
-       refused whole.";
+       session-scoped settings writes (model, permission review) pass under \
+       the same guard — their overlays live in this driving process. The \
+       accounts, lifecycle, review, and workspace cones and the sessionless \
+       settings are refused whole.";
   ]
 
 let cmd =

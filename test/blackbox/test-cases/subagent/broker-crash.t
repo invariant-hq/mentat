@@ -1,23 +1,24 @@
 A brokered child SIGKILLed mid-turn is re-materialized and still settles the
-parent's wait: the broker's reaper observes the exit, finds the child journal
-unsettled (an open tool claim — the kill landed mid-operation), and spawns a
-successor whose recovery settles the claim Ambiguous and drives the turn to
-completion; the observer folds that settlement into the parent, whose parked
-wait completes instead of parking forever. The re-materialization is proven by
-the fence's owner line: a different pid finished the work than started it.
+parent's wait: the parent agent's broker reaps the exit, finds the child
+journal unsettled (an open tool claim — the kill landed mid-operation), and
+spawns a successor whose recovery settles the claim Ambiguous and drives the
+turn to completion; the observer folds that settlement into the parent, whose
+parked wait completes instead of parking forever. The re-materialization is
+proven by the fence's owner line: a different pid finished the work than
+started it.
 
 The child is held mid-turn by a long shell tool, not by a held provider
 response, so every fixture response is written to a live connection. The
-second fixture binds the first fixture's port: a daemon-hosted instance keeps
-the provider environment it booted with, so the respawned child and the
-resumed parent both call the original base URL. The sessions work in a
+parent's agent stays alive across both stages (its idle walk covers the
+unfinished child), and its broker is the reaper and respawner. The second
+fixture binds the first fixture's port: an agent keeps the provider
+environment its spawner rendered at its boot, so the respawned child and
+the resumed parent both call the original base URL. The sessions work in a
 workspace subdirectory, and the tool's marker file is written outside it so
 the turns drain no workspace notices.
 
   $ mkdir -p work/.git
   $ (cd work && mentat trust . >/dev/null)
-  $ trap stop_daemon EXIT
-  $ export MENTAT_CHILD_LINGER=0.2
 
 A durable allow rule lets the delegated child run its shell tool unattended —
 the child's own composition resolves the same user config the parent's does.
@@ -28,8 +29,8 @@ the child's own composition resolves the same user config the parent's does.
   >   { "action": "allow", "matcher": { "type": "command", "pattern": { "type": "any" } } } ] } } }
   > JSON
 
-The child choreography helpers — wait_child, wait_child_exit, and the
-$SOCK_BASE capture below — live in setup.sh beside the daemon helpers.
+The agent choreography helpers — wait_child, wait_child_exit, and the
+$SOCK_BASE capture below — live in setup.sh.
 
 Stage 1 — spawn, and hold the child mid-turn. The child's task turn starts a
 long shell tool; its marker file is the rendezvous proving the tool claim is
@@ -41,9 +42,8 @@ open when the kill lands.
   > {"expect":{"body_contains":["PLEASE_SPAWN","sp-call"]},"response":{"id":"r2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"SPAWNED"}]}]}}
   > JSONL
   $ start_fake_openai_unordered stage1.jsonl capture1 port1
-  $ start_daemon
   $ SOCK_BASE="$(child_sock_base)"
-  $ mentat run start --attach --json --id parent "PLEASE_SPAWN" --cwd "$PWD/work" >stage1.out 2>stage1.err
+  $ mentat run start --json --id parent "PLEASE_SPAWN" --cwd "$PWD/work" >stage1.out 2>stage1.err
   $ wait_fake_server
   $ grep -c '"outcome":"completed"' stage1.out
   1
@@ -54,8 +54,9 @@ open when the kill lands.
 
 Stage 2 — the crash. The continuation fixture goes up on the same port first,
 so the successor's recovery has a provider to finish against; then the child
-is SIGKILLed mid-tool and the parent made to wait on it. The wait parks until
-the successor settles; nothing else can complete it.
+is SIGKILLed mid-tool and the parent made to wait on it (the resume dials
+the still-live parent agent). The wait parks until the successor settles;
+nothing else can complete it.
 
   $ cat > stage2.jsonl <<JSONL
   > {"expect":{"body_contains":["PLEASE_WAIT"],"body_not_contains":["wt-call"]},"response":{"id":"r3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"wt-item","call_id":"wt-call","name":"wait","arguments":"{\"children\":[\"$DELEG\"]}"}]}}
@@ -64,7 +65,7 @@ the successor settles; nothing else can complete it.
   > JSONL
   $ start_fake_openai_unordered stage2.jsonl capture2 port2 --port "$(cat port1)"
   $ kill -9 "$PID1"
-  $ mentat run resume parent "PLEASE_WAIT" --attach --json --cwd "$PWD/work" >stage2.out 2>stage2.err
+  $ mentat run resume parent "PLEASE_WAIT" --json --cwd "$PWD/work" >stage2.out 2>stage2.err
   $ wait_fake_server
   $ grep -c '"outcome":"completed"' stage2.out
   1
@@ -88,7 +89,7 @@ settled Ambiguous (the kill outran the outcome, and the orphaned tool tree
 may still be running — recovery does not pretend otherwise), and the turn
 then completed with the successor's answer.
 
-  $ stop_daemon
+  $ wait_child_exit parent
   $ mentat session export "$CHILD" --format text --cwd "$PWD/work" >child.transcript
   $ grep -c 'tool-settled(ambiguous' child.transcript
   1

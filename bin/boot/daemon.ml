@@ -6,14 +6,9 @@
 module Server = Mentat_server
 module Discovery = Server.Discovery
 
-(* The gate compares the CLIENT's identity with the record the DAEMON wrote —
-   two different executables since the mentatd split, so an
-   executable-identity stamp (main's dev-build refinement, reverted here)
-   can never match between them. A release version is shared by both
-   binaries; a dev build falls back to the weak "dev" equality. The stale
-   dev-daemon concern that stamp addressed is real and needs a split-world
-   answer (a build-tree stamp both binaries carry); until then the wire
-   handshake's protocol version is the enforcement. *)
+(* The identity the daemon records in its discovery file. A release version
+   is shared by both binaries; a dev build falls back to the weak "dev"
+   stamp — the wire handshake's protocol version is the enforcement. *)
 let binary_version =
   match Build_info.V1.version () with
   | Some v -> Build_info.V1.Version.to_string v
@@ -30,7 +25,7 @@ let ensure_daemon_dir dirs =
   try Unix.mkdir (User_dirs.daemon_dir dirs) 0o700
   with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
 
-(* ---- Client attach: find-or-spawn ---- *)
+(* ---- The daemon log ---- *)
 
 (* [daemon.log] captures the daemon's whole standard output and error, not just
    its diagnostics records, so nothing inside the logging system bounds it. Left
@@ -117,128 +112,6 @@ let resolve_sibling ~env ~name ~beside =
              "the %s binary is missing: expected %s (every release installs \
               it beside %s); reinstall, or set %s to run one from elsewhere"
              name sibling beside env)
-
-let resolve_mentatd () =
-  resolve_sibling ~env:"MENTATD_BIN" ~name:"mentatd" ~beside:"mentat"
-
-let spawn dirs ~bin =
-  ensure_daemon_dir dirs;
-  let log = daemon_log_path dirs in
-  let fd =
-    Unix.openfile log [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_APPEND ] 0o600
-  in
-  Fun.protect
-    ~finally:(fun () -> try Unix.close fd with Unix.Unix_error _ -> ())
-    (fun () ->
-      (* Detached fork+exec (never an Eio-managed spawn, whose switch would kill
-         the daemon with the CLI); the child [setsid]s under [--spawned]. The
-         current environment is inherited, so the daemon opens the same store.
-
-         Single fork, not a double-fork: the spawning CLI stays the daemon's
-         parent, so a daemon that dies while this long-lived CLI still runs stays
-         a zombie until the CLI reaps it or exits. The worst case is one
-         process-table entry after a daemon crash — not worth the double-fork
-         re-parent-to-init machinery for a single-user Stage 2. *)
-      ignore
-        (Unix.create_process bin
-           [| "mentatd"; "--spawned" |]
-           Unix.stdin fd fd))
-
-(* Whether a per-user daemon is live for these dirs (a discovery file present
-   and its claim held) — the signal the offline Busy hint keys on (4e). A free
-   claim under a present file is a dead daemon (a stale file), so not running. *)
-let is_running dirs =
-  let ddir = daemon_dir_abs dirs in
-  match Discovery.read ~dir:ddir with
-  | `Found _ | `Foreign _ -> (
-      match Discovery.Claim.try_acquire ~dir:ddir with
-      | Ok claim ->
-          Discovery.Claim.release claim;
-          false
-      | Error `Held -> true
-      | Error (`Io _) -> false)
-  | `Absent -> false
-
-let connect_to t ~socket =
-  let net = Eio.Stdenv.net (Composition.stdenv t) in
-  let clock = Eio.Stdenv.clock (Composition.stdenv t) in
-  let sw = Composition.sw t in
-  let root = Lpath.Abs.to_string (Composition.root t) in
-  let dir = Lpath.Abs.of_string_exn (Filename.dirname socket) in
-  match
-    Server.connect ~sw ~net ~clock ~workspace:root
-      ~environment:(Composition.environment t)
-      (Server.Bind.unix ~dir)
-  with
-  | Ok driver -> Some driver
-  | Error _ -> None
-
-let find_or_spawn t =
-  let dirs = Composition.dirs t in
-  let ddir = daemon_dir_abs dirs in
-  let clock = Eio.Stdenv.clock (Composition.stdenv t) in
-  (* The real effects behind the library's convergence state machine. *)
-  let read () = Discovery.read ~dir:ddir in
-  let claim_free () =
-    match Discovery.Claim.try_acquire ~dir:ddir with
-    | Ok claim ->
-        Discovery.Claim.release claim;
-        true
-    | Error `Held -> false
-    | Error (`Io _) -> false
-  in
-  let probe record = connect_to t ~socket:record.Discovery.socket in
-  let identity_ok record =
-    String.equal record.Discovery.binary binary_version
-    && String.equal record.Discovery.config_home (User_dirs.config_home dirs)
-  in
-  let spawn () =
-    match resolve_mentatd () with
-    | Ok bin ->
-        spawn dirs ~bin;
-        Ok ()
-    | Error message -> Error message
-  in
-  let sleep () = Eio.Time.sleep clock 0.05 in
-  (* MENTAT_DAEMON_SOCKET beats discovery: connect straight to the named socket
-     (its [mentat.sock] path), no daemon.json read and no spawn. A named socket
-     that does not answer is a definite failure, not a fallback that spawns. *)
-  let socket_override () =
-    match Sys.getenv_opt "MENTAT_DAEMON_SOCKET" with
-    | None | Some "" -> `Unset
-    | Some socket -> (
-        match connect_to t ~socket with
-        | Some driver -> `Reached driver
-        | None -> `Set_unreachable)
-  in
-  match
-    Discovery.locate_with_override ~socket_override ~read ~claim_free ~probe
-      ~identity_ok ~spawn ~sleep ~poll_budget:100
-  with
-  | `Attached driver -> Ok driver
-  | `Mismatch _ ->
-      Error
-        (Exit_status.runtime
-           "the running mentat daemon was built from a different binary or \
-            config home; run `mentatd stop` to replace it")
-  | `Foreign_held ->
-      Error
-        (Exit_status.runtime
-           "an unrecognized mentat daemon file is present and its claim is \
-            held; run `mentatd stop`")
-  | `Spawn_refused message -> Error (Exit_status.runtime message)
-  | `Timeout ->
-      Error
-        (Exit_status.runtime
-           (match Sys.getenv_opt "MENTAT_DAEMON_SOCKET" with
-           | Some socket when not (String.equal socket "") ->
-               Printf.sprintf
-                 "the mentat daemon named by MENTAT_DAEMON_SOCKET (%s) did \
-                  not answer"
-                 socket
-           | _ ->
-               Printf.sprintf "the mentat daemon did not come up; see %s"
-                 (daemon_log_path dirs)))
 
 (* ---- Stop ---- *)
 

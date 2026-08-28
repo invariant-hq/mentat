@@ -20,7 +20,7 @@ corrupting the session.
 
   $ mentat session archive held --cwd "$PWD" 2>&1 | censor | mentat_cram subst 'pid \$PID on \S+' 'pid $PID on $HOST'
   mentat: session held is busy with another driver
-  serve-mount (pid $PID on $HOST
+  serve-session (pid $PID on $HOST
   [1]
 
 Release the held owner (it is mid-hold under the long delay_ms) with SIGINT; it

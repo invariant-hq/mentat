@@ -7,15 +7,14 @@ journal's event order proves it: both queue facts precede the first turn's
 settlement. Once the tool is released the child completes its task and
 drains both entries as its own turns.
 
-The second fixture binds the first fixture's port: a daemon-hosted instance
-keeps the provider environment it booted with. The sessions work in a
-workspace subdirectory, and the tool's marker files are written outside it so
-the turns drain no workspace notices.
+The second fixture binds the first fixture's port: an agent keeps the
+provider environment its spawner rendered at its boot, and the child's
+server is still the stage-1 spawn. The sessions work in a workspace
+subdirectory, and the tool's marker files are written outside it so the
+turns drain no workspace notices.
 
   $ mkdir -p work/.git
   $ (cd work && mentat trust . >/dev/null)
-  $ trap stop_daemon EXIT
-  $ export MENTAT_CHILD_LINGER=0.2
 
 A durable allow rule lets the delegated child run its shell tool unattended.
 
@@ -25,8 +24,8 @@ A durable allow rule lets the delegated child run its shell tool unattended.
   >   { "action": "allow", "matcher": { "type": "command", "pattern": { "type": "any" } } } ] } } }
   > JSON
 
-The child choreography helpers — wait_child, wait_child_exit, and the
-$SOCK_BASE capture below — live in setup.sh beside the daemon helpers.
+The agent choreography helpers — wait_child, wait_child_exit, and the
+$SOCK_BASE capture below — live in setup.sh.
 
 Stage 1 — spawn, and hold the child mid-turn on a gated shell tool.
 
@@ -36,9 +35,8 @@ Stage 1 — spawn, and hold the child mid-turn on a gated shell tool.
   > {"expect":{"body_contains":["PLEASE_SPAWN","sp-call"]},"response":{"id":"r2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"SPAWNED"}]}]}}
   > JSONL
   $ start_fake_openai_unordered stage1.jsonl capture1 port1
-  $ start_daemon
   $ SOCK_BASE="$(child_sock_base)"
-  $ mentat run start --attach --json --id parent "PLEASE_SPAWN" --cwd "$PWD/work" >stage1.out 2>stage1.err
+  $ mentat run start --json --id parent "PLEASE_SPAWN" --cwd "$PWD/work" >stage1.out 2>stage1.err
   $ wait_fake_server
   $ grep -c '"outcome":"completed"' stage1.out
   1
@@ -59,7 +57,7 @@ the fake is not awaited until then.
   > {"expect":{"body_contains":["one more thing"],"body_not_contains":["PLEASE_MESSAGE"]},"response":{"id":"rc4","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"FU_DONE"}]}]}}
   > JSONL
   $ start_fake_openai_unordered stage2.jsonl capture2 port2 --port "$(cat port1)"
-  $ mentat run resume parent "PLEASE_MESSAGE" --attach --json --cwd "$PWD/work" >stage2.out 2>stage2.err
+  $ mentat run resume parent "PLEASE_MESSAGE" --json --cwd "$PWD/work" >stage2.out 2>stage2.err
   $ grep -c 'PARENT_DONE' stage2.out
   1
 
@@ -85,7 +83,6 @@ as its own turns.
   $ wait_fake_server
   $ wait_child "$CHILD" 3
   $ wait_child_exit "$CHILD"
-  $ stop_daemon
   $ mentat session export "$CHILD" --format text --cwd "$PWD/work" >child.transcript
   $ grep -c 'turn-finished' child.transcript
   3

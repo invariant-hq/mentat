@@ -5,7 +5,7 @@ it re-reads the task from the durable delegation edge, mints the same
 deterministic first turn every child backend mints, drives it to settlement,
 and exits 0 once the session lingers idle — its per-session socket directory
 removed. The child journal it produces is normalized-identical to the
-daemon-brokered materialization of the same task, and its first-turn id is
+broker-materialized run of the same task, and its first-turn id is
 byte-identical: the cross-backend golden any child backend must pass
 unchanged (the golden bytes predate the brokered backend and pin the
 in-process materialization too). A second
@@ -20,16 +20,15 @@ fence.
 
   $ mkdir -p work/.git
   $ (cd work && mentat trust . >/dev/null)
-  $ trap stop_daemon EXIT
   $ export MENTAT_CHILD_LINGER=1
 
-The child choreography helpers — wait_child, wait_child_exit, and the
-$SOCK_BASE capture below — live in setup.sh beside the daemon helpers.
+The agent choreography helpers — wait_child, wait_child_exit, and the
+$SOCK_BASE capture below — live in setup.sh.
 
-Stage 1 — the reference journal. The parent spawns a child through the
-daemon, whose broker materializes it as a detached per-session server; the
-child settles its task turn; its journal is the reference the by-hand
-child-serve boot must reproduce byte-identically.
+Stage 1 — the reference journal. The parent's own agent spawns the child
+through its broker as a detached per-session server; the child settles its
+task turn; its journal is the reference the by-hand child-serve boot must
+reproduce byte-identically.
 
   $ cat > stage1.jsonl <<'JSONL'
   > {"expect":{"body_contains":["PLEASE_SPAWN"],"body_not_contains":["sp-call"]},"response":{"id":"r1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"sp-item","call_id":"sp-call","name":"spawn","arguments":"{\"task\":\"child works\"}"}]}}
@@ -37,9 +36,8 @@ child-serve boot must reproduce byte-identically.
   > {"expect":{"body_contains":["PLEASE_SPAWN","sp-call"]},"response":{"id":"r2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"SPAWNED"}]}]}}
   > JSONL
   $ start_fake_openai_unordered stage1.jsonl capture1 port1
-  $ start_daemon
   $ SOCK_BASE="$(child_sock_base)"
-  $ mentat run start --attach --json --id parent "PLEASE_SPAWN" --cwd "$PWD/work" >stage1.out 2>stage1.err
+  $ mentat run start --json --id parent "PLEASE_SPAWN" --cwd "$PWD/work" >stage1.out 2>stage1.err
   $ wait_fake_server
   $ grep -c '"outcome":"completed"' stage1.out
   1
@@ -48,7 +46,7 @@ child-serve boot must reproduce byte-identically.
   1
   $ wait_child "$CHILD" 1
   $ wait_child_exit "$CHILD"
-  $ stop_daemon
+  $ wait_child_exit parent
   $ mentat session export "$CHILD" --format json --cwd "$PWD/work" >child1.ndjson
   $ T1=$(sed -n '2p' child1.ndjson | mentat_cram json '.document.events[0].turn.id')
   $ echo "$T1" | grep -cE '^[0-9a-f]{20}$'
@@ -90,8 +88,8 @@ to settlement, lingers idle, and exits 0 on its own.
   $ wait_fake_server
   $ cat serve1.err
 
-The endpoint was derived from the session id under the daemon's denied socket
-tree, stayed inside the unix-socket path budget, and was removed on the clean
+The endpoint was derived from the session id under the denied socket tree,
+stayed inside the unix-socket path budget, and was removed on the clean
 exit.
 
   $ SOCK=$(sed -n 's/^mentat serve: serving .* at //p' serve1.out)
@@ -106,8 +104,8 @@ exit.
 
 The cross-backend golden: the store holds exactly one child session, under
 the original id; the first-turn id is the same deterministic mint; the
-normalized transcript is byte-identical to the daemon-brokered
-materialization.
+normalized transcript is byte-identical to the broker-materialized
+run.
 
   $ ls "$XDG_DATA_HOME/mentat/sessions/" | grep -cE '^sub-[0-9a-f]+$'
   1

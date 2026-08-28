@@ -1,9 +1,10 @@
 The owner's mail surface. `mentat session send` lands text durably in a
 session's next-turn queue as the owner — no origin member, absence is the one
 spelling of "the owner sent this" — through the broker's one delivery loop.
-A dormant target takes the fence-held append; a live interactive run holds
-its fence under the serve-mount label and serves its derived socket, so the
-same send crosses the wire mid-turn instead of dying against the held fence.
+A dormant target takes the fence-held append; a running session's agent
+holds its fence under the serving label and serves its derived socket, so
+the same send crosses the wire mid-turn instead of dying against the held
+fence.
 Sending never wakes and never interrupts: the dormant session stays dormant,
 and the live turn never sees the mail — it is read at the next turn
 boundary. A missing session is a loud nonzero.
@@ -13,6 +14,7 @@ capture files live outside it so the turns drain no workspace notices.
 
   $ mkdir -p work/.git
   $ (cd work && mentat trust . >/dev/null)
+  $ SOCK_BASE="$(child_sock_base)"
 
 A durable allow rule lets the held turn run its shell tool unattended.
 
@@ -31,6 +33,7 @@ Dormant delivery: settle a session, mail it, and read the fact.
   $ mentat run start --id dormant "first errand" --cwd "$PWD/work" 2>/dev/null
   SETTLED
   $ wait_fake_server
+  $ wait_child_exit dormant
   $ mentat session send dormant "psst secret mail" --cwd "$PWD/work"
   delivered dormant
   $ DOC="$XDG_DATA_HOME/mentat/sessions/dormant/session.json"
@@ -63,12 +66,11 @@ A missing session is a loud nonzero, and nothing pretends to retry.
   mentat: session not found: no-such-session
   [1]
 
-Live delivery through the serve-mount: a foreground `mentat run` holds the
-turn open on a gated shell tool — the session's fence held the whole time —
-and the send still answers delivered: the run host serves its session's
-derived socket while driving, so the entry crosses the wire into the live
-journal. Before the bridge this exact send could only burn its budget
-against the held fence and exit nonzero.
+Live delivery over the agent's endpoint: a foreground `mentat run` holds
+the turn open on a gated shell tool — the session's fence held the whole
+time by its agent — and the send still answers delivered: the agent serves
+the session's derived socket while driving, so the entry crosses the wire
+into the live journal instead of burning its budget against the held fence.
 
   $ cat > stage3.jsonl <<'JSONL'
   > {"expect":{"body_contains":["hold the line"]},"response":{"id":"r3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"hold-item","call_id":"hold-call","name":"shell","arguments":"{\"command\":\"echo started > ../held-started && while [ ! -f ../go ]; do sleep 0.1; done && echo WAITED\"}"}]}}

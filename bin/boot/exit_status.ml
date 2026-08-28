@@ -60,10 +60,7 @@ let of_exn = function
   | Eio.Io _ as exn -> Runtime_error (Printexc.to_string exn)
   | exn -> Internal (Printexc.to_string exn)
 
-let daemon_busy_hint =
-  "the mentat daemon drives this session; re-run with --attach"
-
-let of_protocol_error ?(daemon_live = fun () -> false) e =
+let of_protocol_error e =
   let module E = Mentat_protocol.Error in
   let rendered = Mentat_diagnostic.to_string (E.diagnostic e) in
   match (e : E.t) with
@@ -71,17 +68,10 @@ let of_protocol_error ?(daemon_live = fun () -> false) e =
   | E.Active_turn_exists _ | E.Decision_not_pending _ | E.Already_resolved _
   | E.Invalid_title | E.Invalid_api_key ->
       Usage_error rendered
-  | E.Busy _ ->
-      (* A Busy against a live daemon: the daemon holds the fence, so point the
-         user at --attach rather than let them fight it (4e). Rendering only —
-         with no daemon [daemon_live] is false and the message is unchanged, so
-         offline goldens do not move. *)
-      if daemon_live () then Runtime_error (rendered ^ "\n" ^ daemon_busy_hint)
-      else Runtime_error rendered
   (* [Unknown_command] reaches here only on the expansion race where a known
      command file vanished between catalog and expansion — a missing entity in
      [Session_not_found]'s class, not caller misuse. [File_unresolved] is the
      sibling expansion failure: a command's [@file] reference did not resolve. *)
-  | E.Session_not_found _ | E.Archived _ | E.Deleted _ | E.Unknown_command _
-  | E.File_unresolved _ | E.Unavailable _ ->
+  | E.Busy _ | E.Session_not_found _ | E.Archived _ | E.Deleted _
+  | E.Unknown_command _ | E.File_unresolved _ | E.Unavailable _ ->
       Runtime_error rendered

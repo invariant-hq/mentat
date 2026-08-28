@@ -788,6 +788,25 @@ let tools_cmd =
 
 (* group. *)
 
+(* dirs. — the resolved per-user directories and the derived socket base, one
+   key=value line each. The socket base is where every session's agent binds
+   its derived endpoint ([<sockets>/s/<leaf>]); harnesses read it here rather
+   than re-deriving the data-home digest. *)
+let dirs cwd =
+  Composition.with_base ~cwd ~overrides:[] (fun t ->
+      let dirs = Composition.dirs t in
+      Output.stdout_printf "config_home=%s\n" (User_dirs.config_home dirs);
+      Output.stdout_printf "data_home=%s\n" (User_dirs.data_home dirs);
+      Output.stdout_printf "state_home=%s\n" (User_dirs.state_home dirs);
+      Output.stdout_printf "sockets=%s\n" (User_dirs.daemon_socket_dir dirs);
+      Exit_status.Success)
+
+let dirs_cmd =
+  let doc = "Print the resolved per-user directories and the socket base." in
+  Cmd.v
+    (Cmd.info "dirs" ~doc ~docs ~exits:Cli_common.exits)
+    (Exit_status.term Term.(const dirs $ Cli_common.cwd))
+
 let cmd =
   let doc = "Inspect model-visible prompts and internal state." in
   let man =
@@ -802,4 +821,4 @@ let cmd =
   in
   Cmd.group
     (Cmd.info "debug" ~doc ~docs ~man ~exits:Cli_common.exits)
-    [ context_cmd; prompt_cmd; session_cmd; tools_cmd; model_cmd ]
+    [ context_cmd; prompt_cmd; session_cmd; tools_cmd; model_cmd; dirs_cmd ]

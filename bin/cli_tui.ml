@@ -666,32 +666,24 @@ let sandbox_overrides = function
       | Ok config -> Ok [ config ]
       | Error e -> Error (Exit_status.usage (Mentat_config.Error.message e)))
 
-(* The client bundle the TUI drives: in-process by default, or — under
-   [--attach] — a driver the per-user daemon fills over the wire, wrapped with
-   local command expansion, paired with the {b local} read capability and shell
-   ([tui_capabilities]): when attached the engine is remote but file completion
-   and the local shell stay local. Trust prompting precedes this (in [launch]),
-   so an untrusted workspace never spawns a daemon. *)
-let tui_client_bundle t ~attach =
-  if attach then
-    match Daemon.find_or_spawn t with
-    | Error status -> Error status
-    | Ok driver -> (
-        match Composition.tui_capabilities t with
-        | Error status -> Error status
-        | Ok (read_capability, shell) ->
-            Ok (Composition.attach_client t driver, read_capability, shell))
-  else Composition.client_with_tui_capabilities t
+(* The client bundle the TUI drives: the engine-free cones answered in this
+   process and a per-session wire driver that starts and dials each opened
+   session's own agent ([Agent_client]), paired with the {b local} read
+   capability and shell ([tui_capabilities]): the engines are the agents',
+   but file completion and the local shell stay local. Trust prompting
+   precedes this (in [launch]), so an untrusted workspace never starts an
+   agent. *)
+let tui_client_bundle t = Agent_client.client_with_tui_capabilities t
 
 let launch_loaded ?(activation_ready = fun () -> ()) ?(launch_review = false)
-    ~version ~attach ~mode ~session ~last ~input t =
+    ~version ~mode ~session ~last ~input t =
   match Composition.default_model t with
   | Error message -> Exit_status.runtime message
   | Ok model -> (
       match snapshot ~version t model with
       | Error status -> status
       | Ok snapshot -> (
-          match tui_client_bundle t ~attach with
+          match tui_client_bundle t with
           | Error status -> status
           | Ok (client, read_capability, shell) -> (
               activation_ready ();
@@ -784,13 +776,13 @@ let activation_notice status =
 let set_trust path root status =
   Eio_main.run @@ fun _ -> Trust_store.set ~path ~root status
 
-let rec launch_trusted ~launch_review ~review_base ~version ~attach ~cwd
-    ~overrides ~mode ~session ~last ~input ~path ~root ~root_text =
+let rec launch_trusted ~launch_review ~review_base ~version ~cwd ~overrides
+    ~mode ~session ~last ~input ~path ~root ~root_text =
   let entered = ref false in
   let status =
     Composition.with_base ?review_base ~cwd ~overrides (fun t ->
-        launch_loaded ~launch_review ~version ~attach ~mode ~session ~last
-          ~input t ~activation_ready:(fun () ->
+        launch_loaded ~launch_review ~version ~mode ~session ~last ~input t
+          ~activation_ready:(fun () ->
             entered := true;
             Output.stdout_printf "\nRepository activation is enabled.\n"))
   in
@@ -809,13 +801,13 @@ let rec launch_trusted ~launch_review ~review_base ~version ~attach ~cwd
         | Stop -> Exit_status.Success
         | Run ->
             Composition.with_base ?review_base ~cwd ~overrides (fun t ->
-                launch_loaded ~launch_review ~version ~attach ~mode ~session
-                  ~last ~input t)
+                launch_loaded ~launch_review ~version ~mode ~session ~last
+                  ~input t)
         | Reload ->
-            launch_trusted ~launch_review ~review_base ~version ~attach ~cwd
-              ~overrides ~mode ~session ~last ~input ~path ~root ~root_text)
+            launch_trusted ~launch_review ~review_base ~version ~cwd ~overrides
+              ~mode ~session ~last ~input ~path ~root ~root_text)
 
-let launch ~launch_review ~review_base ~version ~attach ~cwd ~overrides ~mode
+let launch ~launch_review ~review_base ~version ~cwd ~overrides ~mode
     ~session ~last ~input =
   let reload = ref None in
   let first =
@@ -824,8 +816,7 @@ let launch ~launch_review ~review_base ~version ~attach ~cwd ~overrides ~mode
         | Error status -> status
         | Ok Stop -> Exit_status.Success
         | Ok Run ->
-            launch_loaded ~launch_review ~version ~attach ~mode ~session ~last
-              ~input t
+            launch_loaded ~launch_review ~version ~mode ~session ~last ~input t
         | Ok Reload ->
             reload :=
               Some
@@ -837,8 +828,8 @@ let launch ~launch_review ~review_base ~version ~attach ~cwd ~overrides ~mode
   match !reload with
   | None -> first
   | Some (path, root, root_text) ->
-      launch_trusted ~launch_review ~review_base ~version ~attach ~cwd
-        ~overrides ~mode ~session ~last ~input ~path ~root ~root_text
+      launch_trusted ~launch_review ~review_base ~version ~cwd ~overrides
+        ~mode ~session ~last ~input ~path ~root ~root_text
 
 let launch_input draft prompt =
   match (draft, prompt) with
@@ -848,7 +839,7 @@ let launch_input draft prompt =
   | Some _, Some _ ->
       Error (Exit_status.usage "choose only one of --draft or --prompt")
 
-let run version session last continue sandbox mode_raw draft prompt attach cwd =
+let run version session last continue sandbox mode_raw draft prompt cwd =
   (* The interactive terminal owns the screen, so stderr logging would corrupt
      it. Divert before any launch path (trust prompt included) enters raw mode. *)
   Log_setup.divert_for_tui ~getenv:Sys.getenv_opt;
@@ -868,17 +859,17 @@ let run version session last continue sandbox mode_raw draft prompt attach cwd =
           | Ok input ->
               (* [-c]/[--continue] is [--last]: open the newest resumable
                  session in the workspace. *)
-              launch ~launch_review:false ~review_base:None ~version ~attach
-                ~cwd ~overrides ~mode ~session ~last:(last || continue) ~input))
+              launch ~launch_review:false ~review_base:None ~version ~cwd
+                ~overrides ~mode ~session ~last:(last || continue) ~input))
 
-let run_review version base attach cwd =
+let run_review version base cwd =
   Log_setup.divert_for_tui ~getenv:Sys.getenv_opt;
   (* [review_base] configures the review responder's base at composition build
      (Composition.with_base); it wins over MENTAT_REVIEW_BASE, which wins over
      the HEAD default. [None] leaves the default in force. *)
-  launch ~launch_review:true ~review_base:base ~version ~attach ~cwd
-    ~overrides:[] ~mode:Mentat_session.Contract.Mode.Build ~session:None
-    ~last:false ~input:Mentat_tui.Startup.Empty
+  launch ~launch_review:true ~review_base:base ~version ~cwd ~overrides:[]
+    ~mode:Mentat_session.Contract.Mode.Build ~session:None ~last:false
+    ~input:Mentat_tui.Startup.Empty
 
 let session_option =
   let doc = "Open the TUI with session $(docv) loaded." in
@@ -916,8 +907,7 @@ let default_term ~version =
     Term.(
       const (run version)
       $ session_option $ Cli_common.last $ continue_flag $ sandbox_option
-      $ mode_option $ draft_option $ prompt_option $ Cli_common.attach
-      $ Cli_common.cwd)
+      $ mode_option $ draft_option $ prompt_option $ Cli_common.cwd)
 
 let resume_session =
   let doc = "Session id or unique prefix to replay." in
@@ -936,13 +926,12 @@ let resume_cmd ~version =
   in
   Cmd.v
     (Cmd.info "resume" ~doc ~docs:Cli_common.s_run ~man
-       ~envs:Cli_common.daemon_envs ~exits:Cli_common.exits)
+       ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
          const (run version)
          $ resume_session $ Cli_common.last $ Term.const false $ sandbox_option
-         $ mode_option $ draft_option $ prompt_option $ Cli_common.attach
-         $ Cli_common.cwd))
+         $ mode_option $ draft_option $ prompt_option $ Cli_common.cwd))
 
 let review_base =
   let doc = "Base revision to review the worktree against (default HEAD)." in
@@ -962,8 +951,7 @@ let review_cmd ~version =
   in
   Cmd.v
     (Cmd.info "review" ~doc ~docs:Cli_common.s_run ~man
-       ~envs:Cli_common.daemon_envs ~exits:Cli_common.exits)
+       ~exits:Cli_common.exits)
     (Exit_status.term
        Term.(
-         const (run_review version)
-         $ review_base $ Cli_common.attach $ Cli_common.cwd))
+         const (run_review version) $ review_base $ Cli_common.cwd))

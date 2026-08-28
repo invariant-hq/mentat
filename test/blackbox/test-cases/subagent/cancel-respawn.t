@@ -1,6 +1,7 @@
 A cancelled child that had to be killed does not resume the cancelled work:
 the child is frozen (SIGSTOP) so it can hear neither the semantic interrupt
-nor SIGTERM, the parent's interrupt cascades the cancel, and the broker's
+nor SIGTERM, the parent's interrupt — forwarded by the run client over the
+parent agent's socket — cascades the cancel, and the parent agent broker's
 escalation ends in SIGKILL. The respawned successor boots with the interrupt
 intent carried (--interrupted), so its journal ends in one terminal
 interrupted fact — the killed tool claim settled Ambiguous, and the resumed
@@ -15,8 +16,6 @@ drain no workspace notices.
 
   $ mkdir -p work/.git
   $ (cd work && mentat trust . >/dev/null)
-  $ trap stop_daemon EXIT
-  $ export MENTAT_CHILD_LINGER=0.2
 
 A durable allow rule lets the delegated child run its shell tool unattended.
 
@@ -26,8 +25,8 @@ A durable allow rule lets the delegated child run its shell tool unattended.
   >   { "action": "allow", "matcher": { "type": "command", "pattern": { "type": "any" } } } ] } } }
   > JSON
 
-The child choreography helpers — wait_child, wait_child_exit, and the
-$SOCK_BASE capture below — live in setup.sh beside the daemon helpers.
+The agent choreography helpers — wait_child, wait_child_exit, and the
+$SOCK_BASE capture below — live in setup.sh.
 
 Stage 1 — spawn, and hold the child mid-turn on a gated shell tool.
 
@@ -37,9 +36,8 @@ Stage 1 — spawn, and hold the child mid-turn on a gated shell tool.
   > {"expect":{"body_contains":["PLEASE_SPAWN","sp-call"]},"response":{"id":"r2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"SPAWNED"}]}]}}
   > JSONL
   $ start_fake_openai_unordered stage1.jsonl capture1 port1
-  $ start_daemon
   $ SOCK_BASE="$(child_sock_base)"
-  $ mentat run start --attach --json --id parent "PLEASE_SPAWN" --cwd "$PWD/work" >stage1.out 2>stage1.err
+  $ mentat run start --json --id parent "PLEASE_SPAWN" --cwd "$PWD/work" >stage1.out 2>stage1.err
   $ wait_fake_server
   $ CHILD=$(grep -oh 'session sub-[0-9a-f]*' capture1/request-*.json | head -n 1 | cut -d' ' -f2)
   $ DELEG=$(grep -oh 'Spawned child [0-9a-f]*' capture1/request-*.json | head -n 1 | cut -d' ' -f3)
@@ -57,7 +55,7 @@ parent's interrupted turn settles without waiting for it.
   > JSONL
   $ start_fake_openai_unordered stage2.jsonl capture2 port2 --port "$(cat port1)"
   $ kill -STOP "$PID1"
-  $ mentat run resume parent "PLEASE_WAIT" --attach --json --cwd "$PWD/work" >stage2.out 2>stage2.err &
+  $ mentat run resume parent "PLEASE_WAIT" --json --cwd "$PWD/work" >stage2.out 2>stage2.err &
   $ RUN_PID=$!
   $ PARENT_DOC="$XDG_DATA_HOME/mentat/sessions/parent/session.json"
   $ tries=0; until grep -q wt-call "$PARENT_DOC" 2>/dev/null; do
@@ -82,7 +80,7 @@ fact under a new pid, and the cancelled work never completes.
   $ kill "$MENTAT_FAKE_PROVIDER_PID" 2>/dev/null
   $ wait "$MENTAT_FAKE_PROVIDER_PID" 2>/dev/null
   [143]
-  $ stop_daemon
+  $ wait_child_exit parent
   $ mentat session export "$CHILD" --format text --cwd "$PWD/work" >child.transcript
   $ grep -c 'tool-settled(ambiguous' child.transcript
   1

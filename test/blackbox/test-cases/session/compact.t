@@ -3,6 +3,7 @@ a durable [User_requested] compaction. The summary is one billable provider
 claim the driver installs and settles; the command is idle-only.
 
   $ use_trusted_workspace
+  $ SOCK_BASE="$(child_sock_base)"
   $ cat > compact.jsonl <<'JSONL'
   > {"expect":{"body_contains":["hello prompt"]},"response":{"id":"r1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}]}}
   > {"expect":{"body_contains":["Summarize this conversation","hello prompt"]},"response":{"id":"r2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"A concise running summary."}]}]}}
@@ -13,6 +14,7 @@ One turn gives the idle session a transcript worth summarizing.
 
   $ mentat run "hello prompt" --cwd "$PWD" --id compact-me 2>/dev/null
   first answer
+  $ wait_child_exit compact-me
 
 `session compact` bills the summary call and installs the fact, printing the
 human line naming the session.

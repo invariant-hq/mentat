@@ -47,10 +47,13 @@ val confined :
     confinement applied: the session cone answers only for [served] and its
     own delegation subtree — membership decided by journal truth through
     [cache] — and a foreign session id is refused, never resolved against the
-    shared store. Every other cone — accounts, settings, lifecycle, review,
-    workspace — is refused whole: a per-session endpoint exists to drive one
-    session, not to reach the user's accounts, configuration, or session
-    index. *)
+    shared store. The two session-scoped settings writes ([set_model],
+    [set_permission_review]) pass under the same membership guard — their
+    overlays live in the driving process, which is exactly this one, so the
+    frontend that opened the session reaches them here. Every other cone —
+    accounts, the sessionless settings, lifecycle, review, workspace — is
+    refused whole: a per-session endpoint exists to drive one session, not to
+    reach the user's accounts, configuration, or session index. *)
 
 val driver_for :
   root:string ->

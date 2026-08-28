@@ -23,8 +23,12 @@ A turn that asks a question parks, waiting for `run reply`.
   $ decision=$(mentat_cram json .decision_id waiting.out)
   $ wait_fake_server
 
-The workspace changes underneath the parked turn.
+The workspace changes underneath the parked turn, and the parked agent dies
+hard — the crash whose recovery this file pins. (A live parked agent would
+simply continue in place; killing it forces the fresh-driver path.)
 
+  $ AGENT_PID=$(head -n 1 "$XDG_DATA_HOME/mentat/sessions/rec/run.lock" | mentat_cram json .pid)
+  $ kill -9 "$AGENT_PID"
   $ cat > AGENTS.md <<'MD'
   > Completely different project instructions.
   > MD
@@ -33,9 +37,9 @@ The workspace changes underneath the parked turn.
   > JSONL
   $ start_fake_openai answer.jsonl capture-answer port-answer
 
-Resuming attaches a fresh driver and recovers the active turn. The sealed
-declarations still match one catalog, so recovery completes and the turn
-finishes rather than faulting.
+The reply starts a fresh agent, whose recovery re-drives the active turn.
+The sealed declarations still match one catalog, so recovery completes and
+the turn finishes rather than faulting.
 
   $ mentat run reply rec --decision "$decision" --answer "chosen" --cwd "$PWD" 2>/dev/null
   recovered and continued

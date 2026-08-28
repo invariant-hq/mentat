@@ -27,6 +27,13 @@ unset OPENAI_API_KEY ANTHROPIC_API_KEY
 export MENTAT_SANDBOX_MODE=danger-full-access
 export MENTAT_AUTO_TITLE=0
 
+# Every run drives its session's own agent, which lingers briefly after
+# settlement so a follow-up delivery finds a live server. The suite default
+# keeps that linger short so a cram never waits seconds for an agent to idle
+# out (and never ends with one still lingering over a store the harness is
+# about to reclaim); a cram that needs a different pace re-exports it.
+export MENTAT_CHILD_LINGER="${MENTAT_CHILD_LINGER:-0.2}"
+
 # The XDG roots exist, but data/mentat and sessions/ are left to the first store
 # open so use_broken_store can plant a fault before anything touches the store.
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
@@ -266,13 +273,10 @@ EOF
 
 # --- daemon (mentatd) ----------------------------------------------------------
 
-# find_or_spawn resolves mentatd as a sibling of the running mentat binary.
-# Under the cram harness that resolution is platform-dependent (Linux resolves
-# the install-tree symlink into the build tree, where mentatd is not a
-# sibling), so the daemon binary is named explicitly from PATH. The daemon's
-# child broker resolves mentat the same sibling way for its serve spawns,
-# so the mirror export covers the reverse direction.
-export MENTATD_BIN="$(command -v mentatd)"
+# Every broker resolves the agent binary it spawns as the running executable
+# itself, with MENTAT_BIN as the override. Under the cram harness the
+# self-resolution is platform-dependent (Linux resolves the install-tree
+# symlink into the build tree), so the binary is named explicitly from PATH.
 export MENTAT_BIN="$(command -v mentat)"
 
 # Start the per-user daemon foreground-backgrounded on its default per-store
@@ -298,16 +302,15 @@ stop_daemon () {
   fi
 }
 
-# The subagent suite's shared child choreography. child_sock_base derives the
-# daemon's per-session endpoint tree from discovery — capture it into
-# SOCK_BASE once the first daemon is up (the path is stable across daemon
-# restarts, but daemon.json only exists while one runs). wait_child polls a
+# The shared agent choreography. child_sock_base derives the per-session
+# endpoint tree — where every session's agent binds its socket — from the
+# resolved directories; capture it into SOCK_BASE once. wait_child polls a
 # session's fence-free view until it is idle with the expected number of
-# settled turns; wait_child_exit blocks until the child's detached server has
+# settled turns; wait_child_exit blocks until the session's agent has
 # exited — its endpoint directory under $SOCK_BASE is gone — so a following
-# export finds the session fence free.
+# fenced command (a json export, a metadata write) finds the fence free.
 child_sock_base () {
-  printf '%s/s\n' "$(dirname "$(mentat_cram json .socket "$XDG_DATA_HOME/mentat/daemon/daemon.json")")"
+  printf '%s/s\n' "$(mentat debug dirs 2>/dev/null | sed -n 's/^sockets=//p')"
 }
 
 wait_child () {

@@ -4,6 +4,7 @@ transform end to end over a real two-turn session (the client-path wiring and th
 anchor-resolution refusal live in session.t).
 
   $ use_trusted_workspace
+  $ SOCK_BASE="$(child_sock_base)"
 
 Build a two-turn session against the fake server: turn one, then a resumed turn
 two.
@@ -14,12 +15,14 @@ two.
   $ start_fake_openai t1.jsonl capture-1 port-1
   $ mentat run start "first prompt" --cwd "$PWD" --id rw >/dev/null 2>&1
   $ wait_fake_server
+  $ wait_child_exit rw
   $ cat > t2.jsonl <<'JSONL'
   > {"expect":{"body_contains":["second prompt"]},"response":{"id":"r2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"second answer"}]}]}}
   > JSONL
   $ start_fake_openai t2.jsonl capture-2 port-2
   $ mentat run resume rw "second prompt" --cwd "$PWD" >/dev/null 2>&1
   $ wait_fake_server
+  $ wait_child_exit rw
   $ mentat session show rw --cwd "$PWD" | grep '^turns='
   turns=2
 
@@ -79,6 +82,7 @@ turn two: the child's diff and revert see f1's change alone, never f2's.
   $ mentat run start --id rw-mut "edit f1" --cwd "$PWD" 2>/dev/null
   did f1
   $ wait_fake_server
+  $ wait_child_exit rw-mut
   $ cat > m2.jsonl <<'JSONL'
   > {"expect":{"body_contains":["\"name\":\"edit_file\""]},"response":{"id":"resp-m2-1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"item-m2-1","call_id":"call-m2-1","name":"edit_file","arguments":"{\"path\":\"f2.txt\",\"old_string\":\"two\",\"new_string\":\"TWO\"}"}]}}
   > {"expect":{"body_contains":["function_call_output","call-m2-1"]},"response":{"id":"resp-m2-2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"did f2"}]}]}}
@@ -87,6 +91,7 @@ turn two: the child's diff and revert see f1's change alone, never f2's.
   $ mentat run resume rw-mut "edit f2" --cwd "$PWD" 2>/dev/null
   did f2
   $ wait_fake_server
+  $ wait_child_exit rw-mut
 
 The parent recorded both edits, in turn order.
 

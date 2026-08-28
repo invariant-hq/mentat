@@ -36,6 +36,7 @@
  (modules
   pty_session
   cli_launch_fixture
+  test_cli_agent
   test_cli_launch
   test_cli_launch_trust
   test_cli_launch_misc

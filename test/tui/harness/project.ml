@@ -34,6 +34,18 @@ let normalize_bindings bindings =
   List.iter (fun (name, _) -> validate_name name) bindings;
   List.fold_left add_binding [] bindings
 
+let resolve_env_path name =
+  match Sys.getenv_opt name with
+  | None -> Util.failf "%s is not set" name
+  | Some configured ->
+      let resolved =
+        if Filename.is_relative configured then
+          Filename.concat (Sys.getcwd ()) configured
+        else configured
+      in
+      if Sys.file_exists resolved then Unix.realpath resolved
+      else Util.failf "%s does not exist: %s" name resolved
+
 let bindings ?openai_base_url ?(unset = []) ?(extra = []) t =
   List.iter validate_name unset;
   let xdg = t.root ^ ".xdg" in
@@ -59,6 +71,17 @@ let bindings ?openai_base_url ?(unset = []) ?(extra = []) t =
       ("MENTAT_SANDBOX_MODE", "danger-full-access");
       ("MENTAT_WORKSPACE_TOOLING", "off");
     ]
+  in
+  (* The dune env-vars MENTAT_BIN value is runner-relative; the launched TUI
+     starts each opened session's agent by spawning the binary MENTAT_BIN
+     names from the project root, so the child must see the resolved
+     absolute path, not the runner's relative spelling. The pure-widget
+     suites run with no MENTAT_BIN at all, so the binding is added only
+     where one is set. *)
+  let defaults =
+    match Sys.getenv_opt "MENTAT_BIN" with
+    | None | Some "" -> defaults
+    | Some _ -> defaults @ [ ("MENTAT_BIN", resolve_env_path "MENTAT_BIN") ]
   in
   let provider =
     match openai_base_url with
@@ -284,18 +307,6 @@ let with_external_dune_watch t f =
           dev_null)
   in
   Fun.protect ~finally:(fun () -> stop_process pid) f
-
-let resolve_env_path name =
-  match Sys.getenv_opt name with
-  | None -> Util.failf "%s is not set" name
-  | Some configured ->
-      let resolved =
-        if Filename.is_relative configured then
-          Filename.concat (Sys.getcwd ()) configured
-        else configured
-      in
-      if Sys.file_exists resolved then Unix.realpath resolved
-      else Util.failf "%s does not exist: %s" name resolved
 
 let wait_for_file path =
   let rec loop remaining =

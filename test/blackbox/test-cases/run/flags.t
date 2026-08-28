@@ -4,6 +4,7 @@ Each is observable in the durable turn contract, the request the fake server
 records, or the run-start posture, without needing a live model.
 
   $ use_trusted_workspace
+  $ SOCK_BASE="$(child_sock_base)"
 
 `--max-steps` freezes the turn's step limit; the durable contract records it.
 
@@ -14,6 +15,7 @@ records, or the run-start posture, without needing a live model.
   $ mentat run start --max-steps 3 --cwd "$PWD" --id steps "steps prompt" 2>/dev/null
   ok
   $ wait_fake_server
+  $ wait_child_exit steps
   $ mentat session export steps --format json 2>/dev/null | grep -o '"max_steps":3'
   "max_steps":3
 

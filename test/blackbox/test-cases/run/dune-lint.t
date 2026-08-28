@@ -6,6 +6,7 @@ arc runs hermetically; the fake dune serves the watch protocol as in
 dune-own.t.
 
   $ use_trusted_workspace
+  $ SOCK_BASE="$(child_sock_base)"
   $ mentat config set dune.lint_command '["lintprobe", "check"]' >/dev/null
   $ touch dune-project
   $ use_fake_dune
@@ -44,6 +45,7 @@ and a later completed clean run states Lint clean.
   $ MENTAT_DUNE_WATCH=auto mentat run "lint prompt" --cwd "$PWD" --permission bypass --id lint-turn 2>/dev/null
   linted
   $ wait_fake_server
+  $ wait_child_exit lint-turn
 
 Three lint runs, one per green settle. The crashed second run said nothing:
 its request carries no Lint clean and no new findings — the lane held its
@@ -75,6 +77,7 @@ settle.
   $ MENTAT_DUNE_WATCH=auto mentat run "foreignlint prompt" --cwd "$PWD" --permission bypass --id foreignlint-turn 2>/dev/null
   foreign linted
   $ wait_fake_server
+  $ wait_child_exit foreignlint-turn
   $ stop_fake_dune
   $ test -f fake-dune-argv
   [1]
@@ -107,6 +110,7 @@ dune in the lint path at all.
   $ MENTAT_DUNE_WATCH=auto mentat run "lockbin prompt" --cwd "$PWD" --permission bypass --id lockbin-turn 2>/dev/null
   lock linted
   $ wait_fake_server
+  $ wait_child_exit lockbin-turn
   $ cat fake-litany-argv
   check
   $ test -f fake-dune-exec-argv
@@ -128,6 +132,7 @@ it and states its findings.
   $ MENTAT_DUNE_WATCH=auto mentat run "nolint prompt" --cwd "$PWD" --permission bypass --id nolint-turn 2>/dev/null
   late linter
   $ wait_fake_server
+  $ wait_child_exit nolint-turn
 
 The first settle ran nothing; the appearance ran exactly once.
 

@@ -4,6 +4,7 @@ tool the engine appends to the turn; the engine validates every call itself and
 settles the turn on a conforming answer, uniformly across providers.
 
   $ use_trusted_workspace
+  $ SOCK_BASE="$(child_sock_base)"
   $ cat > schema.json <<'JSON'
   > {"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}
   > JSON
@@ -117,6 +118,7 @@ resume accepts --output-schema on a new turn over an existing session.
   > JSONL
   $ start_fake_openai resume1.jsonl capture-resume1 port-resume1
   $ mentat run start "first turn" --cwd "$PWD" --id resumed >/dev/null 2>&1
+  $ wait_child_exit resumed
   $ wait_fake_server
   $ cat > resume2.jsonl <<'JSONL'
   > {"response":{"id":"r2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","id":"so-item","call_id":"so-call","name":"structured_output","arguments":"{\"answer\":\"resumed answer\"}"}]}}
