@@ -264,6 +264,7 @@ let stub_lifecycle : Client.Driver.Lifecycle.t =
     archive = (fun ~session:_ -> stub_unavailable ());
     restore = (fun ~session:_ -> stub_unavailable ());
     delete = (fun ~session:_ -> stub_unavailable ());
+    set_goal = (fun ~session:_ ~goal:_ -> stub_unavailable ());
     sessions = (fun ~listing:_ -> stub_unavailable ());
     session = (fun _ -> stub_unavailable ());
   }
