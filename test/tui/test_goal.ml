@@ -228,7 +228,7 @@ let%expect_test "a failed continuation stops the loop loudly" =
   let failing =
     Tui.Turn_script.fail
       ~prompt:(Session.Metadata.Goal.continuation ~objective)
-      (Llm.Error.make ~kind:Llm.Error.Api ~provider ~status:500
+      (Llm.Error.make ~kind:Llm.Error.Transport ~provider ~status:500
          "provider melted")
   in
   Tui.run ~name:"goal-failed" ~home:home_is_project ~turns:[ first; failing ]
@@ -240,7 +240,32 @@ let%expect_test "a failed continuation stops the loop loudly" =
   Tui.finish_turn t;
   Tui.settle t;
   Tui.print t;
-  [%expect {||}]
+  [%expect {|
+    01 | ❯ look at the flake
+    02 |
+    03 | ⏺ The flake reproduces sometimes.
+    04 |
+    05 |   ● goal declared: chase the flake
+    06 |
+    07 |   ● goal recorded in the session document
+    08 |
+    09 | ❯ Continuing toward the goal: chase the flake
+    10 |
+    11 |   Keep working toward it. End this turn by declaring goal_status: status "done"
+    12 |   only when the goal is genuinely reached, otherwise "continuing" with a one-
+    13 |   line note on what remains.
+    14 |
+    15 | ✗ provider melted
+    16 |   Tell mentat how to proceed.
+    17 |
+    18 |   ● goal stopped: the last turn failed — /goal resume re-arms it once the cause
+    19 | is addressed
+    20 |
+    21 | ────────────────────────────────────────────────────────────────────────────────
+    22 | ❯ message mentat
+    23 | ────────────────────────────────────────────────────────────────────────────────
+    24 |   ! not logged in · /login · ~ · openai/gpt-5.5 · ! full access ? for shortcu…
+    |}]
 
 let%expect_test "the declaration grammar refuses a bad bound in place" =
   let plain_id = Session.Id.of_string "session-plain" in
