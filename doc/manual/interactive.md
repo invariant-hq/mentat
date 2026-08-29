@@ -112,6 +112,14 @@ worktree UI, while `--mode review` changes the model workflow for a turn.
 The palette is the current command catalog. Its main groups are:
 
 - session lifecycle: `/clear`, `/fork`, `/compact`, `/rename`, `/sessions`;
+- goals: `/goal OBJECTIVE [--max-turns N] [--budget USD]` declares a standing
+  goal and stewards it — each time the session settles with nothing queued,
+  a framed continuation turn is sent until the model declares the goal done
+  (its `goal_status` claim), a bound is spent, or you stop it. Your own input
+  always runs first, an interrupt pauses the loop, and a failed turn stops
+  it with the failure named. `/goal stop` retires
+  the intent, `/goal resume` re-arms a recorded goal (reopening a session
+  with one shows the offer), and bare `/goal` reports its standing;
 - model and account: `/model` (selects the model and reasoning effort),
   `/login`, `/logout`;
 - inspection: `/settings`, `/config`, `/status`, `/usage`;

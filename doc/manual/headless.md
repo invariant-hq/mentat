@@ -117,7 +117,9 @@ The loop stops when:
   headless run.
 
 An absent claim means continue: ending a goal takes the declaration, a
-bound, or you — never the model forgetting.
+bound, or you — never the model forgetting. A turn that fails outright is
+different — machinery, not a declaration — and stops the loop with the
+failure named; re-arm with `mentat run resume` once the cause is addressed.
 
 The intent survives in the session document, so nothing is lost between
 processes. `mentat run resume SESSION` on a goal session re-arms the loop

@@ -1842,6 +1842,14 @@ let build_driver ctx : Mentat_client.Driver.t =
       archive = (fun ~session -> call ctx Endpoint.archive { Codecs.session });
       restore = (fun ~session -> call ctx Endpoint.restore { Codecs.session });
       delete = (fun ~session -> call ctx Endpoint.delete { Codecs.session });
+      set_goal =
+        (fun ~session:_ ~goal:_ ->
+          (* Goal intent is an owner metadata write with no wire endpoint:
+             the owner's own process commits it through the offline twin. *)
+          Error
+            (Mentat_protocol.Error.unavailable
+               "goal intent is recorded by the owner's own process, not over \
+                the wire"));
       sessions = (fun ~listing -> call ctx Endpoint.sessions listing);
       session = (fun id -> call ctx Endpoint.session { Codecs.session = id });
     }

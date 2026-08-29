@@ -31,6 +31,7 @@ type fate =
   | Toggle_verbose
   | Open_review
   | Dune_command
+  | Goal_command
   | Init_project of string
   | Quit
   (* App-level key gestures, folded from the former keymap. *)
@@ -230,6 +231,10 @@ let all =
       ~description:"Restart or stop the supervised build watch"
       ~argument_hint:"restart|stop" ~category:Session ~scope:Chat
       ~phase:Anytime ~echoes:false ~fate:Dune_command ();
+    entry ~id:"goal" ~slash:"/goal" ~title:"Goal"
+      ~description:"Declare a standing goal, stop it, or re-arm one"
+      ~argument_hint:"<objective>" ~category:Session ~scope:Chat
+      ~phase:Anytime ~echoes:false ~fate:Goal_command ();
     (* App-level slash commands (Global scope: offered in every palette). *)
     entry ~id:"review" ~slash:"/review" ~title:"Review"
       ~description:"Review the worktree diff against the base" ~category:View

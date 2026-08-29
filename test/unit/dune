@@ -478,24 +478,6 @@
   jsont
   jsont.bytesrw))
 
-; The steward's goal vocabulary is a boot-library module; its law table
-; links the library exactly as test_routine_fire does.
-(test
- (name test_goal_steward)
- (modules test_goal_steward)
- (flags
-  (:standard -open Mentat_boot))
- (libraries
-  windtrap
-  mentat_boot
-  mentat_digest
-  mentat_llm
-  mentat_permission
-  mentat_sandbox
-  mentat_session
-  lpath
-  jsont))
-
 ; The confinement door is a boot-library module; its suite links the
 ; library exactly as test_routine_fire does.
 

@@ -3000,6 +3000,19 @@ let client (fixture : fixture) =
         (fun ~session ->
           mutate_session_result fixture
             ~operation:(Lifecycle_script.Delete session) Session.delete);
+      set_goal =
+        (fun ~session ~goal ->
+          (* An unscripted always-succeeds write: the fixture document gains
+             or loses the intent, so goal flows can read back what the owner
+             verb recorded. *)
+          match session_by_id fixture session with
+          | None ->
+              Error
+                (Mentat_protocol.Error.unavailable
+                   "set_goal targeted an unknown session")
+          | Some document ->
+              replace_session fixture (Session.set_goal goal document);
+              Ok ());
       sessions =
         (fun ~listing ->
           query_sessions fixture

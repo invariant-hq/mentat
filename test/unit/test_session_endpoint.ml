@@ -68,6 +68,7 @@ let stub_driver () : Driver.t =
         archive = (fun ~session:_ -> reached ());
         restore = (fun ~session:_ -> reached ());
         delete = (fun ~session:_ -> reached ());
+        set_goal = (fun ~session:_ ~goal:_ -> reached ());
         sessions = (fun ~listing:_ -> reached ());
         session = (fun _ -> reached ());
       };

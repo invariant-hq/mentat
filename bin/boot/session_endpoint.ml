@@ -167,6 +167,7 @@ let confined ~served (driver : Driver.t) : Driver.t =
       archive = (fun ~session:_ -> cone_refused ());
       restore = (fun ~session:_ -> cone_refused ());
       delete = (fun ~session:_ -> cone_refused ());
+      set_goal = (fun ~session:_ ~goal:_ -> cone_refused ());
       sessions = (fun ~listing:_ -> cone_refused ());
       session = (fun _ -> cone_refused ());
     }

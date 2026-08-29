@@ -1145,6 +1145,7 @@ module Session_view = struct
     workflow_mode : Contract.Mode.t option;
     last_text : string option;
     metrics : Metrics.t;
+    goal : Metadata.Goal.t option;
   }
 
   let waiting_of_state state =
@@ -1184,6 +1185,7 @@ module Session_view = struct
       workflow_mode = workflow_mode_of_state state;
       last_text = State.final_text state;
       metrics = metrics session;
+      goal = Metadata.goal (metadata session);
     }
 
   let summary t = t.summary
@@ -1193,6 +1195,7 @@ module Session_view = struct
   let workflow_mode t = t.workflow_mode
   let last_text t = t.last_text
   let metrics t = t.metrics
+  let goal t = t.goal
 
   let equal a b =
     Summary.equal a.summary b.summary
@@ -1202,6 +1205,7 @@ module Session_view = struct
     && Option.equal Contract.Mode.equal a.workflow_mode b.workflow_mode
     && Option.equal String.equal a.last_text b.last_text
     && Metrics.equal a.metrics b.metrics
+    && Option.equal Metadata.Goal.equal a.goal b.goal
 
   let pp ppf t =
     Format.fprintf ppf
@@ -1223,6 +1227,7 @@ module Session_view = struct
         workflow_mode
         last_text
         metrics
+        goal
       ->
         {
           summary;
@@ -1232,6 +1237,7 @@ module Session_view = struct
           workflow_mode;
           last_text;
           metrics;
+          goal;
         })
     |> Jsont.Object.mem "summary" Summary.jsont ~enc:(fun t -> t.summary)
     |> Jsont.Object.opt_mem "active_model" Mentat_llm.Model.jsont ~enc:(fun t ->
@@ -1243,6 +1249,7 @@ module Session_view = struct
         t.workflow_mode)
     |> Jsont.Object.opt_mem "last_text" Jsont.string ~enc:(fun t -> t.last_text)
     |> Jsont.Object.mem "metrics" Metrics.jsont ~enc:(fun t -> t.metrics)
+    |> Jsont.Object.opt_mem "goal" Metadata.Goal.jsont ~enc:(fun t -> t.goal)
     |> Jsont.Object.error_unknown |> Jsont.Object.finish
 end
 

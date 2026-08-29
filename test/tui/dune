@@ -37,6 +37,23 @@
   (pps ppx_windtrap)))
 
 (library
+ (name test_goal)
+ (modules test_goal)
+ (inline_tests)
+ (libraries
+  jsont
+  mentat_llm
+  lpath
+  mentat_permission
+  mentat_sandbox
+  mentat_session
+  mentat_tool
+  tui_harness
+  windtrap)
+ (preprocess
+  (pps ppx_windtrap)))
+
+(library
  (name test_turn)
  (modules test_turn)
  (inline_tests)

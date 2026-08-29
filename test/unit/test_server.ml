@@ -234,6 +234,7 @@ let default_lifecycle : Driver.Lifecycle.t =
   {
     Driver.Lifecycle.create = (fun ~id:_ ~title:_ -> Ok ());
     rename = (fun ~session:_ ~title:_ -> Ok ());
+    set_goal = (fun ~session:_ ~goal:_ -> Ok ());
     archive = (fun ~session:_ -> Ok ());
     restore = (fun ~session:_ -> Ok ());
     delete = (fun ~session:_ -> Ok ());

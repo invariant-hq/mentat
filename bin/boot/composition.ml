@@ -1491,6 +1491,28 @@ let lifecycle_cone t : Client.Driver.Lifecycle.t =
         | Ok () ->
             clear_overlays t session;
             Ok ());
+    set_goal =
+      (fun ~session ~goal ->
+        commit session ~transform:(fun s ->
+            (* The structural exclusivity, refused before the raising
+               setter: a delegation edge owns its child's contract, and a
+               trigger-born run already has a steward. *)
+            let metadata = Mentat_session.metadata s in
+            if
+              Option.is_some (Mentat_session.Metadata.delegated_from metadata)
+              && Option.is_some goal
+            then
+              Error
+                (Protocol_error.unavailable
+                   "a delegated session cannot carry a goal")
+            else if
+              Option.is_some (Mentat_session.Metadata.triggered_from metadata)
+              && Option.is_some goal
+            then
+              Error
+                (Protocol_error.unavailable
+                   "a trigger-born session cannot carry a goal")
+            else Ok (Mentat_session.set_goal goal s)));
     (* A scan-level failure surfaces as [Unavailable]. A successful scan keeps
        every healthy selected row and converts each corrupt fact once at its
        store owner for report-only remote consumers. *)

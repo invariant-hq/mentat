@@ -82,6 +82,11 @@ type fate =
       (** Drive the supervised build watch: [/dune restart] forgives a
           terminal state and cycles a fresh watch, [/dune stop] ends
           supervision for the session. *)
+  | Goal_command
+      (** Drive the standing goal: [/goal OBJECTIVE [--max-turns N]
+          [--budget USD]] declares one and arms the steward loop,
+          [/goal stop] retires it, [/goal resume] re-arms a recorded goal,
+          and bare [/goal] reports the standing state. *)
   | Init_project of string
       (** Submit the carried AGENTS.md initialization prompt as a Build turn. *)
   | Quit  (** Request process exit through the shell's guarded quit flow. *)

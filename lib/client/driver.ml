@@ -127,6 +127,10 @@ module Lifecycle = struct
       session:Mentat_session.Id.t -> (unit, Mentat_protocol.Error.t) result;
     delete :
       session:Mentat_session.Id.t -> (unit, Mentat_protocol.Error.t) result;
+    set_goal :
+      session:Mentat_session.Id.t ->
+      goal:Mentat_session.Metadata.Goal.t option ->
+      (unit, Mentat_protocol.Error.t) result;
     sessions :
       listing:Mentat_session.Listing.t ->
       ( Mentat_session.Summary.t list * Mentat_diagnostic.t list,

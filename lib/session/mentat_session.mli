@@ -455,6 +455,11 @@ module Session_view : sig
       by the frontend, never here — the session library takes no provider
       dependency. *)
 
+  val goal : t -> Metadata.Goal.t option
+  (** [goal t] is the session's recorded goal intent, if the owner has one
+      standing — how a frontend learns of a goal at attach, since metadata
+      never crosses the event feed. *)
+
   val equal : t -> t -> bool
   (** [equal a b] is [true] iff [a] and [b] carry the same view data. *)
 

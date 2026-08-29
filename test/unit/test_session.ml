@@ -5064,6 +5064,159 @@ let document_group =
                     ("key", Json.string "k");
                   ])
                json));
+      test "the goal_status claim reads tolerantly and its schema seals"
+        (fun () ->
+          let module Claim = Session.Metadata.Goal.Claim in
+          let claim = Testable.make ~pp:Claim.pp ~equal:Claim.equal in
+          let status ?note s =
+            json_object
+              (("status", Json.string s)
+              ::
+              (match note with
+              | None -> []
+              | Some n -> [ ("note", Json.string n) ]))
+          in
+          equal (option claim) ~msg:"done with a note"
+            (Some (Claim.Done (Some "all tests pass")))
+            (Claim.of_json (status ~note:"all tests pass" "done"));
+          equal (option claim) ~msg:"continuing with a note"
+            (Some (Claim.Continuing (Some "two failures left")))
+            (Claim.of_json (status ~note:"two failures left" "continuing"));
+          equal (option claim) ~msg:"a noteless claim carries no note"
+            (Some (Claim.Done None))
+            (Claim.of_json (status "done"));
+          equal (option claim) ~msg:"an empty note reads as no note"
+            (Some (Claim.Done None))
+            (Claim.of_json (status ~note:"" "done"));
+          equal (option claim) ~msg:"an unknown status is unreadable" None
+            (Claim.of_json (status "finished"));
+          equal (option claim) ~msg:"a missing status is unreadable" None
+            (Claim.of_json (json_object [ ("note", Json.string "n") ]));
+          equal (option claim) ~msg:"a non-object is unreadable" None
+            (Claim.of_json (Json.string "done"));
+          (* The schema a steward seals on a continuation turn must clear the
+             same subset gate every output schema clears, or the loop's first
+             turn refuses at run time. *)
+          match Llm.Schema.of_json Claim.schema with
+          | Ok _ -> ()
+          | Error e ->
+              failf "goal_status schema: %s" (Llm.Schema.Error.message e));
+      test "the steward decision table — the goal feature's law" (fun () ->
+          let module Goal = Session.Metadata.Goal in
+          let verdict =
+            Testable.make ~pp:Goal.Verdict.pp ~equal:Goal.Verdict.equal
+          in
+          let status ?note s =
+            json_object
+              (("status", Json.string s)
+              ::
+              (match note with
+              | None -> []
+              | Some n -> [ ("note", Json.string n) ]))
+          in
+          let goal ?max_turns ?budget () =
+            Goal.make ~objective:"get the suite green" ?max_turns ?budget ()
+          in
+          let decide ?(finished = true) ?claim ?(continuations = 0) ?spent g =
+            Goal.decide g ~finished ~claim ~continuations ~spent
+          in
+          equal (option verdict)
+            ~msg:"unfinished decides nothing, claim or not" None
+            (decide ~finished:false ~claim:(status "done") (goal ()));
+          equal (option verdict) ~msg:"a done claim stops the loop"
+            (Some (Goal.Verdict.Done (Some "shipped")))
+            (decide ~claim:(status ~note:"shipped" "done") (goal ()));
+          equal (option verdict) ~msg:"a continuing claim continues"
+            (Some Goal.Verdict.Continue)
+            (decide ~claim:(status "continuing") (goal ()));
+          equal (option verdict) ~msg:"an absent claim continues"
+            (Some Goal.Verdict.Continue) (decide (goal ()));
+          equal (option verdict) ~msg:"an unreadable claim continues"
+            (Some Goal.Verdict.Continue)
+            (decide ~claim:(status "maybe") (goal ()));
+          equal (option verdict)
+            ~msg:"a boundless goal has only the owner and done"
+            (Some Goal.Verdict.Continue)
+            (decide ~continuations:10_000 ~spent:1000. (goal ()));
+          (* The turn-bound edges. *)
+          let bounded = goal ~max_turns:3 () in
+          equal (option verdict) ~msg:"under the bound continues"
+            (Some Goal.Verdict.Continue)
+            (decide ~continuations:2 bounded);
+          equal (option verdict) ~msg:"the spent bound stops"
+            (Some Goal.Verdict.Bound_reached)
+            (decide ~continuations:3 bounded);
+          equal (option verdict) ~msg:"a done claim beats the spent bound"
+            (Some (Goal.Verdict.Done None))
+            (decide ~continuations:3 ~claim:(status "done") bounded);
+          (* The budget edges. *)
+          let budgeted = goal ~budget:5.0 () in
+          equal (option verdict) ~msg:"under the budget continues"
+            (Some Goal.Verdict.Continue)
+            (decide ~spent:4.99 budgeted);
+          equal (option verdict) ~msg:"the spent budget stops"
+            (Some Goal.Verdict.Budget_spent)
+            (decide ~spent:5.0 budgeted);
+          equal (option verdict) ~msg:"an unpriced spend trips no budget"
+            (Some Goal.Verdict.Continue) (decide budgeted);
+          equal (option verdict) ~msg:"a done claim beats the spent budget"
+            (Some (Goal.Verdict.Done None))
+            (decide ~spent:9.0 ~claim:(status "done") budgeted);
+          equal (option verdict)
+            ~msg:"the turn bound is named before the budget"
+            (Some Goal.Verdict.Bound_reached)
+            (decide ~continuations:3 ~spent:9.0
+               (goal ~max_turns:3 ~budget:5.0 ())));
+      test "the continuation framing and its journal-derived counter"
+        (fun () ->
+          let module Goal = Session.Metadata.Goal in
+          let objective = "get the suite green" in
+          let framed = Goal.continuation ~objective in
+          is_true ~msg:"the framing names the goal"
+            (String.starts_with
+               ~prefix:"Continuing toward the goal: get the suite green"
+               framed);
+          is_true ~msg:"the framing carries the goal_status instruction"
+            (let sub = "goal_status" in
+             let rec go i =
+               i + String.length sub <= String.length framed
+               && (String.equal (String.sub framed i (String.length sub)) sub
+                  || go (i + 1))
+             in
+             go 0);
+          let turns_of inputs =
+            List.concat
+              (List.mapi
+                 (fun i text ->
+                   let t =
+                     turn
+                       ~id:(Printf.sprintf "gt-%d" i)
+                       ~input:(Session.Turn.Input.user_text text) ()
+                   in
+                   [ Event.turn_started t; finish t ])
+                 inputs)
+          in
+          let count ~objective inputs =
+            Goal.continuations ~objective
+              (Session.State.turns (state (turns_of inputs)))
+          in
+          equal int ~msg:"framed turns for this exact objective count" 2
+            (count ~objective
+               [
+                 "start the work";
+                 framed;
+                 "an ordinary owner question";
+                 framed;
+                 Goal.continuation ~objective:(objective ^ " and the docs");
+               ]);
+          equal int ~msg:"another objective keeps its own ledger" 1
+            (count
+               ~objective:(objective ^ " and the docs")
+               [ framed; Goal.continuation ~objective:(objective ^ " and the docs") ]);
+          equal int
+            ~msg:"an objective that is a prefix of another counts nothing" 0
+            (count ~objective:"get the suite" [ framed ]);
+          equal int ~msg:"an empty journal counts zero" 0 (count ~objective []));
       test "jsont rejects unsupported versions and unknown members" (fun () ->
           let json = encode Session.jsont (saved (journal ()).events) in
           (* Versions 2 (structured-output), 3 (durable workspace notices), 4

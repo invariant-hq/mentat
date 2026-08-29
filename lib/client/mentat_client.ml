@@ -231,6 +231,10 @@ let delete t ~session:id =
   protect "delete" (fun () ->
       (lifecycle_cone t).Driver.Lifecycle.delete ~session:id)
 
+let set_goal t ~session:id ~goal =
+  protect "set_goal" (fun () ->
+      (lifecycle_cone t).Driver.Lifecycle.set_goal ~session:id ~goal)
+
 let fork t ~session:id ~into () =
   protect "fork" (fun () ->
       (session_cone t).Driver.Session.fork ~session:id ~into)

@@ -284,6 +284,15 @@ module Lifecycle : sig
       session:Mentat_session.Id.t -> (unit, Mentat_protocol.Error.t) result;
         (** [delete ~session] durably marks [session] deleted. Deletion has no
             inverse. *)
+    set_goal :
+      session:Mentat_session.Id.t ->
+      goal:Mentat_session.Metadata.Goal.t option ->
+      (unit, Mentat_protocol.Error.t) result;
+        (** [set_goal ~session ~goal] durably records standing goal intent on
+            [session], or retires it ([None]) — the owner verb behind
+            [/goal] and [/goal stop]. The commit needs the session's run
+            fence, so against a session whose agent is live the responder may
+            answer [Busy] naming the holder. *)
     sessions :
       listing:Mentat_session.Listing.t ->
       ( Mentat_session.Summary.t list * Mentat_diagnostic.t list,

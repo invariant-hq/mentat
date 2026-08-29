@@ -1428,7 +1428,7 @@ let goal_turn t ~client ~session ~max_steps ~text =
   match
     Command.prompt ~session ~turn
       ~input:[ Mentat_llm.Content.text text ]
-      ?max_steps ~output_schema:Goal_steward.Claim.schema ()
+      ?max_steps ~output_schema:Session.Metadata.Goal.Claim.schema ()
   with
   | Error _ -> `Status (Exit_status.usage "prompt must not be empty")
   | Ok cmd -> (
@@ -1456,11 +1456,9 @@ let goal_turn t ~client ~session ~max_steps ~text =
 
 (* The loop: read the document, decide, act. Outstanding work always runs
    first (the not-finished arm), so a re-armed goal never stomps queued mail
-   or an unfinished head; a step-limited continuation is unfinished work by
-   the same journal read, never a loop fault. A head turn that settled
-   [Failed] ends the loop loudly: nothing was claimed because nothing ran,
-   and continuing would re-spend on broken machinery — the table's
-   opt-out semantics govern the model's declarations, not faults. *)
+   or an unfinished head; the step-limit and failed-head readings live on
+   their settle arm below — bounded work continues, a machinery fault stops
+   the loop loudly. *)
 let drive_goal t ~client ~max_steps ~session goal =
   let objective = Session.Metadata.Goal.objective goal in
   let head_outcome doc =
@@ -1485,11 +1483,14 @@ let drive_goal t ~client ~max_steps ~session goal =
           || Session.State.turns state = []
              && Session.State.pending_queue state = []
         in
+        let continuations =
+          Session.Metadata.Goal.continuations ~objective
+            (Session.State.turns state)
+        in
         match
-          Goal_steward.decide ~goal ~finished
+          Session.Metadata.Goal.decide goal ~finished
             ~claim:(Mentat_agent.Catalog.claim s)
-            ~continuations:(Goal_steward.continuations ~objective s)
-            ~spent:(goal_spend t view)
+            ~continuations ~spent:(goal_spend t view)
         with
         | None -> (
             (* Outstanding work precedes the loop's own next move. *)
@@ -1498,11 +1499,11 @@ let drive_goal t ~client ~max_steps ~session goal =
             with
             | Exit_status.Success -> loop ()
             | status -> status)
-        | Some (Goal_steward.Verdict.Done note) ->
+        | Some (Session.Metadata.Goal.Verdict.Done note) ->
             Output.stderr_printf "mentat: goal declared done%s\n"
               (match note with None -> "" | Some note -> ": " ^ note);
             Exit_status.Success
-        | Some Goal_steward.Verdict.Bound_reached ->
+        | Some Session.Metadata.Goal.Verdict.Bound_reached ->
             Exit_status.runtime
               (Printf.sprintf
                  "the goal's turn bound (%d) is spent without a done \
@@ -1511,7 +1512,7 @@ let drive_goal t ~client ~max_steps ~session goal =
                  (Option.value ~default:0
                     (Session.Metadata.Goal.max_turns goal))
                  (shell_quote (Id.to_string session)))
-        | Some Goal_steward.Verdict.Budget_spent ->
+        | Some Session.Metadata.Goal.Verdict.Budget_spent ->
             Exit_status.runtime
               (Printf.sprintf
                  "the goal's budget ($%.2f) is spent without a done \
@@ -1520,31 +1521,43 @@ let drive_goal t ~client ~max_steps ~session goal =
                  (Option.value ~default:0.
                     (Session.Metadata.Goal.budget goal))
                  (shell_quote (Id.to_string session)))
-        | Some Goal_steward.Verdict.Continue -> (
+        | Some Session.Metadata.Goal.Verdict.Continue -> (
             Output.stderr_printf "mentat: continuing toward the goal%s\n"
               (match Session.Metadata.Goal.max_turns goal with
               | Some bound ->
-                  Printf.sprintf " (turn %d of %d)"
-                    (Goal_steward.continuations ~objective s + 1)
-                    bound
-              | None ->
-                  Printf.sprintf " (turn %d)"
-                    (Goal_steward.continuations ~objective s + 1));
+                  Printf.sprintf " (turn %d of %d)" (continuations + 1) bound
+              | None -> Printf.sprintf " (turn %d)" (continuations + 1));
             match
               goal_turn t ~client ~session ~max_steps
-                ~text:(Goal_steward.continuation ~objective)
+                ~text:(Session.Metadata.Goal.continuation ~objective)
             with
             | `Race -> loop ()
             | `Status Exit_status.Success -> loop ()
-            | `Status (Exit_status.Runtime_error _ as status) -> (
-                (* The render maps a step-limited turn and a failed turn to
-                   the same status; the journal separates them. *)
+            | `Status (Exit_status.Runtime_error message as status) -> (
+                (* The render maps every non-completed settle to the same
+                   status; the journal separates the arms. A step-limit
+                   head is bounded work and continues. A FAILED head stops
+                   the loop loudly: the opt-out law governs the model's
+                   declarations, never machinery — the provider retry
+                   layer already absorbed the transient blips, so a failed
+                   turn is usually persistent and continuing would burn
+                   the bound on repeats. Resume re-arms after the owner
+                   looks. A render-side fault (a lost feed) owns the exit
+                   as itself. *)
                 match
                   Mentat_store.Session.load (Composition.store t) session
                 with
                 | Ok doc -> (
                     match head_outcome doc with
                     | Some Turn.Outcome.Step_limit -> loop ()
+                    | Some (Turn.Outcome.Failed _) ->
+                        Output.stderr_printf
+                          "mentat: %s; the goal stops here — re-arm with \
+                           `mentat run resume %s` once the cause is \
+                           addressed\n"
+                          message
+                          (shell_quote (Id.to_string session));
+                        status
                     | Some _ | None -> status)
                 | Error _ -> status)
             | `Status status -> status))

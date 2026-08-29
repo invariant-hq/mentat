@@ -207,6 +207,25 @@ type command =
     }
       (** Set the explicit display title of [session]. Fold acknowledgement or
           failure through the correlated command-result constructors. *)
+  | Set_goal of {
+      request : request;
+      session : Mentat_session.Id.t;
+      goal : Mentat_session.Metadata.Goal.t option;
+    }
+      (** Durably record ([Some]) or retire ([None]) [session]'s standing
+          goal intent — the owner verb behind [/goal] and [/goal stop]. Fold
+          acknowledgement or failure through the correlated command-result
+          constructors; a failure leaves the loop armed for this process with
+          its non-durable standing narrated. *)
+  | Goal_continue of {
+      request : request;
+      session : Mentat_session.Id.t;
+      prompt : string;
+    }
+      (** Submit one framed goal continuation turn, sealed under the
+          [goal_status] output schema
+          ({!Mentat_session.Metadata.Goal.Claim.schema}). Fold acknowledgement
+          or failure through the correlated command-result constructors. *)
   | Archive_session of { request : request; session : Mentat_session.Id.t }
       (** Move the exact active [session] to the archived lifecycle. *)
   | Restore_session of { request : request; session : Mentat_session.Id.t }

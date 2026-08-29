@@ -96,6 +96,16 @@ type command =
       session : Session.Id.t;
       title : string;
     }
+  | Set_goal of {
+      request : request;
+      session : Session.Id.t;
+      goal : Session.Metadata.Goal.t option;
+    }
+  | Goal_continue of {
+      request : request;
+      session : Session.Id.t;
+      prompt : string;
+    }
   | Archive_session of { request : request; session : Session.Id.t }
   | Restore_session of { request : request; session : Session.Id.t }
   | Delete_session of { request : request; session : Session.Id.t }
@@ -318,6 +328,12 @@ type pending_kind =
   | Archive
   | Restore
   | Delete
+  | Goal_write of Session.Metadata.Goal.t option
+    (* The durable intent write behind /goal and /goal stop; the carried
+         value narrates record vs retire at completion. *)
+  | Goal_turn
+    (* A steward continuation submission in flight: the guard that keeps one
+         finished reading from mailing twice before the turn starts. *)
   | Answer of Session.Decision.Id.t
   | Model_selection of {
       session : Session.Id.t;
@@ -421,6 +437,25 @@ type t = {
   surface : surface;
   completion : completion;
   queue : Session.Queue.Entry.t list;
+  goal_intent : Session.Metadata.Goal.t option;
+      (* The session's recorded goal as last known: adopted from each fresh
+         session view, set optimistically by /goal while its write is in
+         flight. *)
+  goal_armed : bool;
+      (* Whether this terminal stewards the goal — the loop is process-bound;
+         a standing goal re-arms only through /goal resume. *)
+  goal_framed : string list;
+      (* The objectives of the framed continuation turns seen on the feed, in
+         journal order — the derived continuation counter's fold
+         ({!Session.Metadata.Goal.framed_objective}), rebuilt whole by a
+         from-the-beginning replay. *)
+  goal_claim : Jsont.json option;
+      (* The last structured-output claim of the running or just-settled
+         turn; reset at each turn start. Read as the goal_status claim only
+         when the head settled Completed. *)
+  goal_offered : bool;
+      (* Whether the resume-offer notice ran for this attachment, so a
+         standing goal is offered once, never on every view refresh. *)
   changes : Change.t list;
   last_usage : Mentat_llm.Usage.t option;
       (* The most recent whole-response provider usage on the active feed. Its
@@ -1075,6 +1110,11 @@ let initial_model ~now ~(startup : Startup.t) ~capabilities ~reduced_motion
     session_view_request = None;
     pending_decision_request = None;
     possibly_mutating = false;
+    goal_intent = None;
+    goal_armed = false;
+    goal_framed = [];
+    goal_claim = None;
+    goal_offered = false;
     all_accounts_missing = false;
     account_readiness_request = None;
     model_readiness_request = None;
@@ -1260,6 +1300,11 @@ let reset_conversation t =
     completion = No_completion;
     rewind = None;
     queue = [];
+    goal_intent = None;
+    goal_armed = false;
+    goal_framed = [];
+    goal_claim = None;
+    goal_offered = false;
     changes = [];
     last_usage = None;
     glance = None;
@@ -1731,10 +1776,19 @@ let fold_fact ~now fact t =
       let contract = Session.Turn.contract turn in
       let t =
         remove_pending_kind
-          (function Start | Submission -> true | _ -> false)
+          (function Start | Submission | Goal_turn -> true | _ -> false)
           t
       in
       let t = record_turn_origin ~now ~prefix:prefix_len turn t in
+      let goal_framed =
+        match
+          Option.bind
+            (Session.Turn.Input.text (Session.Turn.input turn))
+            Session.Metadata.Goal.framed_objective
+        with
+        | Some objective -> t.goal_framed @ [ objective ]
+        | None -> t.goal_framed
+      in
       ( {
           t with
           current_snapshot = model_snapshot t turn t.current_snapshot;
@@ -1742,6 +1796,8 @@ let fold_fact ~now fact t =
           current_review = Session.Contract.review contract;
           flash = None;
           queue = consume_queued turn t.queue;
+          goal_framed;
+          goal_claim = None;
         },
         [] )
   | Protocol.Fact.Decision_requested requested ->
@@ -1835,8 +1891,23 @@ let fold_fact ~now fact t =
               (restore_draft a.undo_restored { t with undo_armed = None }, [])
           | None -> (t, [])))
   | Protocol.Fact.Turn_assistant _ | Protocol.Fact.Turn_assistant_interrupted _
-  | Protocol.Fact.Turn_provider_failed _ | Protocol.Fact.Turn_message _
-  | Protocol.Fact.Tool_started _ | Protocol.Fact.Tool_prepared _
+  | Protocol.Fact.Turn_provider_failed _ | Protocol.Fact.Turn_message _ ->
+      (t, [])
+  | Protocol.Fact.Tool_started started ->
+      (* The head turn's structured-output claim, captured as it lands. The
+         tool name is the engine's reserved [structured_output]
+         ([Mentat_agent.Catalog.output_tool_name]) — a stable product
+         contract this frontend spells rather than links the engine for. *)
+      if
+        String.equal
+          (Mentat_llm.Tool.Call.name
+             (Session.Tool_claim.Started.call started))
+          "structured_output"
+      then
+        ( { t with goal_claim = Some (Session.Tool_claim.Started.input started) },
+          [] )
+      else (t, [])
+  | Protocol.Fact.Tool_prepared _
   | Protocol.Fact.Tool_returned _ | Protocol.Fact.Tool_ambiguous _
   | Protocol.Fact.Compaction _ | Protocol.Fact.Workspace_notice _ ->
       (t, [])
@@ -1886,6 +1957,234 @@ let command_label command =
   match Command.slash command with
   | Some slash -> slash
   | None -> Command.title command
+
+(* Cumulative session spend: the whole session's metered usage priced by the
+   active model's catalog rate. It is distinct from the occupancy the [context]
+   rows show, and it is withheld — never a fabricated zero — when the catalog
+   carries no rate for the model. A view still describing a previous conversation
+   contributes nothing. *)
+let workspace_spent t =
+  match (t.active_session, t.session_view) with
+  | Some session, Some view when session_view_matches session view ->
+      let usage = (Session.Session_view.metrics view).Session.Metrics.usage in
+      let model =
+        match
+          Mentat_provider.Selector.of_string (Snapshot.model t.current_snapshot)
+        with
+        | Ok selector -> model_catalog t selector
+        | Error _ -> None
+      in
+      Option.bind model (fun model -> Mentat_provider.Model.cost model usage)
+  | _, None | None, _ | Some _, Some _ -> None
+
+(* The TUI steward (RFC 0027). The vocabulary — the claim, the verdict
+   table, the framing, the counter's parse — is the session library's
+   ({!Session.Metadata.Goal}); this block only gathers the decision's inputs
+   from the reducer's own folds and acts on the verdict. The loop is
+   process-bound: /goal arms it, an interrupt pauses it, and a standing goal
+   found at attach is offered, never auto-spent. *)
+
+let goal_notice text = Notice.Event (Prims.normalize_inline ("● " ^ text))
+
+let goal_continuations objective t =
+  List.length (List.filter (String.equal objective) t.goal_framed)
+
+let goal_turn_label goal ~next t =
+  let turns =
+    goal_continuations (Session.Metadata.Goal.objective goal) t
+    + if next then 1 else 0
+  in
+  match Session.Metadata.Goal.max_turns goal with
+  | Some bound -> Printf.sprintf "turn %d of %d" turns bound
+  | None -> Printf.sprintf "turn %d" turns
+
+let goal_status_line t =
+  match t.goal_intent with
+  | None -> "no goal; /goal OBJECTIVE declares one"
+  | Some goal ->
+      Printf.sprintf "goal %s: %s (%s)"
+        (if t.goal_armed then "(armed)" else "(paused; /goal resume re-arms)")
+        (Session.Metadata.Goal.objective goal)
+        (goal_turn_label goal ~next:false t)
+
+let goal_write_pending t =
+  List.exists
+    (fun pending ->
+      match pending.pending_kind with Goal_write _ -> true | _ -> false)
+    t.pending
+
+let goal_turn_pending t =
+  List.exists
+    (fun pending ->
+      match pending.pending_kind with Goal_turn -> true | _ -> false)
+    t.pending
+
+(* The reducer's finished reading over a fresh view: nothing running, nothing
+   queued, nothing of the user's in flight — pending input means not
+   finished, so the owner preempts the loop by construction. *)
+let goal_finished view t =
+  Option.is_none (Session.Session_view.waiting view)
+  && t.queue = []
+  && (not (turn_in_flight t))
+  && (not (submission_pending t))
+  && (not (goal_turn_pending t))
+  && Option.is_none t.undo_armed
+
+(* Adopt the fresh view's recorded intent (unless our own write is still in
+   flight and a pre-write read would clobber it), and offer a standing goal
+   once per attachment — unless its head already declared done, which is a
+   concluded goal, not an offer. *)
+let goal_learn view t =
+  if goal_write_pending t then t
+  else
+    let intent = Session.Session_view.goal view in
+    let t = { t with goal_intent = intent } in
+    match intent with
+    | Some goal when (not t.goal_armed) && not t.goal_offered -> (
+        let t = { t with goal_offered = true } in
+        let declared_done =
+          match Session.Session_view.last_outcome view with
+          | Some Session.Turn.Outcome.Completed -> (
+              match
+                Option.bind t.goal_claim Session.Metadata.Goal.Claim.of_json
+              with
+              | Some (Session.Metadata.Goal.Claim.Done _) -> true
+              | Some (Session.Metadata.Goal.Claim.Continuing _) | None -> false)
+          | Some _ | None -> false
+        in
+        if declared_done then t
+        else
+          update_chat
+            (append_notice
+               (goal_notice
+                  (Printf.sprintf
+                     "a goal stands: %s — /goal resume re-arms it"
+                     (Session.Metadata.Goal.objective goal))))
+            t)
+    | Some _ | None -> t
+
+(* One steward decision, run at each fresh view install. *)
+let goal_step t =
+  match (t.goal_intent, t.active_session, t.session_view) with
+  | Some goal, Some session, Some view
+    when t.goal_armed && session_view_matches session view -> (
+      if not (goal_finished view t) then (t, [])
+      else
+        match Session.Session_view.last_outcome view with
+        | Some (Session.Turn.Outcome.Interrupted _) ->
+            (* The owner stopped the work; continuing over an interrupt would
+               fight the hand on the wheel. The intent stands. *)
+            ( update_chat
+                (append_notice
+                   (goal_notice
+                      "goal paused by the interrupt — /goal resume re-arms it"))
+                { t with goal_armed = false },
+              [] )
+        | Some (Session.Turn.Outcome.Failed _) ->
+            (* A failed turn is machinery, not a declaration: the provider
+               retry layer absorbed the transient blips before the turn
+               failed, so continuing would burn the bound on repeats. The
+               intent stands; the owner re-arms after looking. *)
+            ( update_chat
+                (append_notice
+                   (goal_notice
+                      "goal stopped: the last turn failed — /goal resume \
+                       re-arms it once the cause is addressed"))
+                { t with goal_armed = false },
+              [] )
+        | outcome -> (
+            let objective = Session.Metadata.Goal.objective goal in
+            let claim =
+              match outcome with
+              | Some Session.Turn.Outcome.Completed -> t.goal_claim
+              | Some _ | None -> None
+            in
+            match
+              Session.Metadata.Goal.decide goal ~finished:true ~claim
+                ~continuations:(goal_continuations objective t)
+                ~spent:(workspace_spent t)
+            with
+            | None -> (t, [])
+            | Some Session.Metadata.Goal.Verdict.Continue ->
+                let request, t = fresh_request t in
+                let t = add_pending request Goal_turn t in
+                ( {
+                    t with
+                    flash =
+                      Some
+                        (Printf.sprintf "continuing toward the goal (%s)"
+                           (goal_turn_label goal ~next:true t));
+                  },
+                  [
+                    Goal_continue
+                      {
+                        request;
+                        session;
+                        prompt = Session.Metadata.Goal.continuation ~objective;
+                      };
+                  ] )
+            | Some (Session.Metadata.Goal.Verdict.Done note) ->
+                ( update_chat
+                    (append_notice
+                       (goal_notice
+                          (match note with
+                          | None -> "goal declared done"
+                          | Some note -> "goal declared done: " ^ note)))
+                    { t with goal_armed = false },
+                  [] )
+            | Some Session.Metadata.Goal.Verdict.Bound_reached ->
+                ( update_chat
+                    (append_notice
+                       (goal_notice
+                          (Printf.sprintf
+                             "goal stopped: the turn bound (%d) is spent — /goal with a higher --max-turns re-arms it"
+                             (Option.value ~default:0
+                                (Session.Metadata.Goal.max_turns goal)))))
+                    { t with goal_armed = false },
+                  [] )
+            | Some Session.Metadata.Goal.Verdict.Budget_spent ->
+                ( update_chat
+                    (append_notice
+                       (goal_notice
+                          (Printf.sprintf
+                             "goal stopped: the budget ($%.2f) is spent — /goal with a higher --budget re-arms it"
+                             (Option.value ~default:0.
+                                (Session.Metadata.Goal.budget goal)))))
+                    { t with goal_armed = false },
+                  [] )))
+  | _ -> (t, [])
+
+(* The /goal declaration grammar: OBJECTIVE with trailing bounds. Tokens are
+   whitespace-split, so a fresh declaration records a space-normalized
+   objective; the framing and the counter use the recorded string
+   consistently, so the normalization is invisible downstream. *)
+let parse_goal_declaration raw =
+  let tokens =
+    String.split_on_char ' ' raw
+    |> List.filter (fun token -> not (String.equal token ""))
+  in
+  let rec strip rev max_turns budget =
+    match rev with
+    | value :: "--max-turns" :: rest when Option.is_none max_turns -> (
+        match int_of_string_opt value with
+        | Some n when n > 0 -> strip rest (Some n) budget
+        | Some _ | None -> Error "--max-turns takes a positive count")
+    | value :: "--budget" :: rest when Option.is_none budget -> (
+        match float_of_string_opt value with
+        | Some b when b > 0. -> strip rest max_turns (Some b)
+        | Some _ | None -> Error "--budget takes a positive dollar amount")
+    | _ -> Ok (List.rev rev, max_turns, budget)
+  in
+  match strip (List.rev tokens) None None with
+  | Error _ as error -> error
+  | Ok ([], _, _) ->
+      Error "usage: /goal OBJECTIVE [--max-turns N] [--budget USD]"
+  | Ok (words, max_turns, budget) ->
+      Ok
+        (Session.Metadata.Goal.make
+           ~objective:(String.concat " " words)
+           ?max_turns ?budget ())
+
 
 let echo_command command t =
   if not (Command.echoes command) then t
@@ -2030,6 +2329,7 @@ let command_targets_conversation command =
   | Command.Clear_session | Command.Fork_session | Command.Rewind_session
   | Command.Undo_session | Command.Redo_session | Command.Compact_session
   | Command.Rename_session | Command.Init_project _ -> true
+  | Command.Goal_command -> true
   | Command.Open_model | Command.Open_theme | Command.Open_sessions
   | Command.Open_settings _ | Command.Open_login | Command.Open_logout
   | Command.Switch_mode _ | Command.Toggle_thinking | Command.Toggle_verbose
@@ -2192,6 +2492,73 @@ let rec dispatch_command ?argument command t =
             ({ t with flash = Some "dune: watch stopped" }, [ verb ])
         | Some _ | None ->
             ({ t with flash = Some "usage: /dune restart|stop" }, []))
+    | Command.Goal_command -> (
+        match t.active_session with
+        | None -> ({ t with flash = Some "no active session for a goal" }, [])
+        | Some session -> (
+            match argument with
+            | None -> ({ t with flash = Some (goal_status_line t) }, [])
+            | Some "stop" -> (
+                match t.goal_intent with
+                | None -> ({ t with flash = Some "no goal to stop" }, [])
+                | Some _ ->
+                    let request, t = fresh_request t in
+                    let t = add_pending request (Goal_write None) t in
+                    let t =
+                      { t with goal_intent = None; goal_armed = false }
+                    in
+                    ( update_chat (append_notice (goal_notice "goal stopped")) t,
+                      [ Set_goal { request; session; goal = None } ] ))
+            | Some "resume" -> (
+                match t.goal_intent with
+                | None ->
+                    ( {
+                        t with
+                        flash =
+                          Some
+                            "no goal recorded on this session; /goal OBJECTIVE declares one";
+                      },
+                      [] )
+                | Some goal ->
+                    (* Re-arm, then read a fresh view: the loop's first
+                       decision runs when it lands. *)
+                    let t = { t with goal_armed = true } in
+                    let t =
+                      update_chat
+                        (append_notice
+                           (goal_notice
+                              ("goal re-armed: "
+                              ^ Session.Metadata.Goal.objective goal)))
+                        t
+                    in
+                    let t, view = issue_session_view session t in
+                    (t, [ view ]))
+            | Some raw -> (
+                match parse_goal_declaration raw with
+                | Error message -> ({ t with flash = Some message }, [])
+                | Ok goal ->
+                    let request, t = fresh_request t in
+                    let t = add_pending request (Goal_write (Some goal)) t in
+                    let t =
+                      {
+                        t with
+                        goal_intent = Some goal;
+                        goal_armed = true;
+                        goal_offered = true;
+                      }
+                    in
+                    let t =
+                      update_chat
+                        (append_notice
+                           (goal_notice
+                              ("goal declared: "
+                              ^ Session.Metadata.Goal.objective goal)))
+                        t
+                    in
+                    let t, view = issue_session_view session t in
+                    ( t,
+                      [ Set_goal { request; session; goal = Some goal }; view ]
+                    ))))
     | Command.Undo_session -> (
         match t.active_session with
         | None -> ({ t with flash = Some "undo: no active session" }, [])
@@ -3870,7 +4237,10 @@ let load_session_view_result ~request ~session result t =
   guard_request_session t.session_view_request request ~session t @@ fun t ->
   let t = { t with session_view_request = None } in
   match result with
-  | Ok view -> (install_session_view session view t, [])
+  | Ok view ->
+      let t = install_session_view session view t in
+      if not (session_view_matches session view) then (t, [])
+      else goal_step (goal_learn view t)
   | Error error -> (command_error error t, [])
 
 let load_pending_decision_result ~request ~session result t =
@@ -4082,6 +4452,19 @@ let command_succeeded_result request t =
     | Some { pending_kind = Rename | Archive | Restore | Delete; _ } ->
         let _, t = take_pending request t in
         refresh_session_screen t
+    | Some { pending_kind = Goal_write intent; _ } ->
+        let _, t = take_pending request t in
+        ( update_chat
+            (append_notice
+               (goal_notice
+                  (match intent with
+                  | Some _ -> "goal recorded in the session document"
+                  | None -> "goal retired from the session document")))
+            t,
+          [] )
+    | Some { pending_kind = Goal_turn; _ } ->
+        let _, t = take_pending request t in
+        (t, [])
     | None -> (t, [])
 
 let child_request_pending request t =
@@ -4180,6 +4563,34 @@ let command_failed_result request error t =
     | Some { pending_kind = Rename | Archive | Restore | Delete; _ } ->
         let t = clear_child_request request error t in
         (session_mutation_failed error t, [])
+    | Some { pending_kind = Goal_write _; _ } ->
+        (* The offline twin could not commit — a live agent holds the fence,
+           or the write was refused. The loop stays armed for this terminal;
+           the durable record is the documented limitation until the
+           intent-write ruling lands. *)
+        ( update_chat
+            (append_notice
+               (goal_notice
+                  (Printf.sprintf
+                     "goal not recorded in the session document (%s); it stands for this terminal only"
+                     (error_text error))))
+            t,
+          [] )
+    | Some { pending_kind = Goal_turn; _ } -> (
+        match error with
+        | Protocol.Error.Active_turn_exists _ ->
+            (* The benign race: work arrived between the finished reading and
+               the submission; the loop re-decides at the next settle. *)
+            (t, [])
+        | _ ->
+            ( update_chat
+                (append_notice
+                   (goal_notice
+                      (Printf.sprintf
+                         "goal paused: the continuation was refused (%s) — /goal resume retries"
+                         (error_text error))))
+                { t with goal_armed = false },
+              [] ))
     | Some { pending_kind = Rewind { draft; _ }; _ } ->
         (* A rewind or its follow failed before the child was admitted: the feed
            is untouched and nothing was discarded, so restore the edited message
@@ -4734,7 +5145,8 @@ let dispatch_registry_impl ?argument command t =
   | Command.Open_theme | Command.Open_sessions | Command.Open_settings _
   | Command.Open_login | Command.Open_logout | Command.Switch_mode _
   | Command.Toggle_thinking | Command.Toggle_verbose | Command.Open_review
-  | Command.Dune_command | Command.Init_project _ | Command.Quit ->
+  | Command.Dune_command | Command.Goal_command | Command.Init_project _
+  | Command.Quit ->
       dispatch_command ?argument command t
 
 let () = dispatch_registry_hook := dispatch_registry_impl
@@ -5286,25 +5698,6 @@ let workspace_changed t =
   match t.changes with
   | [] -> None
   | _ :: _ -> Some (Change.of_changes t.changes)
-
-(* Cumulative session spend: the whole session's metered usage priced by the
-   active model's catalog rate. It is distinct from the occupancy the [context]
-   rows show, and it is withheld — never a fabricated zero — when the catalog
-   carries no rate for the model. A view still describing a previous conversation
-   contributes nothing. *)
-let workspace_spent t =
-  match (t.active_session, t.session_view) with
-  | Some session, Some view when session_view_matches session view ->
-      let usage = (Session.Session_view.metrics view).Session.Metrics.usage in
-      let model =
-        match
-          Mentat_provider.Selector.of_string (Snapshot.model t.current_snapshot)
-        with
-        | Ok selector -> model_catalog t selector
-        | Error _ -> None
-      in
-      Option.bind model (fun model -> Mentat_provider.Model.cost model usage)
-  | _, None | None, _ | Some _, Some _ -> None
 
 (* The two independent poll signals. The worktree diff is absent until the
    first glance returns; the tooling status defaults to [Off Disabled] (no
@@ -5859,7 +6252,8 @@ let sessions_verb_of_fate = function
   | Command.Open_theme | Command.Open_sessions | Command.Open_settings _
   | Command.Open_login | Command.Open_logout | Command.Switch_mode _
   | Command.Toggle_thinking | Command.Toggle_verbose | Command.Open_review
-  | Command.Dune_command | Command.Init_project _ | Command.Quit
+  | Command.Dune_command | Command.Goal_command | Command.Init_project _
+  | Command.Quit
   | Command.Interrupt | Command.Toggle_expanded | Command.Transcript_page _
   | Command.Focus_switch
   | Command.History_search | Command.Edit_in_editor | Command.Open_palette
@@ -5885,7 +6279,8 @@ let review_verb_of_fate = function
   | Command.Open_theme | Command.Open_sessions | Command.Open_settings _
   | Command.Open_login | Command.Open_logout | Command.Switch_mode _
   | Command.Toggle_thinking | Command.Toggle_verbose | Command.Open_review
-  | Command.Dune_command | Command.Init_project _ | Command.Quit
+  | Command.Dune_command | Command.Goal_command | Command.Init_project _
+  | Command.Quit
   | Command.Interrupt | Command.Toggle_expanded | Command.Transcript_page _
   | Command.Focus_switch
   | Command.History_search | Command.Edit_in_editor | Command.Open_palette
@@ -5940,8 +6335,8 @@ let key_message t event =
     | Command.Open_theme | Command.Open_sessions | Command.Open_settings _
     | Command.Open_login | Command.Open_logout | Command.Switch_mode _
     | Command.Toggle_thinking | Command.Toggle_verbose | Command.Open_review
-    | Command.Dune_command | Command.Copy_selection | Command.Init_project _
-    | Command.Quit ->
+    | Command.Dune_command | Command.Goal_command | Command.Copy_selection
+    | Command.Init_project _ | Command.Quit ->
         emit (Run_command command)
     | Command.Sessions_fork | Command.Sessions_rename | Command.Sessions_archive
     | Command.Sessions_restore | Command.Sessions_delete | Command.Review_toggle

@@ -130,3 +130,21 @@ continue — the fresh objective runs and the declaration ends it.
   $ wait_child_exit plain
   $ grep 'goal declared done' plain2.err
   mentat: goal declared done: polished
+
+A failed continuation stops the loop loudly: three claimless answers spend
+the schema-retry budget, the turn settles Failed, and the steward stops
+with the failure and the re-arm hint — machinery is never a continue, and
+only the human's resume re-arms it.
+
+  $ cat > fail.jsonl <<'JSONL'
+  > {"response":{"id":"r1","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"prose one"}]}]}}
+  > {"response":{"id":"r2","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"prose two"}]}]}}
+  > {"response":{"id":"r3","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"prose three"}]}]}}
+  > JSONL
+  $ start_fake_openai fail.jsonl capture-fail port-fail
+  $ mentat run --goal "never claim" --id goal4 --cwd "$PWD" >goal4.out 2>goal4.err; echo "exit:$?"
+  exit:1
+  $ wait_fake_server
+  $ wait_child_exit goal4
+  $ grep 'goal stops here' goal4.err
+  mentat: the model did not produce a valid structured_output answer within the retry budget; the goal stops here — re-arm with `mentat run resume 'goal4'` once the cause is addressed

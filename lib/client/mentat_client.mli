@@ -475,6 +475,18 @@ val delete :
     no inverse. Like {!archive}, a delete against a session another process
     actively drives loses the store CAS and returns [Busy] or [Unavailable]. *)
 
+val set_goal :
+  t ->
+  session:Mentat_session.Id.t ->
+  goal:Mentat_session.Metadata.Goal.t option ->
+  (unit, Mentat_protocol.Error.t) result
+(** [set_goal t ~session ~goal] durably records standing goal intent on
+    [session], or retires it ([None]) — the owner verb behind [/goal] and
+    [/goal stop]. The commit needs the session's run fence: against a session
+    whose agent is live the write may answer [Busy] naming the holder, and
+    the frontend surfaces that honestly rather than pretending the intent is
+    recorded. *)
+
 val fork :
   t ->
   session:Mentat_session.Id.t ->

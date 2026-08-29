@@ -95,7 +95,8 @@ settles with nothing queued and sends the next continuation; the model ends
 each continuation turn with a `goal_status` claim, and an absent claim means
 continue. Done-ness is never written back: the journal's last claim is the
 truth. `mentat run --goal` is the headless steward — see
-[Headless runs](headless.md#goals).
+[Headless runs](headless.md#goals) — and `/goal` is the interactive one — see
+[Interactive terminal](interactive.md).
 
 ## Lifecycle commands
 

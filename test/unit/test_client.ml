@@ -215,6 +215,7 @@ let default_lifecycle : Driver.Lifecycle.t =
     archive = (fun ~session:_ -> fail "archive: not scripted");
     restore = (fun ~session:_ -> fail "restore: not scripted");
     delete = (fun ~session:_ -> fail "delete: not scripted");
+    set_goal = (fun ~session:_ ~goal:_ -> fail "set_goal: not scripted");
     sessions = (fun ~listing:_ -> fail "sessions: not scripted");
     session = (fun _ -> fail "session: not scripted");
   }

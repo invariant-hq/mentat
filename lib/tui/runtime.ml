@@ -691,6 +691,30 @@ let run ~stdenv ~client ~(startup : Startup.t) ~(local : Local.t)
               match Client.rename client ~session ~title with
               | Ok () -> deliver (App.command_succeeded ~request)
               | Error error -> deliver (App.command_failed ~request error))
+      | App.Set_goal { request; session; goal } ->
+          perform (fun _ ->
+              match Client.set_goal client ~session ~goal with
+              | Ok () -> deliver (App.command_succeeded ~request)
+              | Error error -> deliver (App.command_failed ~request error))
+      | App.Goal_continue { request; session; prompt } ->
+          (* The steward's continuation: an ordinary prompt turn sealed under
+             the goal_status schema through the generic output-schema
+             channel, so the engine stays goal-blind and the model can end
+             with the structured claim. *)
+          perform (fun _ ->
+              match
+                Protocol.Command.prompt ~session ~turn:(fresh_turn ())
+                  ~input:[ Mentat_llm.Content.text prompt ]
+                  ~output_schema:Session.Metadata.Goal.Claim.schema ()
+              with
+              | Error invalid ->
+                  deliver
+                    (App.command_failed ~request
+                       (unavailable (Protocol.Command.Invalid.message invalid)))
+              | Ok command -> (
+                  match Client.submit client command with
+                  | Ok () -> deliver (App.command_succeeded ~request)
+                  | Error error -> deliver (App.command_failed ~request error)))
       | App.Archive_session { request; session } ->
           perform (fun _ ->
               match Client.archive client ~session with
