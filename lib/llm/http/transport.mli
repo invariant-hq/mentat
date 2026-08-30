@@ -85,7 +85,14 @@ module Sse : sig
   val make : Eio.Flow.source_ty Eio.Std.r -> t
   (** [make source] reads SSE events from [source]. *)
 
-  val next : t -> event option
-  (** [next t] is the next event carrying data, or [None] at end of input.
-      Fields other than [event] and [data] are ignored. Read failures raise. *)
+  val next : t -> (event, string) result option
+  (** [next t] is the next event carrying data, or [None] at end of input or
+      after {!close}. Fields other than [event] and [data] are ignored. A read
+      failure is trapped as [Some (Error message)], with [message] rendered by
+      {!transport_message}; [Eio.Cancel.Cancelled] propagates. *)
+
+  val close : t -> unit
+  (** [close t] stops [t] locally: every subsequent {!next} is [None]. [close]
+      is idempotent. The underlying HTTP flow remains owned by the Eio/Cohttp
+      call. *)
 end

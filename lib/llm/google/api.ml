@@ -129,14 +129,9 @@ module Generate_content = struct
   }
 
   type event = { data : Jsont.json }
+  type stream = Http.Sse.t
 
-  type stream = {
-    next : unit -> (event, Error.t) result option;
-    close : unit -> unit;
-  }
-
-  let next stream = stream.next ()
-  let close stream = stream.close ()
+  let close = Http.Sse.close
 
   let body (request : request) =
     let fields = [ list_member "contents" request.contents ] in
@@ -161,24 +156,11 @@ module Generate_content = struct
           (Error.Decode ("Google Gemini stream JSON decode failed: " ^ message))
     | Ok data -> Ok { data }
 
-  let stream_of_flow body =
-    let reader = Http.Sse.make body in
-    let closed = ref false in
-    {
-      next =
-        (fun () ->
-          if !closed then None
-          else
-            try
-              Option.map
-                (fun (event : Http.Sse.event) ->
-                  decode_sse_event event.Http.Sse.data)
-                (Http.Sse.next reader)
-            with
-            | Eio.Cancel.Cancelled _ as exn -> raise exn
-            | exn -> Some (Error (Error.Transport (Printexc.to_string exn))));
-      close = (fun () -> closed := true);
-    }
+  let next stream =
+    match Http.Sse.next stream with
+    | None -> None
+    | Some (Ok { Http.Sse.data; _ }) -> Some (decode_sse_event data)
+    | Some (Error message) -> Some (Error (Error.Transport message))
 
   let create_stream
       ?(on_retry = fun ~attempt:_ ~limit:_ ~delay:_ ~reason:_ -> ()) client
@@ -188,5 +170,5 @@ module Generate_content = struct
     | Ok body ->
         let model = Uri.pct_encode request.model in
         let path = "/models/" ^ model ^ ":streamGenerateContent?alt=sse" in
-        Result.map stream_of_flow (stream_post client ~on_retry ~path ~body)
+        Result.map Http.Sse.make (stream_post client ~on_retry ~path ~body)
 end

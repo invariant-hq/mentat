@@ -113,14 +113,9 @@ module Responses = struct
   }
 
   type event = { name : string; data : Jsont.json }
+  type stream = Http.Sse.t
 
-  type stream = {
-    next : unit -> (event, Error.t) result option;
-    close : unit -> unit;
-  }
-
-  let next stream = stream.next ()
-  let close stream = stream.close ()
+  let close = Http.Sse.close
 
   let add_opt member name value fields =
     match value with
@@ -184,24 +179,11 @@ module Responses = struct
         | "", None -> Error (Error.Decode "OpenAI stream event missing type")
         | "", Some name | name, _ -> Ok { name; data })
 
-  let stream_of_flow body =
-    let reader = Http.Sse.make body in
-    let closed = ref false in
-    {
-      next =
-        (fun () ->
-          if !closed then None
-          else
-            try
-              Option.map
-                (fun (event : Http.Sse.event) ->
-                  decode_sse_event event.Http.Sse.name event.Http.Sse.data)
-                (Http.Sse.next reader)
-            with
-            | Eio.Cancel.Cancelled _ as exn -> raise exn
-            | exn -> Some (Error (Error.Transport (Printexc.to_string exn))));
-      close = (fun () -> closed := true);
-    }
+  let next stream =
+    match Http.Sse.next stream with
+    | None -> None
+    | Some (Ok { Http.Sse.name; data }) -> Some (decode_sse_event name data)
+    | Some (Error message) -> Some (Error (Error.Transport message))
 
   let create_stream
       ?(on_retry = fun ~attempt:_ ~limit:_ ~delay:_ ~reason:_ -> ()) client
@@ -209,6 +191,6 @@ module Responses = struct
     match json_string (body request) with
     | Error error -> Error error
     | Ok body ->
-        Result.map stream_of_flow
+        Result.map Http.Sse.make
           (stream_post client ~on_retry ~path:"/responses" ~body)
 end

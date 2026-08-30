@@ -57,7 +57,8 @@ let sse_framing () =
   let event msg =
     match Http.Sse.next reader with
     | None -> fail (msg ^ ": expected an event")
-    | Some event -> event
+    | Some (Error message) -> fail (msg ^ ": " ^ message)
+    | Some (Ok event) -> event
   in
   let first = event "first event" in
   equal string ~msg:"event name" "delta" first.Http.Sse.name;
@@ -66,6 +67,30 @@ let sse_framing () =
   equal string ~msg:"missing event name" "" last.Http.Sse.name;
   equal string ~msg:"EOF flushes data" "last" last.Http.Sse.data;
   equal (option pass) ~msg:"EOF is stable" None (Http.Sse.next reader)
+
+(* The reader owns the shared exception policy: a read failure surfaces as the
+   concise transport rendering rather than raising, and close drains the pull.
+   Cancellation stays an exception; that path needs a live fiber and is not
+   exercised here. *)
+let sse_read_failures_are_trapped () =
+  Eio_mock.Backend.run @@ fun () ->
+  let flow = Eio_mock.Flow.make "sse" in
+  Eio_mock.Flow.on_read flow
+    [ `Return "data: one\n\n"; `Raise (Failure "boom") ];
+  let reader = Http.Sse.make (flow :> Eio.Flow.source_ty Eio.Std.r) in
+  (match Http.Sse.next reader with
+  | Some (Ok event) ->
+      equal string ~msg:"event before the fault" "one" event.Http.Sse.data
+  | Some (Error _) | None -> fail "expected the first event");
+  (match Http.Sse.next reader with
+  | Some (Error message) ->
+      equal string ~msg:"trapped transport rendering" "Failure(\"boom\")"
+        message
+  | Some (Ok _) | None -> fail "expected a trapped read failure");
+  Http.Sse.close reader;
+  Http.Sse.close reader;
+  equal (option pass) ~msg:"closed reader is drained" None
+    (Http.Sse.next reader)
 
 (* The direct Retry tests drive the shared loop against test-supplied thunks
    under a mock backend, so the backoff sleeps advance the auto-advancing clock
@@ -354,6 +379,7 @@ let () =
       test "parse server retry guidance" retry_guidance;
       test "render clean transport messages" transport_messages;
       test "frame SSE events" sse_framing;
+      test "trap SSE read failures" sse_read_failures_are_trapped;
       test "retry budget floors" retry_budget_floors;
       test "retry passes through max retries" retry_passes_through_max_retries;
       test "retry backoff grows by one and a half"

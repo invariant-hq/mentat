@@ -111,14 +111,6 @@ module Wire = struct
 
   type event = { name : string; data : Jsont.json }
 
-  type stream = {
-    next : unit -> (event, Wire_error.t) result option;
-    close : unit -> unit;
-  }
-
-  let next stream = stream.next ()
-  let close stream = stream.close ()
-
   let body request =
     let fields =
       [
@@ -168,33 +160,18 @@ module Wire = struct
             Error (Wire_error.Decode (label ^ " stream event missing type"))
         | "", Some name | name, _ -> Ok { name; data })
 
-  let stream_of_flow ~label body =
-    let reader = Http.Sse.make body in
-    let closed = ref false in
-    {
-      next =
-        (fun () ->
-          if !closed then None
-          else
-            try
-              Option.map
-                (fun (event : Http.Sse.event) ->
-                  decode_sse_event ~label event.Http.Sse.name
-                    event.Http.Sse.data)
-                (Http.Sse.next reader)
-            with
-            | Eio.Cancel.Cancelled _ as exn -> raise exn
-            | exn ->
-                Some (Error (Wire_error.Transport (Printexc.to_string exn))));
-      close = (fun () -> closed := true);
-    }
+  let next ~label stream =
+    match Http.Sse.next stream with
+    | None -> None
+    | Some (Ok { Http.Sse.name; data }) ->
+        Some (decode_sse_event ~label name data)
+    | Some (Error message) -> Some (Error (Wire_error.Transport message))
 
   let create_stream ~on_retry t request =
     match Jsont_bytesrw.encode_string Jsont.json (body request) with
     | Error message ->
         Error (Wire_error.Decode ("JSON encode failed: " ^ message))
-    | Ok body ->
-        Result.map (stream_of_flow ~label:t.label) (stream_post t ~on_retry ~body)
+    | Ok body -> Result.map Http.Sse.make (stream_post t ~on_retry ~body)
 end
 
 (* The semantic translation: checked requests to wire shapes, wire events to
@@ -1120,7 +1097,7 @@ let consume_events ~provider ~label ?classify ~cancelled ~elapsed ~on_event
             m "request cancelled model=%s" (Llm.Model.id requested_model));
         Error (cancelled_error ~provider ~label ~phase:Llm.Error.Stream ())
     | None -> (
-        match Wire.next api_stream with
+        match Wire.next ~label api_stream with
         | Some event ->
             handle event;
             consume ()
@@ -1132,7 +1109,7 @@ let consume_events ~provider ~label ?classify ~cancelled ~elapsed ~on_event
               (stream_error Llm.Error.Malformed_stream
                  (label ^ " stream ended without message_stop")))
   in
-  Fun.protect ~finally:(fun () -> Wire.close api_stream) consume
+  Fun.protect ~finally:(fun () -> Http.Sse.close api_stream) consume
 
 let perform_request t ~phase ~cancelled ~on_event request =
   let provider = t.provider and label = t.label in

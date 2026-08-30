@@ -207,13 +207,19 @@ module Sse = struct
      absence of an event name. ([Sse] inside this module denotes the [sse]
      library, not this adapter — the binding shadows only after it is defined.) *)
   type event = { name : string; data : string }
-  type t = Sse_eio.Reader.t
+  type t = { reader : Sse_eio.Reader.t; mutable closed : bool }
 
   let make (source : Eio.Flow.source_ty Eio.Std.r) =
-    Sse_eio.Reader.of_source source
+    { reader = Sse_eio.Reader.of_source source; closed = false }
+
+  let close t = t.closed <- true
 
   let next t =
-    match Sse_eio.Reader.next t with
-    | None -> None
-    | Some { Sse.Event.name; data; _ } -> Some { name; data }
+    if t.closed then None
+    else
+      match Sse_eio.Reader.next t.reader with
+      | None -> None
+      | Some { Sse.Event.name; data; _ } -> Some (Ok { name; data })
+      | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
+      | exception exn -> Some (Error (transport_message exn))
 end

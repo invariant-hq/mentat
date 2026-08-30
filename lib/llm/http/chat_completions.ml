@@ -81,14 +81,6 @@ module Chat = struct
 
   type event = Chunk of Jsont.json | Done
 
-  type stream = {
-    next : unit -> (event, Error.t) result option;
-    close : unit -> unit;
-  }
-
-  let next stream = stream.next ()
-  let close stream = stream.close ()
-
   let add_opt member name value fields =
     match value with
     | None -> fields
@@ -131,19 +123,11 @@ module Chat = struct
             Error (Error.Decode ("chat stream JSON decode failed: " ^ message))
         | Ok json -> Ok (Chunk json))
 
-  let stream_of_flow body =
-    let reader = Http.Sse.make body in
-    let closed = ref false in
-    {
-      next =
-        (fun () ->
-          if !closed then None
-          else
-            try Option.map decode_sse_event (Http.Sse.next reader) with
-            | Eio.Cancel.Cancelled _ as exn -> raise exn
-            | exn -> Some (Error (Error.Transport (Http.transport_message exn))));
-      close = (fun () -> closed := true);
-    }
+  let next stream =
+    match Http.Sse.next stream with
+    | None -> None
+    | Some (Ok event) -> Some (decode_sse_event event)
+    | Some (Error message) -> Some (Error (Error.Transport message))
 
   let create_stream ~on_retry client request =
     match Jsont_bytesrw.encode_string Jsont.json (body request) with
@@ -165,7 +149,7 @@ module Chat = struct
                 ~url:(client.base_url ^ "/v1/chat/completions")
                 ~headers:(headers attempt) ~body)
         with
-        | Ok flow -> Ok (stream_of_flow flow)
+        | Ok flow -> Ok (Http.Sse.make flow)
         | Error http_error ->
             let error =
               match http_error with
@@ -808,7 +792,7 @@ let consume_events t ~cancelled ~on_event requested_model api_stream =
               (stream_error t Llm.Error.Malformed_stream
                  (provider_id t ^ " stream ended without completion"))
   in
-  Fun.protect ~finally:(fun () -> Chat.close api_stream) consume
+  Fun.protect ~finally:(fun () -> Http.Sse.close api_stream) consume
 
 let perform_response t ~phase ~cancelled ~on_event request =
   if cancelled () then Error (cancelled_error t ())
