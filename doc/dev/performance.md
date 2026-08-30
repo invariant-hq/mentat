@@ -131,7 +131,7 @@ standing burn.
 The freeze was found and verified with a pty repro against the real binary —
 the method is worth keeping:
 
-- Drive `bin/main.exe` in a pty (pyte) against
+- Drive `bin/mentat/main.exe` in a pty (pyte) against
   `test/blackbox/bin/mentat_fake_provider_server.exe` with a large scripted
   response (~1500 fragments of reasoning + markdown) and `stream_delay_ms`
   holding the terminal SSE event, so the turn stays in flight with static

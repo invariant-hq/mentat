@@ -199,7 +199,7 @@ silently lies:
   sketches: it catches untracked files and does not false-positive when a
   campaign legitimately starts from an uncommitted work-in-progress instrument.
   A drifting instrument is not a measurement.
-- The **build gate** runs `dune build bin/main.exe eval/bin/main.exe` itself and
+- The **build gate** runs `dune build bin/mentat/main.exe eval/bin/main.exe` itself and
   hard-fails the experiment (ledger status `crash`) on non-zero exit — an
   overnight loop must never "measure" a stale binary because a treatment broke
   the build. It then records the binary digest and **refuses to proceed if it
@@ -255,7 +255,7 @@ to reach the subject's `mentat` binary), so run it the same way.
 `eval/baselines/<name>.jsonl`, committed deliberately):
 
 ```sh
-dune build eval/bin/main.exe bin/main.exe
+dune build eval/bin/main.exe bin/mentat/main.exe
 EVAL=_build/default/eval/bin/main.exe
 
 $EVAL run --suite core --model openai/gpt-5.5 --runs 3 --output _evals/results/run1
@@ -274,7 +274,7 @@ local `gptoss` through the ollama provider, where token cost is ~0 and
 wall-clock on local inference is the binding constraint):
 
 ```sh
-dune build lab/bin/main.exe eval/bin/main.exe bin/main.exe
+dune build lab/bin/main.exe eval/bin/main.exe bin/mentat/main.exe
 LAB=_build/default/lab/bin/main.exe
 
 $LAB calibrate --campaign jul10 --suite core --runs 5 --model ollama/gptoss

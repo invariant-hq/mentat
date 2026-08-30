@@ -33,7 +33,7 @@ distributed under the following terms:
 
 ## Cmdliner completion scripts
 
-The shell completion scripts embedded in `bin/cli_completion.ml` are adapted,
+The shell completion scripts embedded in `bin/mentat/cli_completion.ml` are adapted,
 near-verbatim, from Cmdliner 2.1.1 — with one fix to the PowerShell completer
 registration — distributed under the ISC License:
 

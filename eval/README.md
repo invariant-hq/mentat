@@ -38,7 +38,7 @@ dune exec eval/bin/main.exe -- report _evals/results/<dir>
 dune exec eval/bin/main.exe -- compare <baseline-rows> _evals/results/<dir>
 ```
 
-`run` drives the locally built mentat binary (`_build/default/bin/main.exe`)
+`run` drives the locally built mentat binary (`_build/default/bin/mentat/main.exe`)
 through `mentat run start --json`. Auth and model configuration come from your
 normal mentat environment.
 

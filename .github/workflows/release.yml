@@ -134,7 +134,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           mkdir -p dist
-          cp _build/default/bin/main.exe dist/mentat
+          cp _build/default/bin/mentat/main.exe dist/mentat
           cp _build/default/bin/mentatd/main.exe dist/mentatd
 
       - name: Check portability, architecture, and version

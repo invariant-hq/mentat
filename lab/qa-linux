@@ -160,18 +160,18 @@ cmd__sync() {
   git fetch -q origin
   git -c advice.detachedHead=false checkout -qf "$sha"
   if [ ! -d dune.lock ]; then dune pkg lock; fi
-  dune build bin/main.exe
+  dune build bin/mentat/main.exe
   echo "synced: $(git rev-parse --short HEAD)," \
-    "mentat $(_build/default/bin/main.exe --version)"
+    "mentat $(_build/default/bin/mentat/main.exe --version)"
 }
 
 cmd__status() {
   if [ ! -d "$CLONE/.git" ]; then echo "clone: absent (lab/qa-linux up)"; return; fi
   cd "$CLONE"
   echo "clone: $(git rev-parse --short HEAD) ($(git log -1 --format=%s))"
-  if [ -x _build/default/bin/main.exe ]; then
-    echo "binary: mentat $(_build/default/bin/main.exe --version 2>/dev/null || echo '?')," \
-      "built $(date -d @"$(stat -c %Y _build/default/bin/main.exe)" '+%F %T')"
+  if [ -x _build/default/bin/mentat/main.exe ]; then
+    echo "binary: mentat $(_build/default/bin/mentat/main.exe --version 2>/dev/null || echo '?')," \
+      "built $(date -d @"$(stat -c %Y _build/default/bin/mentat/main.exe)" '+%F %T')"
   else
     echo "binary: missing (lab/qa-linux sync)"
   fi

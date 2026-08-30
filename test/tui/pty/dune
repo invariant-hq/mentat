@@ -24,7 +24,7 @@
 (env
  (_
   (env-vars
-   (MENTAT_BIN ../../../bin/main.exe)
+   (MENTAT_BIN ../../../bin/mentat/main.exe)
    (MENTAT_FAKE_PROVIDER_BIN
     ../../blackbox/bin/mentat_fake_provider_server.exe)
    ; Real-PTY suites legitimately exceed windtrap's 1 s slow threshold;
@@ -46,12 +46,12 @@
   test_terminal_host)
  ; The runner partitions execute sandboxed (dune requires it for inline
  ; tests), so the cwd-relative env values must resolve inside the sandbox.
- ; MENTAT_BIN points at the real executable bin/main.exe rather than the
- ; install-tree symlink: the sandbox replicates install/default/bin/mentat
- ; as its original relative symlink, whose target is not materialized, so
- ; the install spelling dangles in-sandbox. The harness realpaths the env
- ; value, and the old %{bin:mentat} spelling realpathed to the same
- ; bin/main.exe.
+ ; MENTAT_BIN points at the real executable bin/mentat/main.exe rather
+ ; than the install-tree symlink: the sandbox replicates
+ ; install/default/bin/mentat as its original relative symlink, whose
+ ; target is not materialized, so the install spelling dangles
+ ; in-sandbox. The harness realpaths the env value, and the old
+ ; %{bin:mentat} spelling realpathed to the same bin/mentat/main.exe.
  ; Promotion caveat: dune drives every partition of this library inside
  ; one action and runs the per-file (diff? source source.corrected) steps
  ; only after every partition exits 0, so a crash in any partition still
@@ -72,7 +72,7 @@
  ; nothing either, so the per-file masked-assertion rule still holds.
  (inline_tests
   (deps
-   ../../../bin/main.exe
+   ../../../bin/mentat/main.exe
    ../../blackbox/bin/mentat_fake_provider_server.exe))
  (libraries
   jsont.bytesrw

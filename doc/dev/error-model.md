@@ -123,13 +123,13 @@ transport above. It does not turn exceptions into a second recoverable-error
 API. Fix faults at their source and keep containment at the few effect
 boundaries that can preserve a valid session.
 
-Backtrace recording is application policy, not library policy. `bin/main.ml`
+Backtrace recording is application policy, not library policy. `bin/mentat/main.ml`
 enables it once at process entry so both headless commands and the TUI carry a
 diagnosable trace. Libraries must not mutate this process-global runtime knob.
 
 ### Fatal path
 
-`bin/main.ml` records backtraces, installs the diagnostics reporter, and runs
+`bin/mentat/main.ml` records backtraces, installs the diagnostics reporter, and runs
 cmdliner with `~catch:false` so no exception is swallowed by cmdliner's own
 exit-125-with-backtrace handler. An exception that escapes a responder reaches
 one guard, which classifies it with `Exit_status.of_exn` and renders it through

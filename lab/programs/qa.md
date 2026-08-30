@@ -29,9 +29,9 @@ resize/reflow, streaming liveness, panels and overlays — and a **tag**
    driver reference below). Name sessions `<tag>-<n>` so artifacts group
    under `~/.cache/mentat-qa/`.
 
-3. **Check the binary.** You drive `_build/default/bin/main.exe`; it must be
+3. **Check the binary.** You drive `_build/default/bin/mentat/main.exe`; it must be
    current with HEAD. If stale, build it as a client (`dune build
-   bin/main.exe` — never kill or lock out a running watch server).
+   bin/mentat/main.exe` — never kill or lock out a running watch server).
 
 4. **Read the spec for the target surface** — `doc/ui-design` (sections with
    "revised" marks win over anything older) and the manual. The spec is the

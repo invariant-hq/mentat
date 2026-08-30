@@ -273,7 +273,7 @@ cmd_start() {
   if [ -z "$bin" ]; then
     local repo
     repo=$(git rev-parse --show-toplevel 2>/dev/null) || repo=''
-    bin="$repo/_build/default/bin/main.exe"
+    bin="$repo/_build/default/bin/mentat/main.exe"
   fi
   [ -x "$bin" ] || die "mentat binary not found: $bin"
 

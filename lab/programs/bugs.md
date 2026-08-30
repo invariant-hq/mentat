@@ -38,7 +38,7 @@ session.
    untracked, and the session must build the exact dep set of the main
    checkout — never re-solve.
 
-3. **Warm the build**: `dune build bin/main.exe` in `WT`. The first build is
+3. **Warm the build**: `dune build bin/mentat/main.exe` in `WT`. The first build is
    cold (`WT` has its own `_build`; the shared dune cache keeps dependencies
    fast). If it fails, stop and tell the launcher: the tree was broken before
    you started.

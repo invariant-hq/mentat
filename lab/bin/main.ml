@@ -156,7 +156,7 @@ let instrument_digest () =
 (* Well-known paths (mentat-lab always runs from the repository root). *)
 
 let mentat_bin =
-  Filename.concat "_build" (Filename.concat "default" "bin/main.exe")
+  Filename.concat "_build" (Filename.concat "default" "bin/mentat/main.exe")
 
 let eval_bin =
   Filename.concat "_build" (Filename.concat "default" "eval/bin/main.exe")
@@ -675,8 +675,8 @@ let group_by_task rows =
 (* Build gate. Never run an eval against a stale binary. *)
 
 let build_gate () =
-  stderr_printf "mentat-lab: building bin/main.exe eval/bin/main.exe\n";
-  let status = run_streaming [| "dune"; "build"; "bin/main.exe"; eval_bin |] in
+  stderr_printf "mentat-lab: building bin/mentat/main.exe eval/bin/main.exe\n";
+  let status = run_streaming [| "dune"; "build"; "bin/mentat/main.exe"; eval_bin |] in
   process_success status
 
 let binary_digest () = Digest.to_hex (Digest.file mentat_bin)

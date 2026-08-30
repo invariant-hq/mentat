@@ -43,8 +43,8 @@ cd /src
 export OCAMLPARAM="_,ccopt=-include unistd.h"
 sh scripts/release/link-workspace.sh > /tmp/dune-workspace-release
 dune build --workspace /tmp/dune-workspace-release \
-  _build/default/bin/main.exe _build/default/bin/mentatd/main.exe
+  _build/default/bin/mentat/main.exe _build/default/bin/mentatd/main.exe
 
 mkdir -p dist
-cp _build/default/bin/main.exe dist/mentat
+cp _build/default/bin/mentat/main.exe dist/mentat
 cp _build/default/bin/mentatd/main.exe dist/mentatd

@@ -8,7 +8,7 @@ and report.
 
 ## Invocation
 
-`mentat-lab` runs its own build gate (`dune build bin/main.exe
+`mentat-lab` runs its own build gate (`dune build bin/mentat/main.exe
 eval/bin/main.exe`) before every measurement. Because that is a nested `dune`
 invocation, do **not** launch it with a plain `dune exec mentat-lab -- …` while
 no build server is running: `dune exec` takes an exclusive lock on `_build`
