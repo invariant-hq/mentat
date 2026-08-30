@@ -9,10 +9,16 @@ let src = Logs.Src.create "mentat.store" ~doc:"Store disk primitives"
 
 module Log = (val Logs.src_log src : Logs.LOG)
 
+(* An [Io.Message] must hold one line: every error surface lowers it through
+   [Mentat_diagnostic.make], whose message contract is single-line, and the
+   pretty-printed exception renderings below may wrap. *)
+let one_line s = String.map (function '\n' | '\r' -> ' ' | c -> c) s
+
 let cause_of_exn = function
   | Unix.Unix_error (code, _, _) -> Io.Unix_error code
-  | Eio.Io _ as exn -> Io.Message (Format.asprintf "%a" Eio.Exn.pp exn)
-  | exn -> Io.Message (Printexc.to_string exn)
+  | Eio.Io _ as exn ->
+      Io.Message (one_line (Format.asprintf "%a" Eio.Exn.pp exn))
+  | exn -> Io.Message (one_line (Printexc.to_string exn))
 
 (* The raise context of the most recent exception converted to a fact. The
    typed fact keeps the message; the trace is a diagnostic, and it exists only
@@ -46,7 +52,8 @@ let guard ~op ~path f =
   | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
   | exception exn ->
       observe ~what:(Io.op_label op) ~path exn;
-      Error { Io.op; path; cause = Io.Message (Printexc.to_string exn) }
+      Error
+        { Io.op; path; cause = Io.Message (one_line (Printexc.to_string exn)) }
 
 let path_kind ~path cap =
   match Eio.Path.kind ~follow:true cap with
@@ -57,7 +64,11 @@ let path_kind ~path cap =
   | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
   | exception exn ->
       Error
-        { Io.op = Io.Read; path; cause = Io.Message (Printexc.to_string exn) }
+        {
+          Io.op = Io.Read;
+          path;
+          cause = Io.Message (one_line (Printexc.to_string exn));
+        }
 
 (* Percent-escaped path components. *)
 
