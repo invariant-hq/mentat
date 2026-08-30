@@ -36,7 +36,3 @@ let wrap { prefix; chdir; _ } ~cwd argv =
     else prefix
   in
   prefix @ argv
-
-(* Nothing in the policy is per-run any more, so the durable identity is the
-   profile digest itself: no sentinel, no regeneration, no normalization. *)
-let identity_digest backend policy = digest (prepare backend policy)

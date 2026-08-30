@@ -28,45 +28,23 @@ type route =
     }
   | Refuse of { policy : Policy.t; error : Error.t }
 
-type t = { route : route; escalation : escalation; identity : Identity.t }
+type t = { route : route; escalation : escalation }
 
-let direct =
-  {
-    route = Unconfined;
-    escalation = Ignored;
-    identity = Identity.not_requested;
-  }
-
-let external_ =
-  {
-    route = Declared_external;
-    escalation = Ignored;
-    identity = Identity.declared_external;
-  }
+let direct = { route = Unconfined; escalation = Ignored }
+let external_ = { route = Declared_external; escalation = Ignored }
 
 let confined ~backend ~mutates policy =
   let escalation =
     if mutates then Available else Denied Error.Escalation_denied
   in
   match backend with
-  | Error error ->
-      {
-        route = Refuse { policy; error };
-        escalation;
-        identity = Identity.refused;
-      }
+  | Error error -> { route = Refuse { policy; error }; escalation }
   | Ok backend ->
       let profile = Profile.prepare backend policy in
       let evidence =
         Evidence.enforced ~backend ~profile:(Profile.digest profile)
       in
-      {
-        route = Confine { backend; policy; profile; evidence };
-        escalation;
-        identity =
-          Identity.enforced ~backend
-            ~profile:(Profile.identity_digest backend policy);
-      }
+      { route = Confine { backend; policy; profile; evidence }; escalation }
 
 (* Widen one sealed route for a single command. The result is an ordinary
    sealed value, so lowering, evidence, obligation discharge and every observer
@@ -113,9 +91,6 @@ let grant t entries =
                       Evidence.enforced ~backend
                         ~profile:(Profile.digest profile);
                   };
-              identity =
-                Identity.enforced ~backend
-                  ~profile:(Profile.identity_digest backend policy);
             })
 
 let policy t =
@@ -124,7 +99,14 @@ let policy t =
   | Unconfined | Declared_external -> None
 
 let escalation t = t.escalation
-let identity t = t.identity
+
+let identity t =
+  match t.route with
+  | Unconfined -> Identity.not_requested
+  | Declared_external -> Identity.declared_external
+  | Confine { backend; profile; _ } ->
+      Identity.enforced ~backend ~profile:(Profile.digest profile)
+  | Refuse _ -> Identity.refused
 
 let evidence t =
   match t.route with
@@ -219,9 +201,6 @@ let escalated t =
                         ~profile:(Profile.digest profile);
                   };
               escalation = t.escalation;
-              identity =
-                Identity.enforced ~backend
-                  ~profile:(Profile.identity_digest backend policy);
             })
 
 let obligations t =
