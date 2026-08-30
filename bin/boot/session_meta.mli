@@ -74,7 +74,7 @@ val fresh_id : ?prefix:string -> unit -> string
 val fresh_revert_id : unit -> Mentat_mutation.Revert.Id.t
 (** [fresh_revert_id ()] mints a fresh revert identifier at the command boundary
     — never derived from the session, scope, or an ordinal, the mutation
-    library's own rule. Shared by the online revert cone (through the store
-    adapter) and the offline [cli_session] twin, so a revert minted either way
-    is the same shape. *)
+    library's own rule. Shared by the engine's online revert cone (threaded in
+    at engine construction) and the offline [cli_session] twin, so a revert
+    minted either way is the same shape. *)
 

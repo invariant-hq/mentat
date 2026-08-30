@@ -105,11 +105,11 @@
   mentat_mutation
   bench_support))
 
-; bench_engine_latency drives the real engine over an in-memory store to time
-; submit -> first streamed token across session sizes. It is a wall TREND (never
-; gated): engine orchestration is multi-fiber and stateful per turn, so it is a
-; direct driver — fresh session per sample, first samples discarded — not a
-; thumper suite, and it lives on @bench, printing to the nightly log. The
+; bench_engine_latency drives the real engine over a real temp-dir store to
+; time submit -> first streamed token across session sizes. It is a wall TREND
+; (never gated): engine orchestration is multi-fiber and stateful per turn, so
+; it is a direct driver — fresh session per sample, first samples discarded —
+; not a thumper suite, and it lives on @bench, printing to the nightly log. The
 ; gate-worthy scaling property is bench_poll_scaling's, deterministically.
 
 (executable
@@ -121,6 +121,7 @@
   mentat_client
   mentat_protocol
   mentat_session
+  mentat_store
   mentat_mutation
   mentat_llm
   mentat_sandbox
@@ -133,6 +134,7 @@
   eio_main
   mtime
   mtime.clock.os
+  unix
   bench_support))
 
 ; Tier A gate: each suite checked against its committed baseline on @bench.

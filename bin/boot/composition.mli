@@ -300,8 +300,8 @@ val tool_declarations :
 (** [tool_declarations t ~mode ~model] is the boot-fixed, provider-facing tool
     declarations a run in [mode] with [model] would seal — the same catalog
     family {!client} builds — projected offline. It seals the workspace
-    capabilities and resolves the toolchain, but constructs no engine, provider,
-    store adapter, or client, and never caches one. [Error] when the workspace
+    capabilities and resolves the toolchain, but constructs no engine,
+    provider adapter, or client, and never caches one. [Error] when the workspace
     cannot seal, exactly as {!client}'s prefix does. The declarations reflect
     boot-time program resolution but do not depend on the resolved program
     paths, which live in the tool handlers rather than the declarations. *)

@@ -28,7 +28,7 @@ type error =
   | Missing_attachment of Mentat_digest.Content_ref.t
       (** A [`Ref] resolved to no stored blob: a fabricated reference at
           admission, or a lost blob at the provider-call boundary. *)
-  | Store of Ports.Store_error.t  (** The attachment store failed. *)
+  | Store of Mentat_diagnostic.t  (** The attachment store failed. *)
   | Rebuild of string
       (** The resolved request failed reconstruction — structurally impossible
           (only a media source tag changes), retained as a loud fault. *)
@@ -40,9 +40,9 @@ val message : error -> string
 
 val externalize :
   put_attachment:
-    (string -> (Mentat_digest.Content_ref.t, Ports.Store_error.t) result) ->
+    (string -> (Mentat_digest.Content_ref.t, Mentat_diagnostic.t) result) ->
   attachment:
-    (Mentat_digest.Content_ref.t -> (string option, Ports.Store_error.t) result) ->
+    (Mentat_digest.Content_ref.t -> (string option, Mentat_diagnostic.t) result) ->
   Mentat_llm.Content.t list ->
   (Mentat_llm.Content.t list, error) result
 (** [externalize ~put_attachment ~attachment content] rewrites each inline
@@ -54,7 +54,7 @@ val externalize :
 
 val resolve_request :
   attachment:
-    (Mentat_digest.Content_ref.t -> (string option, Ports.Store_error.t) result) ->
+    (Mentat_digest.Content_ref.t -> (string option, Mentat_diagnostic.t) result) ->
   Mentat_llm.Request.t ->
   (Mentat_llm.Request.t, error) result
 (** [resolve_request ~attachment request] rewrites every [`Ref] media block in

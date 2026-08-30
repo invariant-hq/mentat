@@ -37,10 +37,18 @@ end
 type t =
   | Busy of { owner : string option }
       (** The fence is held by another driver — the store fence's held signal,
-          mapped. [owner] is the adapter-rendered owner line when the holder's
+          mapped. [owner] is the store's rendered owner line when the holder's
           owner line was readable, [None] otherwise; the exclusion is
           authoritative either way. *)
-  | Store of Ports.Store_error.t  (** A store port operation failed. *)
+  | Not_found
+      (** No document exists for the addressed session — the store's not-found,
+          minus the id the call site already holds. The runtime bridge restores
+          the id when it maps this onto the protocol's [Session_not_found]. *)
+  | Store of Mentat_diagnostic.t
+      (** A store operation failed: a CAS conflict under the held fence (a
+          fence violation or an engine bug — the driver faults, never a silent
+          retry), corrupt persisted data, or a filesystem or lock failure. The
+          diagnostic is the store's own, passed through whole. *)
   | Request of Mentat_llm.Request.Error.t
       (** The model transcript could not become a model request. *)
   | Session of Mentat_session.Error.t
@@ -67,9 +75,9 @@ val message : t -> string
 (** [message e] is a human-readable diagnostic for [e]. *)
 
 val diagnostic : t -> Mentat_diagnostic.t
-(** [diagnostic e] is the renderable diagnostic for [e]. The {!Store} [Corrupt]
-    and [Io] arms pass their carried diagnostics through whole, keeping the
-    store's located subject and hints intact. *)
+(** [diagnostic e] is the renderable diagnostic for [e]. The {!Store} arm
+    passes its carried diagnostic through whole, keeping the store's located
+    subject and hints intact. *)
 
 val pp : Format.formatter -> t -> unit
 (** [pp] formats {!message} output. *)

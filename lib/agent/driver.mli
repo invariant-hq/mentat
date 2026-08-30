@@ -24,7 +24,7 @@
     result can no longer settle as ordinary success — the worker is cancelled,
     quiescence awaited, and the reconcile settles the claim honestly. Exactly
     one settlement per claim, always. The head the driver holds between commits
-    is the one the store returned: the adapter re-folds the suffix through the
+    is the one the store returned: the runtime re-folds the suffix through the
     session's checked append, and the driver adopts that result rather than
     re-validating it.
 
@@ -45,51 +45,51 @@
     caller enqueues to it rather than calling in place, because Eio forbids
     touching a cancellation context from another domain.
 
-    The runtime supplies the world as closures: {!type:io} is the three ports
-    narrowed to one fenced session (the fence guard and CAS document live inside
-    the closures — the driver never sees a revision), and {!type:hooks} is the
-    scheduler seam. The driver appends session events only through the step,
-    plus the two driver-owned facts (interrupt request, queue), all validated
-    by the session's checked constructors and replay. *)
+    The runtime supplies the world as closures: {!type:io} is the store and the
+    provider narrowed to one fenced session (the fence guard and CAS document
+    live inside the closures — the driver never sees a revision), and
+    {!type:hooks} is the scheduler seam. The driver appends session events only
+    through the step, plus the two driver-owned facts (interrupt request,
+    queue), all validated by the session's checked constructors and replay. *)
 
 type io = {
   session_id : Mentat_session.Id.t;  (** The fenced session. *)
   commit :
     Mentat_session.Event.t list ->
-    (Mentat_session.t, Ports.Store_error.t) result;
+    (Mentat_session.t, Error.t) result;
       (** The one commit point under the fence; returns the committed head. *)
   commit_metadata :
-    Mentat_session.t -> (Mentat_session.t, Ports.Store_error.t) result;
+    Mentat_session.t -> (Mentat_session.t, Error.t) result;
       (** A whole-document CAS of a metadata-transformed session under the
           fence, no journal append; returns the committed head and adopts the
           new revision so the next {!commit} is coherent. *)
   append_edit :
     entries:Mentat_edit.Result.Entry.t list ->
     Mentat_mutation.Event.t ->
-    (Mentat_mutation.State.t, Ports.Store_error.t) result;
+    (Mentat_mutation.State.t, Error.t) result;
       (** The edit half of a mutation commit: the confirmed entries carry the
           bytes; blobs and event durable before return. On [Ok state], [state]
           is the advanced mutation state the driver adopts as its store-fed
           cache. *)
   append_mutation :
     Mentat_mutation.Event.t list ->
-    (Mentat_mutation.State.t, Ports.Store_error.t) result;
+    (Mentat_mutation.State.t, Error.t) result;
       (** The rest of a mutation commit: checkpoint facts and observation
           attributions. On [Ok state], [state] is the advanced mutation state
           the driver adopts as its store-fed cache. *)
   put_attachment :
-    string -> (Mentat_digest.Content_ref.t, Ports.Store_error.t) result;
+    string -> (Mentat_digest.Content_ref.t, Mentat_diagnostic.t) result;
       (** Externalize inline media: store bytes into the session's attachment
           namespace, fence-free, returning their content reference. *)
   attachment :
-    Mentat_digest.Content_ref.t -> (string option, Ports.Store_error.t) result;
+    Mentat_digest.Content_ref.t -> (string option, Mentat_diagnostic.t) result;
       (** Read an attachment blob by reference, fence-free; [None] when absent.
           Validates an incoming [`Ref] at admission and resolves it at the
           provider-call boundary. *)
   fork :
     events:Mentat_mutation.Event.t list ->
     Mentat_session.t ->
-    (unit, Ports.Store_error.t) result;
+    (unit, Error.t) result;
       (** Persists a fork or rewind target with its copied mutation ledger:
           [events] — the retained prefix of this driver's history — and their
           blobs are seeded before the child document, so the child's diff and
@@ -97,17 +97,17 @@ type io = {
   revert :
     scope:Mentat_mutation.Revert.Scope.t ->
     ( Mentat_mutation.Revert.Outcome.t * Mentat_mutation.State.t,
-      Ports.Store_error.t )
+      Error.t )
     result;
       (** The whole fenced revert lifecycle for [scope] — resolve, capture,
           freeze, apply, settle — returning the outcome paired with the
           {b re-read post-revert mutation state}. The driver adopts that state
           as its ledger mirror, so a subsequent turn's checkpoint and a branch's
-          copied prefix see the revert facts the port just appended. *)
+          copied prefix see the revert facts the store just appended. *)
   undo_revert :
     Mentat_mutation.Revert.Selection.t ->
     ( Mentat_mutation.Revert.Outcome.t * Mentat_mutation.State.t,
-      Ports.Store_error.t )
+      Error.t )
     result;
       (** {!revert} for a full {!Mentat_mutation.Revert.Selection.t} — the
           multi-turn boundary revert and the multi-change un-revert the undo
@@ -115,13 +115,13 @@ type io = {
   truncate :
     keep:(Mentat_session.Turn.Id.t -> bool) ->
     Mentat_session.t ->
-    (Mentat_session.t * Mentat_mutation.State.t, Ports.Store_error.t) result;
+    (Mentat_session.t * Mentat_mutation.State.t, Error.t) result;
       (** Commit an armed undo: drop the crossed turns from both durable halves
           under one document lock, ledger-first, and return the truncated head
           session paired with its post-truncate mutation state. The engine holds
           the surviving-prefix document and [keep] selects the surviving turns'
           ledger. *)
-  export : unit -> (string, Ports.Store_error.t) result;
+  export : unit -> (string, Error.t) result;
       (** The fenced session's complete export bundle buffered into one value —
           a read that mints no fact. The engine bounds the value with a size
           guard before it crosses the wire. *)
@@ -134,9 +134,9 @@ type io = {
     (Mentat_llm.Response.t, Mentat_llm.Error.t) result;
       (** {!Ports.provider_call}, verbatim. *)
 }
-(** The type for the driver's static port reach, narrowed to its fenced session.
-    Turn-scoped workspace authority is selected with the catalog and policy by
-    {!create}. *)
+(** The type for the driver's static store and provider reach, narrowed to its
+    fenced session. Turn-scoped workspace authority is selected with the catalog
+    and policy by {!create}. *)
 
 type hooks = {
   try_reserve :

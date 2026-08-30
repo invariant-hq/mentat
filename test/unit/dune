@@ -591,10 +591,12 @@
   mentat_provider
   mentat_sandbox
   mentat_session
+  mentat_store
   mentat_tool
   mentat_workspace
   eio
-  eio_main))
+  eio_main
+  unix))
 
 (test
  (name test_provider_runtime)
@@ -681,6 +683,7 @@
   mentat_sandbox
   mentat_provider
   mentat_review
+  mentat_store
   mentat_workspace
   mentat_diagnostic
   lpath

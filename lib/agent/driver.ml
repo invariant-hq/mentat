@@ -7,39 +7,39 @@ type io = {
   session_id : Mentat_session.Id.t;
   commit :
     Mentat_session.Event.t list ->
-    (Mentat_session.t, Ports.Store_error.t) result;
+    (Mentat_session.t, Error.t) result;
   commit_metadata :
-    Mentat_session.t -> (Mentat_session.t, Ports.Store_error.t) result;
+    Mentat_session.t -> (Mentat_session.t, Error.t) result;
   append_edit :
     entries:Mentat_edit.Result.Entry.t list ->
     Mentat_mutation.Event.t ->
-    (Mentat_mutation.State.t, Ports.Store_error.t) result;
+    (Mentat_mutation.State.t, Error.t) result;
   append_mutation :
     Mentat_mutation.Event.t list ->
-    (Mentat_mutation.State.t, Ports.Store_error.t) result;
+    (Mentat_mutation.State.t, Error.t) result;
   put_attachment :
-    string -> (Mentat_digest.Content_ref.t, Ports.Store_error.t) result;
+    string -> (Mentat_digest.Content_ref.t, Mentat_diagnostic.t) result;
   attachment :
-    Mentat_digest.Content_ref.t -> (string option, Ports.Store_error.t) result;
+    Mentat_digest.Content_ref.t -> (string option, Mentat_diagnostic.t) result;
   fork :
     events:Mentat_mutation.Event.t list ->
     Mentat_session.t ->
-    (unit, Ports.Store_error.t) result;
+    (unit, Error.t) result;
   revert :
     scope:Mentat_mutation.Revert.Scope.t ->
     ( Mentat_mutation.Revert.Outcome.t * Mentat_mutation.State.t,
-      Ports.Store_error.t )
+      Error.t )
     result;
   undo_revert :
     Mentat_mutation.Revert.Selection.t ->
     ( Mentat_mutation.Revert.Outcome.t * Mentat_mutation.State.t,
-      Ports.Store_error.t )
+      Error.t )
     result;
   truncate :
     keep:(Mentat_session.Turn.Id.t -> bool) ->
     Mentat_session.t ->
-    (Mentat_session.t * Mentat_mutation.State.t, Ports.Store_error.t) result;
-  export : unit -> (string, Ports.Store_error.t) result;
+    (Mentat_session.t * Mentat_mutation.State.t, Error.t) result;
+  export : unit -> (string, Error.t) result;
   release : unit -> unit;
   provider_call :
     Mentat_llm.Request.t ->
@@ -79,7 +79,7 @@ exception Interrupted_by_driver
 
 (* A worker-side store append failed: the driver faults without settling —
    the open claim degrades to Ambiguous at a successor's recovery. *)
-exception Store_failed of Ports.Store_error.t
+exception Store_failed of Error.t
 
 type phase =
   | Running
@@ -405,7 +405,7 @@ let commit_step t step =
                         ~delegation:(Mentat_session.Delegation.id d)
                   | _ -> ())
                 events;
-              Error (Error.Store e)
+              Error e
           | Ok session ->
               t.session <- session;
               (* Register each newly delegated child before the hub announces its
@@ -451,7 +451,7 @@ let commit_step t step =
 
 let commit_events t events =
   match t.io.commit events with
-  | Error e -> Error (Error.Store e)
+  | Error e -> Error e
   | Ok session ->
       t.session <- session;
       Feed.Hub.publish t.hub ~delta:events session t.mstate;
@@ -465,7 +465,7 @@ let commit_events t events =
    fact is emitted, so the feed does not publish: metadata is not journal state. *)
 let commit_metadata_committed t session' =
   match t.io.commit_metadata session' with
-  | Error e -> Error (Error.Store e)
+  | Error e -> Error e
   | Ok session ->
       t.session <- session;
       Ok ()
@@ -933,7 +933,7 @@ and settle_model t ~id ~purpose ~prose ~stream_usage outcome =
       feed_commit t (fun s ->
           Mentat_agent_step.interrupt ?reason:t.interrupt_reason
             ?assistant_text:prose ?usage:!stream_usage s)
-  | Error (Store_failed e) -> Error (Error.Store e)
+  | Error (Store_failed e) -> Error e
   | Error _exn ->
       (* A callback exception does not prove the call produced no effects:
          the live Ambiguous mint. *)
@@ -1035,7 +1035,7 @@ and settle_tool_effect t ~id ~turn ~closer outcome =
       | Error Interrupted_by_driver ->
           feed_commit t (fun s ->
               Mentat_agent_step.interrupt ?reason:t.interrupt_reason s)
-      | Error (Store_failed e) -> Error (Error.Store e)
+      | Error (Store_failed e) -> Error e
       | Error _exn ->
           (* The exception does not prove the callback produced no effects. *)
           settling (fun s ->
@@ -1079,7 +1079,7 @@ and append_evidence t ~turn ~claim evidence =
             | None -> applies_loop ordinal rest
             | Some (entries, event) -> (
                 match t.io.append_edit ~entries event with
-                | Error e -> Error (Error.Store e)
+                | Error e -> Error e
                 | Ok mstate ->
                     t.mstate <- mstate;
                     applies_loop (ordinal + 1) rest))
@@ -1094,7 +1094,7 @@ and append_evidence t ~turn ~claim evidence =
                 Mentat_mutation.Event.tool_observed ~turn ~claim paths
               in
               match t.io.append_mutation [ event ] with
-              | Error e -> Error (Error.Store e)
+              | Error e -> Error e
               | Ok mstate ->
                   t.mstate <- mstate;
                   Ok ())))
@@ -1365,7 +1365,7 @@ and fork_flow t ~id =
   | Error e -> Error (Error.Session e)
   | Ok forked -> (
       match t.io.fork ~events:(branch_events t forked) forked with
-      | Error e -> Error (Error.Store e)
+      | Error e -> Error e
       | Ok () -> Ok id)
 
 and rewind_flow t ~id anchor =
@@ -1376,7 +1376,7 @@ and rewind_flow t ~id anchor =
   | Error e -> Error (Error.Session e)
   | Ok rewound -> (
       match t.io.fork ~events:(branch_events t rewound) rewound with
-      | Error e -> Error (Error.Store e)
+      | Error e -> Error e
       | Ok () -> Ok id)
 
 (* Manual compaction. *)
@@ -1472,17 +1472,17 @@ and commit_metadata_flow t ~transform ~ack =
           | Error e -> resolve (Error (unavailable e))))
 
 (* The online revert cone at a driven session's idle point: the
-   port op resolves the scope, captures a [Before_revert] checkpoint, freezes the
-   plan, applies it, and settles — all under the held fence, {b synchronously}.
-   Success adopts the re-read mutation state the port returns, so the driver's
-   ledger mirror reflects the revert facts a subsequent turn's checkpoint and a
-   branch's copied prefix depend on (the mutation analogue of
+   store op resolves the scope, captures a [Before_revert] checkpoint, freezes
+   the plan, applies it, and settles — all under the held fence,
+   {b synchronously}. Success adopts the re-read mutation state it returns, so
+   the driver's ledger mirror reflects the revert facts a subsequent turn's
+   checkpoint and a branch's copied prefix depend on (the mutation analogue of
    {!commit_metadata_committed}'s revision adoption). A store [Conflict] under the
    held fence surfaces loudly as [Unavailable] — never a silent retry. *)
 and revert_flow t ~scope ~ack =
   with_idle_head t ~ack (fun resolve ->
       match t.io.revert ~scope with
-      | Error e -> resolve (Error (unavailable (Error.Store e)))
+      | Error e -> resolve (Error (unavailable e))
       | Ok (outcome, mstate) ->
           t.mstate <- mstate;
           resolve (Ok outcome))
@@ -1498,7 +1498,7 @@ and revert_flow t ~scope ~ack =
 and undo_flow t ~op ~ack =
   with_idle_head t ~ack (fun resolve ->
       let st = state t in
-      let store_error e = resolve (Error (unavailable (Error.Store e))) in
+      let store_error e = resolve (Error (unavailable e)) in
       let refuse messages =
         resolve (Ok (Mentat_mutation.Revert.Outcome.Refused messages))
       in
@@ -1648,7 +1648,7 @@ and undo_flow t ~op ~ack =
 and export_flow t ~ack =
   with_idle_head t ~ack (fun resolve ->
       match t.io.export () with
-      | Error e -> resolve (Error (unavailable (Error.Store e)))
+      | Error e -> resolve (Error (unavailable e))
       | Ok bundle -> resolve (Ok bundle))
 
 and compact_start t cfg ~id ~ack =
@@ -1695,7 +1695,7 @@ let serve t =
       (* The idle boundary: a command that landed on an idle session —
          a queue entry — may make an admission available now
          rather than at a settle that already passed. It reaches the same
-         adapter and hook code a settle does (a queued spawn attaches its
+         store and hook code a settle does (a queued spawn attaches its
          child here), so it is contained identically. *)
       if (not t.stopping) && (not (faulted t)) && not (has_active_turn t) then
         contain t (fun () -> admission t)

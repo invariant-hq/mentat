@@ -37,7 +37,8 @@ end
 
 type t =
   | Busy of { owner : string option }
-  | Store of Ports.Store_error.t
+  | Not_found
+  | Store of Mentat_diagnostic.t
   | Request of Mentat_llm.Request.Error.t
   | Session of Mentat_session.Error.t
   | Decision of Mentat_session.Decision.Resolve_error.t
@@ -59,7 +60,8 @@ let message = function
   | Busy { owner = Some owner } ->
       Printf.sprintf "session is busy: driven by %s" owner
   | Busy { owner = None } -> "session is busy: driven by another process"
-  | Store e -> Ports.Store_error.message e
+  | Not_found -> "session document not found"
+  | Store d -> Mentat_diagnostic.to_string d
   | Request e -> Mentat_llm.Request.Error.message e
   | Session e -> Mentat_session.Error.message e
   | Decision e -> Mentat_session.Decision.Resolve_error.message e
@@ -69,8 +71,7 @@ let message = function
   | Shutting_down -> "the agent is shutting down"
 
 let diagnostic = function
-  | Configuration d | Internal d -> d
-  | Store (Ports.Store_error.Corrupt d | Ports.Store_error.Io d) -> d
+  | Configuration d | Internal d | Store d -> d
   | e -> Mentat_diagnostic.of_text (message e)
 
 let pp ppf e = Format.pp_print_string ppf (message e)

@@ -18,11 +18,15 @@
     protection, advance outside protection), and the single-writer fence (one
     driver per session, acquired at first admission, held across turns).
 
-    Resources reach the engine only through the three {!Ports} — this library
-    links no store backend, no provider transport, no filesystem library, no UI.
-    The engine never parses configuration, performs credential IO, or prompts
-    for trust: context arrives as sealed data ({!Config.t}), notices drain
-    through the workspace port.
+    The engine abstracts what varies and links what does not. The provider —
+    five live transports plus scripted fakes — and the workspace capability
+    reach it only through the two {!Ports}; the store is a substrate with no
+    variation, so the engine links [mentat.store] directly and holds the opened
+    root as a plain capability value. Beyond that substrate this library links
+    no provider transport, no filesystem library, no UI. The engine never
+    parses configuration, performs credential IO, or prompts for trust: context
+    arrives as sealed data ({!Config.t}), notices drain through the workspace
+    port.
 
     {b The honesty laws.} Crash-time recovery is the sole minter of an
     [Ambiguous] settlement for a claim a dead process left open, and a live
@@ -58,8 +62,8 @@ module Config = Config
 (** Resolved per-session engine configuration, sealed by the executable. *)
 
 module Ports = Ports
-(** The store interface, provider function, and workspace capability value — the
-    engine's whole reach into the world. *)
+(** The provider function and workspace capability value — the engine's reach
+    into what genuinely varies. *)
 
 module Execution = Execution
 (** The per-turn execution selection an execution callback returns: catalog,
@@ -77,13 +81,22 @@ type t
 
 val create :
   sw:Eio.Switch.t ->
-  store:(module Ports.STORE) ->
+  store:Mentat_store.t ->
+  owner:Mentat_store.Run_lock.Owner.t ->
   provider:Ports.provider_call ->
   config:
     (Mentat_session.Id.t ->
     latest_model:Mentat_llm.Model.t option ->
     (Config.t, Mentat_diagnostic.t) result) ->
   now:(unit -> Mentat_session.Time.t) ->
+  merge:bool ->
+  revert_observe:(Mentat_workspace.Path.t -> Mentat_edit.Observed.t) ->
+  revert_checkpoint:
+    (boundary:Mentat_mutation.Checkpoint.boundary ->
+    Mentat_mutation.Checkpoint.t) ->
+  revert_apply:
+    (Mentat_edit.t -> (Mentat_edit.Result.t, Mentat_edit.Apply_error.t) result) ->
+  revert_new_id:(unit -> Mentat_mutation.Revert.Id.t) ->
   ?max_children:int ->
   broker:Mentat_broker.t ->
   broker_engine:Mentat_broker.Engine.t ->
@@ -91,15 +104,28 @@ val create :
   delegated_execution:Execution.delegated_factory ->
   unit ->
   t
-(** [create ~sw ~store ~provider ~config ~now ~execution_for_mode
+(** [create ~sw ~store ~owner ~provider ~config ~now ~merge ~execution_for_mode
      ~delegated_execution ()] is the process runtime. Drivers run as sibling
-    fibers under [sw]. [config] runs at each turn boundary — settings changes
+    fibers under [sw]. [store] is the opened store root every driver commits
+    through; run fences acquired at attachment register on [sw] and carry
+    [owner]. [config] runs at each turn boundary — settings changes
     take effect at the next turn. It receives [latest_model], the session's most
     recently started model as recorded in its own journal, so the executable can
     prefer that durable per-session fact over a global default when no
     process-local override applies. [now] is the injected clock for the session
-    values the engine itself constructs (children, fork and rewind targets); the
-    engine reads no clock. [execution_for_mode] is a factory: the driver applies
+    values the engine itself constructs (children, fork and rewind targets) and
+    for the [updated_at] stamp each commit composes; the engine reads no clock.
+
+    [merge], [revert_observe], [revert_checkpoint], [revert_apply], and
+    [revert_new_id] serve the online revert cone: each fenced revert threads
+    them per call to {!Mentat_store.Mutation.revert_apply} — [merge] is the
+    [revert.merge] config value, [revert_observe] and [revert_apply] the
+    workspace-write capability's read and all-or-nothing apply,
+    [revert_checkpoint] the [Before_revert] boundary capture, and
+    [revert_new_id] the revert-id minter — the effects the revert lifecycle
+    composes that neither the engine nor the store owns.
+
+    [execution_for_mode] is a factory: the driver applies
     it to its own nested per-session switch ([~background]) once, yielding a
     pair — a per-turn selector and a live background-process view (backing
     {!Mentat_client.running_processes}). The selector, at each new turn,

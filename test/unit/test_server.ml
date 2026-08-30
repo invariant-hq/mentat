@@ -1125,15 +1125,15 @@ let endpoint_corpus_group =
    resume against the live hub, tail/page over real journal state, heartbeats
    during a provider stall, and a slow reader losing nothing.
 
-   The engine runs over test_agent's proven in-memory [Ports.STORE] fixture (the
-   only lib-level way to a [Ports.STORE]; [bin/store_adapter] is executable-
-   private and not linkable). The store backend is orthogonal to every property
-   here — the engine, the hub, turns, tail/page, and positioned resume behave
-   identically over an in-memory or a disk journal; only durable persistence
-   differs, which none of these properties exercise. *)
+   The engine links [mentat.store] directly, so it runs over a real store root
+   in a fresh temp directory. The store backend is orthogonal to every property
+   here — the engine, the hub, turns, tail/page, and positioned resume would
+   behave identically over any durable journal; none of these properties
+   exercises persistence itself. *)
 
 module Agent = Mentat_agent
 module Ports = Mentat_agent.Ports
+module Store = Mentat_store
 module Catalog = Mentat_agent_step.Catalog
 
 let all_verbs =
@@ -1160,19 +1160,18 @@ let plain_response text =
   Llm.Response.make ~model:engine_model ~stop:Llm.Response.Stop.end_turn
     (Llm.Message.Assistant.text text)
 
-(* An in-memory Ports.STORE (test_agent's fixture, minus its fault hooks). *)
+(* A real store root in a fresh temp directory — the engine's direct
+   substrate. *)
 type store_state = {
-  sessions : (string, Session.t) Hashtbl.t;
-  muts : (string, Mutation.Event.t list) Hashtbl.t;
-  held : (string, string) Hashtbl.t;
+  root : Store.t;
+  owner : Store.Run_lock.Owner.t;
 }
 
-let fresh_store () =
-  {
-    sessions = Hashtbl.create 8;
-    muts = Hashtbl.create 8;
-    held = Hashtbl.create 8;
-  }
+let fresh_store ~sw ~fs () =
+  let base = Unix.realpath (temp_dir ~prefix:"mentat-server-store" ()) in
+  match Store.open_ ~sw (Eio.Path.( / ) fs base) with
+  | Ok root -> { root; owner = Store.Run_lock.Owner.make () }
+  | Error e -> failf "open store root: %s" (Store.Error.message e)
 
 let seed_session st ~id =
   let s =
@@ -1180,135 +1179,9 @@ let seed_session st ~id =
       ~created_at:(Session.Time.of_unix_ms 1L)
       ()
   in
-  Hashtbl.replace st.sessions id s;
-  Hashtbl.replace st.muts id []
-
-let store_of st : (module Ports.STORE) =
-  (module struct
-    type guard = string
-    type loaded = Session.t
-
-    let session_of l = l
-
-    let try_acquire id =
-      let k = Session.Id.to_string id in
-      match Hashtbl.find_opt st.held k with
-      | Some owner -> `Held (Some owner)
-      | None ->
-          Hashtbl.replace st.held k "fake-owner";
-          `Acquired k
-
-    let release g = Hashtbl.remove st.held g
-
-    let create session =
-      let k = Session.Id.to_string (Session.id session) in
-      if Hashtbl.mem st.sessions k then Error Ports.Store_error.Conflict
-      else begin
-        Hashtbl.replace st.sessions k session;
-        Hashtbl.replace st.muts k [];
-        Ok session
-      end
-
-    let fork ~from:_ ~events session =
-      let k = Session.Id.to_string (Session.id session) in
-      if Hashtbl.mem st.sessions k then Error Ports.Store_error.Conflict
-      else begin
-        Hashtbl.replace st.sessions k session;
-        Hashtbl.replace st.muts k events;
-        Ok session
-      end
-
-    let load g =
-      match Hashtbl.find_opt st.sessions g with
-      | Some s -> Ok s
-      | None -> Error Ports.Store_error.Not_found
-
-    let view id =
-      match Hashtbl.find_opt st.sessions (Session.Id.to_string id) with
-      | Some s -> Ok s
-      | None -> Error Ports.Store_error.Not_found
-
-    let commit g loaded events =
-      match Session.append_all events loaded with
-      | Error e -> Error (Ports.Store_error.Rejected e)
-      | Ok s ->
-          Hashtbl.replace st.sessions g s;
-          Ok s
-
-    let commit_metadata g _loaded session =
-      Hashtbl.replace st.sessions g session;
-      Ok session
-
-    let of_events_or_corrupt updated =
-      match Mutation.State.of_events updated with
-      | Ok state -> Ok state
-      | Error _ ->
-          Error
-            (Ports.Store_error.Corrupt
-               (Mentat_diagnostic.of_text "fake mutation ledger inconsistent"))
-
-    let append_edit g _loaded ~entries:_ event =
-      let updated =
-        Option.value (Hashtbl.find_opt st.muts g) ~default:[] @ [ event ]
-      in
-      Hashtbl.replace st.muts g updated;
-      of_events_or_corrupt updated
-
-    let append_mutation g _loaded events =
-      let updated =
-        Option.value (Hashtbl.find_opt st.muts g) ~default:[] @ events
-      in
-      Hashtbl.replace st.muts g updated;
-      of_events_or_corrupt updated
-
-    let mutation_events loaded =
-      let id = Session.id loaded in
-      Ok
-        (Option.value
-           (Hashtbl.find_opt st.muts (Session.Id.to_string id))
-           ~default:[])
-
-    let blob _id _ref = Ok None
-
-    (* A small in-memory attachment namespace, content-addressed like the real
-       store, so the engine's media passes round-trip if a test exercises them. *)
-    let attachments : (string, string) Hashtbl.t = Hashtbl.create 8
-
-    let attachment_key id reference =
-      Session.Id.to_string id ^ "\x00"
-      ^ Mentat_digest.Content_ref.to_token reference
-
-    let put_attachment id bytes =
-      let reference = Mentat_digest.Content_ref.of_contents bytes in
-      Hashtbl.replace attachments (attachment_key id reference) bytes;
-      Ok reference
-
-    let attachment id reference =
-      Ok (Hashtbl.find_opt attachments (attachment_key id reference))
-
-    (* The fake has no revert/export backend; the online cones are proven against
-       the real store elsewhere, so these decline honestly. *)
-    let revert _g _loaded ~scope:_ =
-      Error
-        (Ports.Store_error.Io
-           (Mentat_diagnostic.of_text "fake store: revert not implemented"))
-
-    let revert_selection _g _loaded ~selection:_ =
-      Error
-        (Ports.Store_error.Io
-           (Mentat_diagnostic.of_text
-              "fake store: revert_selection not implemented"))
-
-    let truncate _g _loaded ~keep:_ _session =
-      Error
-        (Ports.Store_error.Io
-           (Mentat_diagnostic.of_text "fake store: truncate not implemented"))
-
-    let export _g =
-      Error
-        (Ports.Store_error.Io
-           (Mentat_diagnostic.of_text "fake store: export not implemented"))
-  end)
+  match Store.Session.create st.root s with
+  | Ok _ -> ()
+  | Error e -> failf "seed session %s: %s" id (Store.Session.Error.message e)
 
 let ports_workspace : Ports.workspace =
   let checkpoint ~boundary =
@@ -1366,8 +1239,25 @@ let make_engine ~sw ~store ~script =
     in
     (select, fun () -> [])
   in
-  Agent.create ~sw ~store:(store_of store) ~provider:script
-    ~config:engine_config ~now
+  (* The revert-cone effects: no live-harness property drives a revert, so
+     the observe stub answers [Missing] and an unexpected apply fails
+     loudly. *)
+  Agent.create ~sw ~store:store.root ~owner:store.owner ~provider:script
+    ~config:engine_config ~now ~merge:true
+    ~revert_observe:(fun _path -> Mentat_edit.Observed.Missing)
+    ~revert_checkpoint:(fun ~boundary ->
+      Mutation.Checkpoint.make ~boundary
+        ~capture:
+          (Mutation.Checkpoint.Capture.Available
+             {
+               snapshot =
+                 Mutation.Checkpoint.Snapshot.make ~backend:"fake"
+                   ~reference:"ref";
+               excluded = 0;
+             }))
+    ~revert_apply:(fun _edit ->
+      fail "the engine revert cone applied an edit no test expected")
+    ~revert_new_id:(fun () -> Mutation.Revert.Id.of_string "revert-test")
     ~broker:
       (Mentat_broker.for_tests
          ~send:(fun ~origin:_ ~target:_ ~id:_ ~input:_ -> `Delivered)
@@ -1403,8 +1293,9 @@ let with_live_server ?(make_script = fun _clock -> default_script)
   Eio_main.run @@ fun env ->
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.clock env in
+  let fs = Eio.Stdenv.fs env in
   Eio.Switch.run @@ fun sw ->
-  let store = fresh_store () in
+  let store = fresh_store ~sw ~fs () in
   seed_session store ~id:"root";
   let engine = make_engine ~sw ~store ~script:(make_script clock) in
   let driver = live_driver engine in

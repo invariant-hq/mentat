@@ -21,5 +21,6 @@
   mentat_protocol
   mentat_sandbox
   mentat_session
+  mentat_store
   mentat_tool
   mentat_workspace))

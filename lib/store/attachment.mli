@@ -23,9 +23,7 @@
 *)
 
 module Error : sig
-  (** A filesystem or integrity failure in the attachment store. The adapter
-      maps {!Io} onto the store port's [Io] and the integrity arms onto
-      [Corrupt]. *)
+  (** A filesystem or integrity failure in the attachment store. *)
   type t =
     | Blob_mismatch of {
         expected : Mentat_digest.Content_ref.t;

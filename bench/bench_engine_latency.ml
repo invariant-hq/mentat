@@ -8,7 +8,8 @@
 
     The felt moment is pressing Enter in a long session and the model beginning
     to answer — the part mentat owns end to end, before any network byte. This
-    drives the real engine ({!Mentat_agent}) over an in-memory store and a
+    drives the real engine ({!Mentat_agent}) over a real store root in a fresh
+    temp directory (the engine links the store directly) and a
     streaming provider stub: the stub records [t0] the instant it is called and
     emits one assistant delta, and the harness watches a pre-opened [`Now] feed
     for that delta. Two spans compose the latency: [submit -> provider_call]
@@ -28,10 +29,10 @@
     Each session is driven through two turns, COLD (the driver attaches — loads
     and replays the journal from the store) and WARM (the driver is attached,
     its head cached, no store read). The measured surprise is that cold ≈ warm
-    at every size: the linear term is NOT the store reload — a warm turn skips
-    it and is just as slow — but the per-turn request assembly over the
-    conversation. So the lever for the optimization campaign is an incremental
-    request/digest, not a driver-side cache of the loaded journal.
+    at every size: the dominant linear term is NOT the store reload — a warm
+    turn skips it and is nearly as slow — but the per-turn request assembly
+    over the conversation. So the lever for the optimization campaign is an
+    incremental request/digest, not a driver-side cache of the loaded journal.
 
     It is a WALL TREND, recorded and never gated: engine orchestration is
     multi-fiber and stateful per run, so it is driven directly (fresh session
@@ -63,145 +64,32 @@ let plain_response text =
   Llm.Response.make ~model ~stop:Llm.Response.Stop.end_turn
     (Llm.Message.Assistant.text text)
 
-(* In-memory store keyed by session id, its fence a held-set — the same fake the
-   engine unit suite drives, trimmed to what a latency run needs (no fault
-   injection). Sessions are seeded directly into [sessions]; mutation ledgers
-   stay empty. *)
+(* A real store root in a fresh temp directory — the engine's direct
+   substrate, the same one the unit suite drives. Sessions are seeded through
+   the store's own create; mutation ledgers stay empty. *)
 type store_state = {
-  sessions : (string, Session.t) Hashtbl.t;
-  muts : (string, Mutation.Event.t list) Hashtbl.t;
-  attachments : (string, string) Hashtbl.t;
-  held : (string, string) Hashtbl.t;
+  root : Mentat_store.t;
+  owner : Mentat_store.Run_lock.Owner.t;
 }
 
-let fresh_store () =
-  {
-    sessions = Hashtbl.create 64;
-    muts = Hashtbl.create 64;
-    attachments = Hashtbl.create 64;
-    held = Hashtbl.create 64;
-  }
+let fresh_store ~sw ~fs () =
+  let base =
+    Unix.realpath (Filename.temp_dir ~perms:0o700 "mentat-bench-store" "")
+  in
+  match Mentat_store.open_ ~sw (Eio.Path.( / ) fs base) with
+  | Ok root -> { root; owner = Mentat_store.Run_lock.Owner.make () }
+  | Error e ->
+      Format.kasprintf failwith "open store root: %s"
+        (Mentat_store.Error.message e)
 
 (* Seed a session of [events] semantic events under [id], ready to be driven. *)
 let seed_session st ~id ~events =
   let session = Fixture.build ~id ~events () in
-  Hashtbl.replace st.sessions id session;
-  Hashtbl.replace st.muts id []
-
-let store_of st : (module Ports.STORE) =
-  (module struct
-    type guard = string
-    type loaded = Session.t
-
-    let session_of l = l
-
-    let try_acquire id =
-      let k = Session.Id.to_string id in
-      match Hashtbl.find_opt st.held k with
-      | Some owner -> `Held (Some owner)
-      | None ->
-          Hashtbl.replace st.held k "bench-owner";
-          `Acquired k
-
-    let release g = Hashtbl.remove st.held g
-
-    let create session =
-      let id = Session.id session in
-      let k = Session.Id.to_string id in
-      if Hashtbl.mem st.sessions k then Error Ports.Store_error.Conflict
-      else begin
-        Hashtbl.replace st.sessions k session;
-        Hashtbl.replace st.muts k [];
-        Ok session
-      end
-
-    let fork ~from:_ ~events session =
-      let id = Session.id session in
-      let k = Session.Id.to_string id in
-      if Hashtbl.mem st.sessions k then Error Ports.Store_error.Conflict
-      else begin
-        Hashtbl.replace st.sessions k session;
-        Hashtbl.replace st.muts k events;
-        Ok session
-      end
-
-    let load g =
-      match Hashtbl.find_opt st.sessions g with
-      | Some s -> Ok s
-      | None -> Error Ports.Store_error.Not_found
-
-    let view id =
-      match Hashtbl.find_opt st.sessions (Session.Id.to_string id) with
-      | Some s -> Ok s
-      | None -> Error Ports.Store_error.Not_found
-
-    let commit g loaded events =
-      match Session.append_all events loaded with
-      | Error e -> Error (Ports.Store_error.Rejected e)
-      | Ok s ->
-          Hashtbl.replace st.sessions g s;
-          Ok s
-
-    let commit_metadata g _loaded session =
-      Hashtbl.replace st.sessions g session;
-      Ok session
-
-    let of_events_or_corrupt updated =
-      match Mutation.State.of_events updated with
-      | Ok state -> Ok state
-      | Error _ ->
-          Error
-            (Ports.Store_error.Corrupt
-               (Mentat_diagnostic.of_text "bench mutation ledger inconsistent"))
-
-    let append_edit g _loaded ~entries:_ event =
-      let updated =
-        Option.value (Hashtbl.find_opt st.muts g) ~default:[] @ [ event ]
-      in
-      Hashtbl.replace st.muts g updated;
-      of_events_or_corrupt updated
-
-    let append_mutation g _loaded events =
-      let updated =
-        Option.value (Hashtbl.find_opt st.muts g) ~default:[] @ events
-      in
-      Hashtbl.replace st.muts g updated;
-      of_events_or_corrupt updated
-
-    let mutation_events loaded =
-      let id = Session.id loaded in
-      Ok
-        (Option.value
-           (Hashtbl.find_opt st.muts (Session.Id.to_string id))
-           ~default:[])
-
-    let blob _id _ref = Ok None
-
-    let attachment_key id reference =
-      Session.Id.to_string id ^ "\x00"
-      ^ Mentat_digest.Content_ref.to_token reference
-
-    let put_attachment id bytes =
-      let reference = Mentat_digest.Content_ref.of_contents bytes in
-      Hashtbl.replace st.attachments (attachment_key id reference) bytes;
-      Ok reference
-
-    let attachment id reference =
-      Ok (Hashtbl.find_opt st.attachments (attachment_key id reference))
-
-    let unsupported name =
-      Error
-        (Ports.Store_error.Io
-           (Mentat_diagnostic.of_text ("bench store: " ^ name ^ " unused")))
-
-    let revert _g _loaded ~scope:_ = unsupported "revert"
-
-    let revert_selection _g _loaded ~selection:_ =
-      unsupported "revert_selection"
-
-    let truncate _g _loaded ~keep:_ _session = unsupported "truncate"
-    let export _g = unsupported "export"
-  end)
+  match Mentat_store.Session.create st.root session with
+  | Ok _ -> ()
+  | Error e ->
+      Format.kasprintf failwith "seed session %s: %s" id
+        (Mentat_store.Session.Error.message e)
 
 let workspace : Ports.workspace =
   let checkpoint ~boundary =
@@ -327,7 +215,21 @@ let mk_engine ~sw ~store ~provider =
           ~prelude:Llm.Request.Prelude.empty),
       fun () -> [] )
   in
-  Agent.create ~sw ~store:(store_of store) ~provider ~config ~now
+  Agent.create ~sw ~store:store.root ~owner:store.owner ~provider ~config ~now
+    ~merge:true
+    ~revert_observe:(fun _path -> Mentat_edit.Observed.Missing)
+    ~revert_checkpoint:(fun ~boundary ->
+      Mutation.Checkpoint.make ~boundary
+        ~capture:
+          (Mutation.Checkpoint.Capture.Available
+             {
+               snapshot =
+                 Mutation.Checkpoint.Snapshot.make ~backend:"bench"
+                   ~reference:"ref";
+               excluded = 0;
+             }))
+    ~revert_apply:(fun _edit -> failwith "bench revert cone unused")
+    ~revert_new_id:(fun () -> Mutation.Revert.Id.of_string "revert-bench")
     ~broker:
       (Mentat_broker.for_tests
          ~send:(fun ~origin:_ ~target:_ ~id:_ ~input:_ -> `Delivered)
@@ -450,9 +352,10 @@ let ms x = median x *. 1e3
 let () =
   let sizes = Fixture.event_sizes in
   let warmup = 2 and samples = 6 in
-  Eio_main.run @@ fun _env ->
+  Eio_main.run @@ fun env ->
+  let fs = Eio.Stdenv.fs env in
   Eio.Switch.run @@ fun sw ->
-  let store = fresh_store () in
+  let store = fresh_store ~sw ~fs () in
   let engine =
     mk_engine ~sw ~store
       ~provider:(fun request ~on_event ~on_download ~cancelled ->

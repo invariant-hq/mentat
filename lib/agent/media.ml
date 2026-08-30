@@ -6,7 +6,7 @@
 type error =
   | Malformed_base64
   | Missing_attachment of Mentat_digest.Content_ref.t
-  | Store of Ports.Store_error.t
+  | Store of Mentat_diagnostic.t
   | Rebuild of string
 
 (* The user-facing diagnostic for a media error. The provider path prefixes a
@@ -16,7 +16,7 @@ let message = function
   | Missing_attachment reference ->
       Format.asprintf "referenced attachment %a has no stored blob"
         Mentat_digest.Content_ref.pp reference
-  | Store e -> Ports.Store_error.message e
+  | Store d -> Mentat_diagnostic.to_string d
   | Rebuild detail -> detail
 
 let ( let* ) = Result.bind

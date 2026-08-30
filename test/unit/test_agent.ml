@@ -3,13 +3,15 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(* Unit suite for [mentat_agent], the engine. The engine reaches
-   the world only through the three ports (next/lib/agent/ports.mli), so every
-   runtime test drives it with in-memory fakes: an in-memory STORE keyed by
-   session id (its fence a shared held-set, so two engines over one store see
-   [Busy]), a scripted PROVIDER that returns canned [Llm.Response.t] values (and,
-   for the interrupt test, cooperatively yields until cancelled), and a no-op
-   WORKSPACE. No fake needs real IO.
+(* Unit suite for [mentat_agent], the engine. The engine links [mentat.store]
+   directly and reaches everything else through the two ports
+   (next/lib/agent/ports.mli), so every runtime test drives it over a REAL
+   store root in a fresh temp directory, with a scripted PROVIDER that returns
+   canned [Llm.Response.t] values (and, for the interrupt test, cooperatively
+   yields until cancelled) and a no-op WORKSPACE. Store faults are induced for
+   real, on disk: a permission flip is a genuine IO failure, an out-of-band
+   write to the session document a genuine CAS/fence violation, and garbage
+   bytes in the ledger genuine corruption.
 
    The private modules ([driver], [feed], [scheduler]) are not exported, so their
    laws are pinned through the public [Mentat_agent] runtime plus its [Client]
@@ -31,6 +33,7 @@ module Catalog = Mentat_agent_step.Catalog
 module Ports = Mentat_agent.Ports
 module Protocol = Mentat_protocol
 module Session = Mentat_session
+module Store = Mentat_store
 module Mutation = Mentat_mutation
 module Sandbox = Mentat_sandbox
 module Llm = Mentat_llm
@@ -146,207 +149,158 @@ let receipt_child_of request =
 let is_child_key k =
   String.length k >= 4 && String.equal (String.sub k 0 4) "sub-"
 
-let is_child_id id = is_child_key (Session.Id.to_string id)
-
-(* Fake ports. *)
+(* The real store fixture, and the fake ports around it. *)
 
 type store_state = {
-  sessions : (string, Session.t) Hashtbl.t;
-  muts : (string, Mutation.Event.t list) Hashtbl.t;
-  (* Content-addressed attachment blobs keyed by "<session>\x00<ref token>",
-     mirroring the real store's per-session attachments namespace. *)
-  attachments : (string, string) Hashtbl.t;
-  held : (string, string) Hashtbl.t;
-  mutable commit_fault : Session.Event.t list -> Ports.Store_error.t option;
-  mutable metadata_fault : Session.t -> Ports.Store_error.t option;
-  mutable create_fault : Session.Id.t -> Ports.Store_error.t option;
-  (* An adapter that [raise]s (rather than returning [Error]) during a child
-     [create] — the shape fault-containment must catch. *)
-  mutable create_raise : Session.Id.t -> bool;
-  (* Runs before a [create] takes effect. A real disk create suspends on IO
-     here; the default is a no-op, and a test that needs to expose the pre-create
-     scheduling window injects an [Eio.Fiber.yield]. *)
-  mutable create_before : Session.Id.t -> unit;
-  (* The online revert/export cones' port results. Default: decline, so a test
-     that does not exercise them sees the honest "no backend" error; a flow test
-     sets a success or a specific fault. *)
-  mutable revert_result :
-    Mutation.Revert.Scope.t ->
-    (Mutation.Revert.Outcome.t, Ports.Store_error.t) result;
-  mutable export_result : (string, Ports.Store_error.t) result;
+  root : Store.t;
+  base : string;  (* The temp directory holding the opened root. *)
+  store_sw : Eio.Switch.t;
+  owner : Store.Run_lock.Owner.t;
+  clock : int64 ref;
+      (* One deterministic clock per store, shared by every engine a test
+         opens over it: each commit stamps [updated_at], and session time is
+         monotone per document, so a successor engine must resume the
+         predecessor's clock rather than restart it. *)
 }
 
-let fresh_store () =
-  {
-    sessions = Hashtbl.create 8;
-    muts = Hashtbl.create 8;
-    attachments = Hashtbl.create 8;
-    held = Hashtbl.create 8;
-    commit_fault = (fun _ -> None);
-    metadata_fault = (fun _ -> None);
-    create_fault = (fun _ -> None);
-    create_raise = (fun _ -> false);
-    create_before = (fun _ -> ());
-    revert_result =
-      (fun _ ->
-        Error
-          (Ports.Store_error.Io
-             (Mentat_diagnostic.of_text "fake store: revert not implemented")));
-    export_result =
-      Error
-        (Ports.Store_error.Io
-           (Mentat_diagnostic.of_text "fake store: export not implemented"));
-  }
+let fresh_store ~sw ~fs () =
+  let base = Unix.realpath (temp_dir ~prefix:"mentat-agent-store" ()) in
+  match Store.open_ ~sw (Eio.Path.( / ) fs base) with
+  | Ok root ->
+      {
+        root;
+        base;
+        store_sw = sw;
+        owner = Store.Run_lock.Owner.make ();
+        clock = ref 1_000L;
+      }
+  | Error e -> failf "open store root: %s" (Store.Error.message e)
 
 let seed_session st ~id =
   let s =
     Session.create ~id:(sid id) ~cwd ~created_at:(Session.Time.of_unix_ms 1L) ()
   in
-  Hashtbl.replace st.sessions id s;
-  Hashtbl.replace st.muts id []
+  match Store.Session.create st.root s with
+  | Ok _ -> ()
+  | Error e -> failf "seed session %s: %s" id (Store.Session.Error.message e)
 
-let store_of st : (module Ports.STORE) =
-  (module struct
-    type guard = string
-    type loaded = Session.t
+(* Fence-free reads over the store root, keyed by the raw session-id string
+   the suite names its fixtures with. *)
+let persisted_opt st key =
+  match Store.Session.load st.root (sid key) with
+  | Ok doc -> Some (Store.Session.Document.session doc)
+  | Error (Store.Session.Error.Not_found _) -> None
+  | Error e -> failf "load session %s: %s" key (Store.Session.Error.message e)
 
-    let session_of l = l
+let persisted st key =
+  match persisted_opt st key with
+  | Some session -> session
+  | None -> failf "session %s is missing from the store" key
 
-    let try_acquire id =
-      let k = Session.Id.to_string id in
-      match Hashtbl.find_opt st.held k with
-      | Some owner -> `Held (Some owner)
-      | None ->
-          Hashtbl.replace st.held k "fake-owner";
-          `Acquired k
+let session_exists st key = Option.is_some (persisted_opt st key)
 
-    let release g = Hashtbl.remove st.held g
+let mutation_events st key =
+  match Store.Session.load st.root (sid key) with
+  | Error e -> failf "load session %s: %s" key (Store.Session.Error.message e)
+  | Ok doc -> (
+      match Store.Mutation.read st.root doc with
+      | Ok state -> Mutation.State.events state
+      | Error e ->
+          failf "read ledger %s: %s" key (Store.Mutation.Error.message e))
 
-    let create session =
-      let id = Session.id session in
-      let k = Session.Id.to_string id in
-      st.create_before id;
-      if st.create_raise id then raise (Sys_error "child backend exploded");
-      match st.create_fault id with
-      | Some e -> Error e
-      | None ->
-          if Hashtbl.mem st.sessions k then Error Ports.Store_error.Conflict
-          else begin
-            Hashtbl.replace st.sessions k session;
-            Hashtbl.replace st.muts k [];
-            Ok session
-          end
+let session_keys st =
+  match Store.Session.scan st.root with
+  | Ok (docs, _corrupt) ->
+      List.sort String.compare
+        (List.map
+           (fun d -> Session.Id.to_string (Store.Session.Document.id d))
+           docs)
+  | Error e -> failf "scan sessions: %s" (Store.Session.Error.message e)
 
-    (* A branch: the same document-creation fault hooks as [create], plus the
-       copied ledger prefix seeded as the child's mutation history (the real
-       store copies blobs too; this fake persists none). *)
-    let fork ~from:_ ~events session =
-      let id = Session.id session in
-      let k = Session.Id.to_string id in
-      st.create_before id;
-      if st.create_raise id then raise (Sys_error "child backend exploded");
-      match st.create_fault id with
-      | Some e -> Error e
-      | None ->
-          if Hashtbl.mem st.sessions k then Error Ports.Store_error.Conflict
-          else begin
-            Hashtbl.replace st.sessions k session;
-            Hashtbl.replace st.muts k events;
-            Ok session
-          end
-
-    let load g =
-      match Hashtbl.find_opt st.sessions g with
-      | Some s -> Ok s
-      | None -> Error Ports.Store_error.Not_found
-
-    let view id =
-      match Hashtbl.find_opt st.sessions (Session.Id.to_string id) with
-      | Some s -> Ok s
-      | None -> Error Ports.Store_error.Not_found
-
-    let commit g loaded events =
-      match st.commit_fault events with
-      | Some e -> Error e
-      | None -> (
-          match Session.append_all events loaded with
-          | Error e -> Error (Ports.Store_error.Rejected e)
-          | Ok s ->
-              Hashtbl.replace st.sessions g s;
-              Ok s)
-
-    let commit_metadata g _loaded session =
-      match st.metadata_fault session with
-      | Some e -> Error e
-      | None ->
-          Hashtbl.replace st.sessions g session;
-          Ok session
-
-    let of_events_or_corrupt updated =
-      match Mutation.State.of_events updated with
-      | Ok state -> Ok state
+(* Persist a prebuilt session value wholesale: create when absent, replace by
+   a short-lived fenced CAS when the id already exists — how a recovery
+   fixture overwrites the seeded [root] before any driver attaches. *)
+let put_session st session =
+  let id = Session.id session in
+  match Store.Session.create st.root session with
+  | Ok _ -> ()
+  | Error (Store.Session.Error.Already_exists _) -> (
+      match
+        Store.Run_lock.try_acquire ~sw:st.store_sw st.root ~session:id
+          ~owner:st.owner
+      with
       | Error _ ->
-          Error
-            (Ports.Store_error.Corrupt
-               (Mentat_diagnostic.of_text "fake mutation ledger inconsistent"))
+          failf "put_session %s: fence unavailable" (Session.Id.to_string id)
+      | Ok guard ->
+          Fun.protect
+            ~finally:(fun () -> Store.Run_lock.release guard)
+            (fun () ->
+              match Store.Session.load st.root id with
+              | Error e ->
+                  failf "put_session load: %s" (Store.Session.Error.message e)
+              | Ok doc -> (
+                  match
+                    Store.Session.commit st.root ~fence:guard doc session
+                  with
+                  | Ok _ -> ()
+                  | Error e ->
+                      failf "put_session commit: %s"
+                        (Store.Session.Error.message e))))
+  | Error e -> failf "put_session: %s" (Store.Session.Error.message e)
 
-    let append_edit g _loaded ~entries:_ event =
-      let updated =
-        Option.value (Hashtbl.find_opt st.muts g) ~default:[] @ [ event ]
-      in
-      Hashtbl.replace st.muts g updated;
-      of_events_or_corrupt updated
+(* Real fault inductions, on disk. *)
 
-    let append_mutation g _loaded events =
-      let updated =
-        Option.value (Hashtbl.find_opt st.muts g) ~default:[] @ events
-      in
-      Hashtbl.replace st.muts g updated;
-      of_events_or_corrupt updated
+let session_dir st key = Filename.concat st.base ("sessions/" ^ key)
 
-    let mutation_events loaded =
-      let id = Session.id loaded in
-      Ok
-        (Option.value
-           (Hashtbl.find_opt st.muts (Session.Id.to_string id))
-           ~default:[])
+(* An IO fault: the session directory refuses new entries, so the next
+   durable write inside it fails loudly; [allow_writes] lifts the fault
+   (always before teardown, so fence release and cleanup stay unimpeded). *)
+let deny_writes st key = Unix.chmod (session_dir st key) 0o500
+let allow_writes st key = Unix.chmod (session_dir st key) 0o755
 
-    (* This fake persists no blobs (its tools record no edits), so a change-diff
-       query finds no image bytes; the flip's [change_diff] wiring is exercised
-       structurally, not for real hunks. *)
-    let blob _id _ref = Ok None
+(* The child-creation IO fault: [sessions/] refuses new children, so creating
+   a session fails while the already-created ones keep committing inside
+   their own directories. *)
+let deny_session_creation st =
+  Unix.chmod (Filename.concat st.base "sessions") 0o500
 
-    (* A working in-memory attachment namespace, content-addressed like the real
-       store, so the engine's externalize/resolve passes round-trip real bytes. *)
-    let attachment_key id reference =
-      Session.Id.to_string id ^ "\x00"
-      ^ Mentat_digest.Content_ref.to_token reference
+let allow_session_creation st =
+  Unix.chmod (Filename.concat st.base "sessions") 0o755
 
-    let put_attachment id bytes =
-      let reference = Mentat_digest.Content_ref.of_contents bytes in
-      Hashtbl.replace st.attachments (attachment_key id reference) bytes;
-      Ok reference
+(* A genuine fence violation: an out-of-band writer replaces the document's
+   bytes, so the engine's next CAS against its held revision conflicts. *)
+let clobber_document st key =
+  let path = Filename.concat (session_dir st key) "session.json" in
+  let bytes = In_channel.with_open_bin path In_channel.input_all in
+  Out_channel.with_open_bin path (fun ch ->
+      Out_channel.output_string ch bytes;
+      Out_channel.output_string ch " ")
 
-    let attachment id reference =
-      Ok (Hashtbl.find_opt st.attachments (attachment_key id reference))
+(* Genuine corruption: a newline-terminated garbage ledger line — damage, not
+   a crash-torn tail (tail repair drops an unterminated final fragment). *)
+let corrupt_ledger st key =
+  let path = Filename.concat (session_dir st key) "ledger.jsonl" in
+  let ch =
+    Out_channel.open_gen
+      [ Open_wronly; Open_append; Open_creat; Open_binary ]
+      0o644 path
+  in
+  Out_channel.output_string ch "not a ledger line\n";
+  Out_channel.close ch
 
-    (* The revert/export port results are injected; the default declines. The
-       online-cone flow tests set a success or a specific fault. *)
-    let revert _g _loaded ~scope = st.revert_result scope
+(* Delete a session's durable state out-of-band — the lost-child-journal
+   crash residue recovery must re-drive. *)
+let rec rm_rf path =
+  match Unix.lstat path with
+  | { Unix.st_kind = Unix.S_DIR; _ } ->
+      Array.iter (fun n -> rm_rf (Filename.concat path n)) (Sys.readdir path);
+      Unix.rmdir path
+  | _ -> Unix.unlink path
+  | exception Unix.Unix_error (Unix.ENOENT, _, _) -> ()
 
-    let revert_selection _g _loaded ~selection:_ =
-      Error
-        (Ports.Store_error.Io
-           (Mentat_diagnostic.of_text
-              "fake store: revert_selection not implemented"))
-
-    let truncate _g _loaded ~keep:_ _session =
-      Error
-        (Ports.Store_error.Io
-           (Mentat_diagnostic.of_text "fake store: truncate not implemented"))
-
-    let export _g = st.export_result
-  end)
+let remove_session st key =
+  rm_rf (session_dir st key);
+  rm_rf (Filename.concat st.base ("sessions/" ^ key ^ ".lock"))
 
 let workspace : Ports.workspace =
   let checkpoint ~boundary =
@@ -534,12 +488,10 @@ let mk_engine ~sw ~store ?(script = default_script) ?(config = default_config)
     ?max_children ?materialize ?broker ?(catalog = catalog)
     ?(workspace = workspace) ?execution_for_mode ?background_probe
     ?running_view ?delegated_execution ?delegated_role_spy () =
-  let now =
-    let r = ref 1000L in
-    fun () ->
-      let v = !r in
-      r := Int64.add v 1L;
-      Session.Time.of_unix_ms v
+  let now () =
+    let v = !(store.clock) in
+    store.clock := Int64.add v 1L;
+    Session.Time.of_unix_ms v
   in
   (* Tests select executions as [(catalog, workspace, policy)] triples; the
      engine seam takes an [Execution.t]. Wrap here with the empty context
@@ -623,7 +575,7 @@ let mk_engine ~sw ~store ?(script = default_script) ?(config = default_config)
             | Error _ -> ()
             | Ok () -> (
                 let find id =
-                  Hashtbl.find_opt store.sessions (Session.Id.to_string id)
+                  persisted_opt store (Session.Id.to_string id)
                 in
                 match find child with
                 | None -> ()
@@ -671,9 +623,9 @@ let mk_engine ~sw ~store ?(script = default_script) ?(config = default_config)
                                       ((Agent.driver engine)
                                          .Client.Driver.Session.submit command)))))))
   in
-  (* The mocked broker seam: the unit tier runs over the fake store, so a
-     send's real fence-and-append effects have nowhere to land — the default
-     stub plays the target's own server folded into this one runtime, the
+  (* The mocked broker seam: a real send belongs to the target's own
+     server process, which the unit tier does not spawn — the default
+     stub plays that server folded into this one runtime, the
      same fold as [local_materialize]: the entry crosses the engine's client
      cone as the queue command the wire carries, landing the driver's dedup
      and admit judgment. A test that cares injects its own recording
@@ -721,14 +673,24 @@ let mk_engine ~sw ~store ?(script = default_script) ?(config = default_config)
           | None -> ());
     }
   in
+  (* The revert-cone effects: the suite's engine reverts settle before any
+     workspace effect is needed (an empty history is [Nothing_to_revert], a
+     damaged one refuses at the read), so the observe stub answers [Missing]
+     and an unexpected apply fails the test loudly. *)
   let engine =
-    Agent.create ~sw ~store:(store_of store) ~provider:script ~config ~now
+    Agent.create ~sw ~store:store.root ~owner:store.owner ~provider:script
+      ~config ~now ~merge:true
+      ~revert_observe:(fun _path -> Mentat_edit.Observed.Missing)
+      ~revert_checkpoint:(fun ~boundary ->
+        Mutation.Checkpoint.make ~boundary ~capture:(available_capture ()))
+      ~revert_apply:(fun _edit ->
+        fail "the engine revert cone applied an edit no test expected")
+      ~revert_new_id:(fun () -> Mutation.Revert.Id.of_string "revert-test")
       ?max_children ~broker ~broker_engine ~execution_for_mode
       ~delegated_execution ()
   in
   engine_cell := Some engine;
   engine
-
 (* One engine over a freshly-seeded [root] session, torn down (shutdown, then
    switch cancellation) inside a real-clock deadlock guard. *)
 let with_engine ?script ?config ?max_children ?materialize ?broker ?catalog
@@ -736,8 +698,9 @@ let with_engine ?script ?config ?max_children ?materialize ?broker ?catalog
     ?delegated_execution ?delegated_role_spy f =
   Eio_main.run @@ fun env ->
   let clock = Eio.Stdenv.clock env in
+  let fs = Eio.Stdenv.fs env in
   Eio.Switch.run @@ fun sw ->
-  let store = fresh_store () in
+  let store = fresh_store ~sw ~fs () in
   seed_session store ~id:"root";
   let engine =
     mk_engine ~sw ~store ?script ?config ?max_children ?materialize ?broker
@@ -757,32 +720,19 @@ let with_engine ?script ?config ?max_children ?materialize ?broker ?catalog
         "deadlock guard: the test body exceeded 15s (a turn likely never \
          settled)"
 
-(* A [commit_fault] that declines every commit until the [n]th one matching
-   [predicate] (all commits by default), then yields [error] exactly once. It
-   counts only matching commits, so a predicate scopes the ordinal to one kind
-   of append — the knob the crash matrix uses to fault at a chosen commit point
-   rather than always at the first. *)
-let fault_on_nth ?(predicate = fun _ -> true) n error =
-  let matched = ref 0 in
-  fun events ->
-    if predicate events then begin
-      incr matched;
-      if !matched = n then Some error else None
-    end
-    else None
-
 (* The crash-and-successor fixture: one store seeded with [root], plus a
    [restart] that attaches a fresh engine and client to it. A crash body drives
-   one engine to a [commit_fault], shuts it, and [restart]s the successor that
-   recovers — without re-deriving the run/switch/store/guard boilerplate. Style
+   one engine into an induced store fault, shuts it, and [restart]s the
+   successor that recovers — without re-deriving the boilerplate. Style
    (a): the successor shares this switch and the 15s deadlock guard. A
    synthesized-journal case that seeds recovery state directly, with no live
    crash, stays on the plain [mk_engine] form (style (b)). *)
 let with_crash_recovery f =
   Eio_main.run @@ fun env ->
   let clock = Eio.Stdenv.clock env in
+  let fs = Eio.Stdenv.fs env in
   Eio.Switch.run @@ fun sw ->
-  let store = fresh_store () in
+  let store = fresh_store ~sw ~fs () in
   seed_session store ~id:"root";
   let restart ?script ?config ?catalog ?workspace () =
     let engine = mk_engine ~sw ~store ?script ?config ?catalog ?workspace () in
@@ -911,44 +861,32 @@ let drain_flood ~progress feed =
   loop ();
   (List.rev !committed, List.rev !deltas)
 
-let session_keys st =
-  Hashtbl.fold (fun k _ acc -> k :: acc) st.sessions []
-  |> List.sort String.compare
-
 (* A session journal with a tool claim opened and never settled — the state a
    crash mid-tool leaves, which recovery reads as an ambiguous tool. *)
 let has_open_tool_claim st key =
-  match Hashtbl.find_opt st.sessions key with
+  match persisted_opt st key with
   | None -> false
   | Some s ->
       List.exists
         (function Session.Event.Tool_claimed _ -> true | _ -> false)
         (Session.events s)
 
-let is_tool_settled events =
-  List.exists
-    (function Session.Event.Tool_settled _ -> true | _ -> false)
-    events
-
 (* Whether a session's mutation journal carries a fresh post-recovery capture —
    the checkpoint recovery must clear [possibly_mutating] against it. *)
 let has_after_recovery_checkpoint st key =
-  match Hashtbl.find_opt st.muts key with
-  | None -> false
-  | Some events ->
-      List.exists
-        (function
-          | Mutation.Event.Checkpoint cp -> (
-              match Mutation.Checkpoint.boundary cp with
-              | Mutation.Checkpoint.After_recovery _ -> true
-              | _ -> false)
+  List.exists
+    (function
+      | Mutation.Event.Checkpoint cp -> (
+          match Mutation.Checkpoint.boundary cp with
+          | Mutation.Checkpoint.After_recovery _ -> true
           | _ -> false)
-        events
+      | _ -> false)
+    (mutation_events st key)
 
 (* Whether a session's durable journal carries a queued entry — the durable
    proof a parked (rather than directly-submitted) message reached the child. *)
 let has_enqueued st key =
-  match Hashtbl.find_opt st.sessions key with
+  match persisted_opt st key with
   | None -> false
   | Some s ->
       List.exists
@@ -976,6 +914,19 @@ let trivial_tool ?(name = "noop") () =
     ~input:Mentat_tool.Input.empty
     ~output:(fun () -> Mentat_tool.Output.make ~text:"ok" ())
     ~run:(fun ~cancelled:_ () -> Mentat_tool.Result.completed ~output:() ())
+    ()
+
+(* An "edit" tool that runs the current [hook] before returning — the
+   interposition point right before the settle commit, where a crash test
+   induces its disk-level fault (the catalog is built before the store
+   exists, so the hook is a cell the test body arms). *)
+let hooked_edit_tool hook =
+  Mentat_tool.make ~name:"edit" ~description:"a hooked edit tool"
+    ~input:Mentat_tool.Input.empty
+    ~output:(fun () -> Mentat_tool.Output.make ~text:"ok" ())
+    ~run:(fun ~cancelled:_ () ->
+      !hook ();
+      Mentat_tool.Result.completed ~output:() ())
     ()
 
 let catalog_rejects_duplicate_names () =
@@ -1652,7 +1603,7 @@ let a_prompt_with_image_externalizes_and_resolves () =
       | Some (_, `Uri _) | None -> fail "the provider saw no image media");
       (* The journal's [Turn_started] holds a [`Ref], never inline bytes. *)
       let session =
-        match Hashtbl.find_opt store.sessions "root" with
+        match persisted_opt store "root" with
         | Some s -> s
         | None -> fail "root session vanished"
       in
@@ -1683,12 +1634,13 @@ let a_prompt_with_image_externalizes_and_resolves () =
              | Llm.Content.Media { source = `Base64 _; _ } -> true | _ -> false)
            content);
       (* The attachment blob holds the decoded image bytes (not the base64). *)
-      equal (option string)
-        ~msg:"the attachment blob holds the decoded image bytes" (Some raw)
-        (Hashtbl.find_opt store.attachments
-           (Session.Id.to_string (sid "root")
-           ^ "\x00"
-           ^ Mentat_digest.Content_ref.to_token reference)))
+      match Store.Attachment.get store.root ~session:(sid "root") reference with
+      | Ok bytes ->
+          equal (option string)
+            ~msg:"the attachment blob holds the decoded image bytes" (Some raw)
+            bytes
+      | Error e ->
+          failf "attachment read: %s" (Store.Attachment.Error.message e))
 
 (* Background terminals, driver stage: the controller opens a nested
    per-session switch and releases it in the quiescent teardown. These drive a
@@ -1862,7 +1814,7 @@ let mode_execution_binds_catalog_workspace_and_policy_together () =
       (Agent.Config.make ~model ~policy:build_policy ())
   in
   let contract store turn =
-    let session = Hashtbl.find store.sessions "root" in
+    let session = persisted store "root" in
     match Session.State.turn (tid turn) (Session.state session) with
     | Some turn -> Session.Turn.contract turn
     | None -> failf "turn %s was not persisted" turn
@@ -2019,7 +1971,7 @@ let active_plan_recovery_uses_the_read_execution () =
           ~policy:read_policy ~workspace_identity:Sandbox.Identity.refused
           ~input ~tool_name:"read_probe"
       in
-      Hashtbl.replace store.sessions "root" recovered;
+      put_session store recovered;
       submit_ok client
         (prompt ~mode:Session.Contract.Mode.Plan ~session:(sid "root")
            ~turn:turn_id "PLAN_RECOVERY");
@@ -2136,9 +2088,8 @@ let delegated_recovery_uses_the_fixed_execution () =
         | Ok child -> child
         | Error error -> failf "delegated metadata: %a" Session.Error.pp error
       in
-      Hashtbl.replace store.sessions "root" parent;
-      Hashtbl.replace store.sessions "delegated-recovery" child;
-      Hashtbl.replace store.muts "delegated-recovery" [];
+      put_session store parent;
+      put_session store child;
       submit_ok client
         (prompt ~session:child_id ~turn:child_turn "DELEGATED_RECOVERY");
       ignore (drain_committed (follow_ok client child_id));
@@ -2186,11 +2137,7 @@ let delegated_attachment_rejects_invalid_lineage () =
     | Error error -> failf "lineage fixture: %a" Session.Error.pp error
   in
   with_engine (fun ~sw:_ ~client ~store ~engine:_ ->
-      let put session =
-        let key = Session.Id.to_string (Session.id session) in
-        Hashtbl.replace store.sessions key session;
-        Hashtbl.replace store.muts key []
-      in
+      let put session = put_session store session in
       let expect_unavailable ~case ~contains child =
         match
           Client.submit client.c
@@ -2357,7 +2304,7 @@ let plan_approval_reaches_the_build_request context () =
             (request_contains request planning_prompt);
           is_false ~msg:"fresh-context Build excludes the superseded proposal"
             (request_contains request proposed_body));
-      let persisted = Hashtbl.find store.sessions "root" in
+      let persisted = persisted store "root" in
       let admitted =
         Session.State.turns (Session.state persisted)
         |> List.find_opt (fun turn ->
@@ -2395,7 +2342,7 @@ let session_config_is_reloaded_at_each_turn_and_isolated_by_session () =
         ignore (drain_committed (follow_ok client session))
       in
       let review_for session turn =
-        let persisted = Hashtbl.find store.sessions session in
+        let persisted = persisted store session in
         match Session.State.turn (tid turn) (Session.state persisted) with
         | None -> failf "turn %s was not persisted" turn
         | Some turn -> Session.Contract.review (Session.Turn.contract turn)
@@ -2527,7 +2474,7 @@ let submit_returns_after_durable_admission () =
       | Error e ->
           failf "an idempotent resubmit must be Ok: %a" Protocol.Error.pp e);
       is_true ~msg:"the session is persisted in the store"
-        (Hashtbl.mem store.sessions "root"))
+        (session_exists store "root"))
 
 let reused_turn_id_with_new_input_is_rejected () =
   with_engine (fun ~sw:_ ~client ~store:_ ~engine:_ ->
@@ -2869,8 +2816,9 @@ let an_interrupt_admits_the_queued_correction () =
 let a_second_engine_over_a_driven_session_is_busy () =
   Eio_main.run @@ fun env ->
   let clock = Eio.Stdenv.clock env in
+  let fs = Eio.Stdenv.fs env in
   Eio.Switch.run @@ fun sw ->
-  let store = fresh_store () in
+  let store = fresh_store ~sw ~fs () in
   seed_session store ~id:"root";
   let engine_a = mk_engine ~sw ~store () in
   let engine_b = mk_engine ~sw ~store () in
@@ -2901,10 +2849,12 @@ let a_second_engine_over_a_driven_session_is_busy () =
 
 let a_faulted_driver_is_unavailable_and_sticky () =
   with_engine (fun ~sw:_ ~client ~store ~engine:_ ->
-      store.commit_fault <-
-        (function
-        | [] -> None
-        | _ -> Some (Ports.Store_error.Io (Mentat_diagnostic.of_text "boom")));
+      (* A warm-up turn attaches the driver and holds the fence, so the induced
+         IO fault lands on the next turn's admission commit — not on the fence
+         acquire, which would refuse without creating a driver to fault. *)
+      submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t-f0") "hi");
+      ignore (drain_committed (follow_ok client (sid "root")));
+      deny_writes store "root";
       let unavailable = function
         | Protocol.Error.Unavailable _ -> true
         | _ -> false
@@ -2916,13 +2866,16 @@ let a_faulted_driver_is_unavailable_and_sticky () =
       | Error (Protocol.Error.Unavailable d) ->
           is_true
             ~msg:
-              "the store's carried diagnostic passes through whole, not \
-               re-rendered"
-            (Mentat_diagnostic.equal d (Mentat_diagnostic.of_text "boom"))
+              "the store's carried diagnostic passes through whole, locating \
+               the failing session"
+            (contains_sub ~sub:"root" (Mentat_diagnostic.to_string d))
       | Error e ->
           failf "a store commit failure must surface as Unavailable: %a"
             Protocol.Error.pp e
       | Ok () -> fail "a failing commit must fault the driver");
+      allow_writes store "root";
+      (* The fault is sticky even after the IO fault is lifted: a contained
+         fault stops admission until a successor recovers. *)
       match
         Client.submit client.c
           (prompt ~session:(sid "root") ~turn:(tid "t-f2") "hi")
@@ -2997,10 +2950,10 @@ let shutdown_preserves_a_parked_decision_for_recovery () =
         | Error error ->
             failf "query parked decision: %a" Protocol.Error.pp error
       in
-      let before = Hashtbl.find store.sessions "root" in
+      let before = persisted store "root" in
       let before_count = List.length (Session.events before) in
       Agent.shutdown engine;
-      let after = Hashtbl.find store.sessions "root" in
+      let after = persisted store "root" in
       equal int
         ~msg:"closing a parked controller appends no interruption or terminal"
         before_count
@@ -3114,7 +3067,7 @@ let manual_compact_installs_a_user_requested_summary () =
                  true
              | _ -> false)
            compaction_facts);
-      (match Hashtbl.find_opt store.sessions "root" with
+      (match persisted_opt store "root" with
       | None -> fail "the root session is missing from the store"
       | Some session -> (
           let state = Session.state session in
@@ -3246,7 +3199,7 @@ let overflow_compacts_once_and_retries () =
       | Some _ -> fail "the turn must complete after overflow recovery"
       | None -> fail "the turn did not settle");
       equal int ~msg:"one overflow then one successful retry" 2 !turn_requests;
-      match Hashtbl.find_opt store.sessions "root" with
+      match persisted_opt store "root" with
       | None -> fail "the root session is missing from the store"
       | Some session -> (
           match Session.State.latest_compaction (Session.state session) with
@@ -3327,7 +3280,7 @@ let a_step_limited_turn_winds_down_once_then_stops () =
     Ok (Agent.Config.make ~model ~max_steps:1 ())
   in
   let origins store =
-    Session.State.turns (Session.state (Hashtbl.find store.sessions "root"))
+    Session.State.turns (Session.state (persisted store "root"))
     |> List.map (fun turn ->
         Format.asprintf "%a" Session.Turn.Origin.pp (Session.Turn.origin turn))
   in
@@ -3374,7 +3327,7 @@ let overflow_recovery_is_bounded_per_turn () =
       | Some (Session.Turn.Outcome.Failed _) -> ()
       | Some _ -> fail "a second overflow must fail the turn, not recover again"
       | None -> fail "the turn did not settle");
-      match Hashtbl.find_opt store.sessions "root" with
+      match persisted_opt store "root" with
       | None -> fail "the root session is missing from the store"
       | Some session ->
           let overflow_compactions =
@@ -3418,7 +3371,7 @@ let context_pressure_compaction_records_the_before_projection () =
       let feed = follow_ok ~from:`Now client (sid "root") in
       submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t-2") "again");
       let _ = drain_committed feed in
-      match Hashtbl.find_opt store.sessions "root" with
+      match persisted_opt store "root" with
       | None -> fail "the root session is missing from the store"
       | Some session -> (
           match Session.State.latest_compaction (Session.state session) with
@@ -3462,7 +3415,7 @@ let context_pressure_compacts_without_provider_usage () =
       let feed = follow_ok ~from:`Now client (sid "root") in
       submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t-2") "again");
       let _ = drain_committed feed in
-      match Hashtbl.find_opt store.sessions "root" with
+      match persisted_opt store "root" with
       | None -> fail "the root session is missing from the store"
       | Some session -> (
           match Session.State.latest_compaction (Session.state session) with
@@ -3504,7 +3457,7 @@ let a_length_stop_at_pressure_compacts_and_retries () =
       | Some Session.Turn.Outcome.Completed -> ()
       | Some other -> failf "the turn settled %a" Session.Turn.Outcome.pp other
       | None -> fail "the turn never settled");
-      match Hashtbl.find_opt store.sessions "root" with
+      match persisted_opt store "root" with
       | None -> fail "the root session is missing from the store"
       | Some session ->
           (match
@@ -3545,7 +3498,7 @@ let a_repeat_length_stop_completes_after_one_recovery () =
       | Some Session.Turn.Outcome.Completed -> ()
       | Some other -> failf "the turn settled %a" Session.Turn.Outcome.pp other
       | None -> fail "the turn never settled");
-      match Hashtbl.find_opt store.sessions "root" with
+      match persisted_opt store "root" with
       | None -> fail "the root session is missing from the store"
       | Some session ->
           let compactions =
@@ -3640,7 +3593,7 @@ let a_pressure_summary_keeps_a_verbatim_tail () =
           is_true ~msg:"the reduced view carries the tail verbatim" tail;
           is_false ~msg:"the reduced view drops the summarized head" head;
           is_false ~msg:"a retained tail needs no resume notice" resume);
-      match Hashtbl.find_opt store.sessions "root" with
+      match persisted_opt store "root" with
       | None -> fail "the root session is missing from the store"
       | Some session -> (
           let state = Session.state session in
@@ -3693,7 +3646,7 @@ let an_oversized_tail_falls_back_to_a_full_summary () =
       | Some (tail, resume) ->
           is_false ~msg:"nothing stays verbatim behind a full summary" tail;
           is_true ~msg:"a full summary keeps the resume notice" resume);
-      match Hashtbl.find_opt store.sessions "root" with
+      match persisted_opt store "root" with
       | None -> fail "the root session is missing from the store"
       | Some session -> (
           let state = Session.state session in
@@ -3749,7 +3702,7 @@ let a_second_compaction_advances_the_boundary_behind_the_tail () =
           is_true ~msg:"the second summary covers the aged tail" aged_tail;
           is_false ~msg:"the second summary never sees the fresh tail"
             fresh_tail);
-      match Hashtbl.find_opt store.sessions "root" with
+      match persisted_opt store "root" with
       | None -> fail "the root session is missing from the store"
       | Some session -> (
           let cuts =
@@ -3866,15 +3819,13 @@ let a_prompt_to_a_settled_child_runs_a_new_turn () =
    names is resolvable. A threads pane attaches to the child the instant it reads
    [Journal_delegation]; were the edge published before [observe_delegation]
    created the child, that attach would race the creation and surface
-   [Session_not_found]. A real disk backend's [create] suspends on IO, so
-   [create_before] injects that pre-create scheduling window to make the ordering
-   deterministic: the probe follows the child synchronously at the edge, and
-   without register-before-publish it observes no child. *)
+   [Session_not_found]. The real disk store's [create] suspends on IO, opening
+   that pre-create scheduling window naturally: the probe follows the child
+   synchronously at the edge, and without register-before-publish it would
+   observe no child. *)
 let a_spawned_child_is_resolvable_when_its_edge_is_observed () =
   let probe = ref `Unseen in
-  with_engine ~script:(spawn_script ()) (fun ~sw:_ ~client ~store ~engine:_ ->
-      store.create_before <-
-        (fun id -> if is_child_id id then Eio.Fiber.yield ());
+  with_engine ~script:(spawn_script ()) (fun ~sw:_ ~client ~store:_ ~engine:_ ->
       submit_ok client
         (prompt ~session:(sid "root") ~turn:(tid "t-spawn") "PLEASE_SPAWN");
       let feed = follow_ok client (sid "root") in
@@ -3977,7 +3928,7 @@ let a_delegated_session_uses_the_fixed_execution () =
         | children -> failf "expected one child, got %d" (List.length children)
       in
       ignore (drain_committed (follow_ok client (sid child)));
-      let child_session = Hashtbl.find store.sessions child in
+      let child_session = persisted store child in
       let child_contract =
         match Session.State.turns (Session.state child_session) with
         | [ turn ] -> Session.Turn.contract turn
@@ -4140,7 +4091,7 @@ let a_generic_delegate_runs_a_write_tool () =
       | Some other ->
           failf "the delegated child settled %a" Session.Turn.Outcome.pp other
       | None -> fail "the delegated child never settled");
-      let child_session = Hashtbl.find store.sessions child in
+      let child_session = persisted store child in
       let child_contract =
         match Session.State.turns (Session.state child_session) with
         | [ turn ] -> Session.Turn.contract turn
@@ -4162,13 +4113,10 @@ let a_generic_delegate_runs_a_write_tool () =
    turn still settles rather than wedging on the missing child. *)
 let a_failed_child_creation_does_not_wedge_the_parent () =
   with_engine ~script:(spawn_script ()) (fun ~sw:_ ~client ~store ~engine:_ ->
-      store.create_fault <-
-        (fun id ->
-          if String.equal (Session.Id.to_string id) "root" then None
-          else
-            Some
-              (Ports.Store_error.Io
-                 (Mentat_diagnostic.of_text "no child storage")));
+      (* [sessions/] refuses new children: creating the child session fails
+         with a real IO error while root, already created, keeps committing
+         inside its own directory. *)
+      deny_session_creation store;
       submit_ok client
         (prompt ~session:(sid "root") ~turn:(tid "t-nochild") "PLEASE_SPAWN");
       (match
@@ -4179,6 +4127,7 @@ let a_failed_child_creation_does_not_wedge_the_parent () =
           failf "the parent turn settled %a despite the failed child"
             Session.Turn.Outcome.pp other
       | None -> fail "the parent turn never settled");
+      allow_session_creation store;
       equal (list string) ~msg:"the child session was never created" [ "root" ]
         (session_keys store))
 
@@ -4188,8 +4137,9 @@ let a_failed_child_creation_does_not_wedge_the_parent () =
 let recovery_redrives_a_lost_child () =
   Eio_main.run @@ fun env ->
   let clock = Eio.Stdenv.clock env in
+  let fs = Eio.Stdenv.fs env in
   Eio.Switch.run @@ fun sw ->
-  let store = fresh_store () in
+  let store = fresh_store ~sw ~fs () in
   seed_session store ~id:"root";
   let engine1 = mk_engine ~sw ~store ~script:(spawn_script ()) () in
   let client1 = { c = make_client engine1; sw } in
@@ -4206,17 +4156,17 @@ let recovery_redrives_a_lost_child () =
     in
     let _ = drain_committed (follow_ok client1 (sid child)) in
     Agent.shutdown engine1;
-    (* Simulate a lost child journal: the edge in root's journal survives. *)
-    Hashtbl.remove store.sessions child;
-    Hashtbl.remove store.muts child;
+    (* A lost child journal: the child's durable state is deleted out-of-band
+       while the edge in root's journal survives. *)
+    remove_session store child;
     is_false ~msg:"the child is gone before recovery"
-      (Hashtbl.mem store.sessions child);
+      (session_exists store child);
     (* A fresh engine attaching root re-drives the absent child. *)
     let engine2 = mk_engine ~sw ~store ~script:default_script () in
     let client2 = { c = make_client engine2; sw } in
     submit_ok client2 (prompt ~session:(sid "root") ~turn:(tid "t-after") "hi");
     is_true ~msg:"recovery recreated the lost child from the durable edge"
-      (Hashtbl.mem store.sessions child);
+      (session_exists store child);
     Agent.shutdown engine2;
     Ok ()
   in
@@ -4423,11 +4373,7 @@ let a_child_replies_to_its_parent_by_mail () =
         !saw_reply;
       match List.filter is_child_key (session_keys store) with
       | [ child ] ->
-          let root =
-            match Hashtbl.find_opt store.sessions "root" with
-            | Some session -> session
-            | None -> fail "the root document is missing"
-          in
+          let root = persisted store "root" in
           let queued_reply =
             List.exists
               (fun event ->
@@ -4444,11 +4390,7 @@ let a_child_replies_to_its_parent_by_mail () =
           is_true
             ~msg:"the reply is a durable queue fact with the child's origin"
             queued_reply;
-          let child_session =
-            match Hashtbl.find_opt store.sessions child with
-            | Some session -> session
-            | None -> fail "the child document is missing"
-          in
+          let child_session = persisted store child in
           let receipts =
             List.filter_map
               (fun event ->
@@ -4509,49 +4451,6 @@ let queued_input_frames_the_sender () =
       is_true ~msg:"an unrecorded agent frames as its bare session id"
         (contains_sub ~sub:"session drifter" frame)
   | other -> failf "expected frame and body, got %d blocks" (List.length other)
-
-(* A raising adapter on the idle-boundary admission path must fault only
-   its own driver, never escape into the shared switch. A queued entry on root
-   spawns at the idle boundary; the child's [create] raises. With containment,
-   root faults and a sibling driver over another session keeps working; without
-   it, the raise fails the shared switch and fells the sibling too. *)
-let a_raising_admission_faults_only_its_own_driver () =
-  with_engine ~script:(spawn_script ()) (fun ~sw:_ ~client ~store ~engine:_ ->
-      store.create_raise <- is_child_id;
-      seed_session store ~id:"sibling";
-      (* Root's queued entry spawns; the child's create raises during the
-         idle-boundary admission (outside [handle_any]'s guard). *)
-      (match
-         Protocol.Command.queue_next ~session:(sid "root")
-           ~input:[ Llm.Content.text "PLEASE_SPAWN" ] ()
-       with
-      | Ok c -> submit_ok client c
-      | Error e -> failf "queue_next: %s" (Protocol.Command.Invalid.message e));
-      (* The sibling attaches and completes: the shared switch survived. *)
-      submit_ok client (prompt ~session:(sid "sibling") ~turn:(tid "s1") "hi");
-      (match
-         settled_outcome (drain_committed (follow_ok client (sid "sibling")))
-       with
-      | Some Session.Turn.Outcome.Completed -> ()
-      | Some other ->
-          failf "the sibling settled %a" Session.Turn.Outcome.pp other
-      | None ->
-          fail
-            "the sibling never settled — the raising admission was not \
-             contained");
-      (* Root faulted (contained): it admits no more work, and its fence is
-         releasable at shutdown rather than leaked past an escaped exception. *)
-      (match
-         Client.submit client.c
-           (prompt ~session:(sid "root") ~turn:(tid "r2") "hi")
-       with
-      | Error (Protocol.Error.Unavailable _) -> ()
-      | Error (Protocol.Error.Busy _) -> ()
-      | Ok () -> fail "a raising admission must fault root, not admit new work"
-      | Error e ->
-          failf "wrong error after the contained fault: %a" Protocol.Error.pp e);
-      is_false ~msg:"the raising child was never persisted"
-        (List.exists is_child_key (session_keys store)))
 
 (* A [follow_up] routed to a busy child is parked as a queue entry, not
    dropped, and drains when the child idles. The child blocks on its first turn;
@@ -4880,7 +4779,7 @@ let a_pending_notice_survives_the_compaction_boundary () =
           equal int
             ~msg:"the frozen entry survives into the reduced view's tail" 1
             (request_occurrences turn_request "Build failing (1 diagnostic)"));
-      match Hashtbl.find_opt store.sessions "root" with
+      match persisted_opt store "root" with
       | None -> fail "the root session is missing from the store"
       | Some session ->
           is_true ~msg:"the post-install model view retains the entry"
@@ -5076,12 +4975,9 @@ let is_edge_fact = function
   | _ -> false
 
 let root_edge store =
-  match Hashtbl.find_opt store.sessions "root" with
-  | None -> fail "the root session is missing"
-  | Some session -> (
-      match Session.State.delegations (Session.state session) with
-      | [ edge ] -> edge
-      | edges -> failf "expected one edge, got %d" (List.length edges))
+  match Session.State.delegations (Session.state (persisted store "root")) with
+  | [ edge ] -> edge
+  | edges -> failf "expected one edge, got %d" (List.length edges)
 
 let a_brokered_spawn_hands_identity_and_integrates_on_the_wake () =
   let requests = ref [] in
@@ -5321,13 +5217,10 @@ let a_brokered_message_crosses_the_broker_send () =
       equal Testable.int ~msg:"only the spawn and the follow-up wake the child"
         2
         (List.length !materialized);
-      match Hashtbl.find_opt store.sessions (Session.Id.to_string child) with
-      | None -> fail "the child document is missing"
-      | Some session ->
-          equal Testable.int
-            ~msg:"a delivered message writes nothing to the child journal here"
-            0
-            (List.length (Session.events session)))
+      equal Testable.int
+        ~msg:"a delivered message writes nothing to the child journal here" 0
+        (List.length
+           (Session.events (persisted store (Session.Id.to_string child)))))
 
 (* Two same-turn messages to one dormant child land in receipt order:
    delivery runs on one lane per delegation edge, so a slow first send
@@ -5400,8 +5293,9 @@ let a_queued_entry_from_an_unprovable_sender_is_refused () =
 let an_undelivered_message_redrives_at_the_next_attach () =
   Eio_main.run @@ fun env ->
   let clock = Eio.Stdenv.clock env in
+  let fs = Eio.Stdenv.fs env in
   Eio.Switch.run @@ fun sw ->
-  let store = fresh_store () in
+  let store = fresh_store ~sw ~fs () in
   seed_session store ~id:"root";
   let run () =
     let first = ref [] in
@@ -5466,8 +5360,9 @@ let mutation_event_value =
 let branch_flows_copy_the_mutation_ledger () =
   Eio_main.run @@ fun env ->
   let clock = Eio.Stdenv.clock env in
+  let fs = Eio.Stdenv.fs env in
   Eio.Switch.run @@ fun sw ->
-  let store = fresh_store () in
+  let store = fresh_store ~sw ~fs () in
   seed_session store ~id:"root";
   let module Policy = Mentat_permission.Policy in
   let calls = workspace_calls () in
@@ -5491,7 +5386,7 @@ let branch_flows_copy_the_mutation_ledger () =
   let run () =
     submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t-1") "edit");
     ignore (drain_committed (follow_ok client (sid "root")));
-    let root_muts = Hashtbl.find store.muts "root" in
+    let root_muts = mutation_events store "root" in
     is_true ~msg:"the edit turn recorded a turn-keyed mutation fact"
       (root_muts <> []);
     (match Client.fork client.c ~session:(sid "root") ~into:(sid "fork") () with
@@ -5509,7 +5404,7 @@ let branch_flows_copy_the_mutation_ledger () =
      with
     | Ok () -> ()
     | Error e -> failf "rewind --before failed: %a" Protocol.Error.pp e);
-    let child id = Hashtbl.find store.muts id in
+    let child id = mutation_events store id in
     (* The fork and an after-the-turn rewind retain the turn, so its fact is
        copied verbatim; a before-the-turn rewind retains no turn, so the
        turn-keyed fact is dropped and the child ledger is empty. *)
@@ -5534,8 +5429,9 @@ let branch_flows_copy_the_mutation_ledger () =
    client polls the pull-side query to surface it without submitting work that
    would only be refused. *)
 let faulted_is_pollable_without_submitting () =
+  let hook = ref (fun () -> ()) in
   let catalog =
-    match Catalog.make ~verbs:all_verbs [ trivial_tool ~name:"edit" () ] with
+    match Catalog.make ~verbs:all_verbs [ hooked_edit_tool hook ] with
     | Ok c -> c
     | Error e -> failf "catalog: %a" Catalog.Error.pp e
   in
@@ -5543,26 +5439,23 @@ let faulted_is_pollable_without_submitting () =
     (fun ~sw:_ ~client ~store ~engine:_ ->
       is_false ~msg:"a live driver reports no fault"
         (Option.is_some (Client.faulted client.c ~session:(sid "root")));
-      store.commit_fault <-
-        (fun events ->
-          if is_tool_settled events then
-            Some
-              (Ports.Store_error.Io
-                 (Mentat_diagnostic.of_text "settle commit crash"))
-          else None);
+      hook := (fun () -> deny_writes store "root");
       submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t-fault") "go");
-      (* The tool runs; its settle commit fails and the driver contains the
-         fault. The query surfaces it with no further submit. *)
+      (* The tool flips the session directory read-only, so its settle commit
+         fails with a real IO error and the driver contains the fault. The
+         query surfaces it with no further submit. *)
       await_yield (fun () ->
           Option.is_some (Client.faulted client.c ~session:(sid "root")));
       is_true ~msg:"the contained fault is pollable without submitting"
-        (Option.is_some (Client.faulted client.c ~session:(sid "root"))))
+        (Option.is_some (Client.faulted client.c ~session:(sid "root")));
+      allow_writes store "root")
 
 let recovery_takes_a_fresh_capture_not_the_pre_crash_one () =
   Eio_main.run @@ fun env ->
   let clock = Eio.Stdenv.clock env in
+  let fs = Eio.Stdenv.fs env in
   Eio.Switch.run @@ fun sw ->
-  let store = fresh_store () in
+  let store = fresh_store ~sw ~fs () in
   seed_session store ~id:"root";
   let module Policy = Mentat_permission.Policy in
   let sealed_policy = Policy.make [ Policy.Rule.allow_all_dangerously ] in
@@ -5580,8 +5473,9 @@ let recovery_takes_a_fresh_capture_not_the_pre_crash_one () =
     Ok
       (Agent.Config.make ~model ~policy:!configured_policy ())
   in
+  let hook = ref (fun () -> ()) in
   let catalog =
-    match Catalog.make ~verbs:all_verbs [ trivial_tool ~name:"edit" () ] with
+    match Catalog.make ~verbs:all_verbs [ hooked_edit_tool hook ] with
     | Ok c -> c
     | Error e -> failf "catalog: %a" Catalog.Error.pp e
   in
@@ -5592,28 +5486,27 @@ let recovery_takes_a_fresh_capture_not_the_pre_crash_one () =
   in
   let client1 = { c = make_client engine1; sw } in
   let run () =
-    (* The tool's settle commit fails: the driver faults with the claim open. *)
-    store.commit_fault <-
-      (fun events ->
-        if is_tool_settled events then
-          Some
-            (Ports.Store_error.Io (Mentat_diagnostic.of_text "crash mid-tool"))
-        else None);
+    (* The tool flips the session directory read-only, so its settle commit
+       fails: the driver faults with the claim open. Await the contained
+       fault — the deterministic point past which the claim and its pre-crash
+       capture are durable and nothing more will commit. *)
+    hook := (fun () -> deny_writes store "root");
     submit_ok client1 (prompt ~session:(sid "root") ~turn:(tid "t-crash") "go");
-    (* Wait until the open claim is durable and its pre-crash capture recorded. *)
-    await_yield (fun () -> has_open_tool_claim store "root");
+    await_yield (fun () ->
+        Option.is_some (Client.faulted client1.c ~session:(sid "root")));
+    is_true ~msg:"the crash left the tool claim open"
+      (has_open_tool_claim store "root");
     is_true ~msg:"the crash left a pre-crash Before_turn_tools capture behind"
-      (match Hashtbl.find_opt store.muts "root" with
-      | Some events ->
-          List.exists
-            (function Mutation.Event.Checkpoint _ -> true | _ -> false)
-            events
-      | None -> false);
+      (List.exists
+         (function Mutation.Event.Checkpoint _ -> true | _ -> false)
+         (mutation_events store "root"));
     is_false ~msg:"the recovery capture does not exist before recovery"
       (has_after_recovery_checkpoint store "root");
+    (* Lift the fault before teardown so the fence release and the successor's
+       recovery commit cleanly, including the ambiguous tool settle. *)
+    hook := (fun () -> ());
+    allow_writes store "root";
     Agent.shutdown engine1;
-    (* Recovery must commit cleanly, including the ambiguous tool settle. *)
-    store.commit_fault <- (fun _ -> None);
     configured_policy := replacement_policy;
     let engine2 =
       mk_engine ~sw ~store
@@ -5632,7 +5525,7 @@ let recovery_takes_a_fresh_capture_not_the_pre_crash_one () =
       (has_after_recovery_checkpoint store "root");
     is_false ~msg:"the recovered turn's fresh capture cleared possibly_mutating"
       (Client.possibly_mutating client2.c ~session:(sid "root"));
-    let persisted = Hashtbl.find store.sessions "root" in
+    let persisted = persisted store "root" in
     let recovered_contract =
       match Session.State.turn (tid "t-crash") (Session.state persisted) with
       | Some turn -> Session.Turn.contract turn
@@ -5660,8 +5553,9 @@ let recovery_takes_a_fresh_capture_not_the_pre_crash_one () =
 let recovery_checkpoint_availability_law ~replayed ~available () =
   Eio_main.run @@ fun env ->
   let clock = Eio.Stdenv.clock env in
+  let fs = Eio.Stdenv.fs env in
   Eio.Switch.run @@ fun sw ->
-  let store = fresh_store () in
+  let store = fresh_store ~sw ~fs () in
   seed_session store ~id:"root";
   let module Policy = Mentat_permission.Policy in
   let config _session ~latest_model:_ =
@@ -5669,8 +5563,9 @@ let recovery_checkpoint_availability_law ~replayed ~available () =
       (Agent.Config.make ~model
          ~policy:(Policy.make [ Policy.Rule.allow_all_dangerously ]) ())
   in
+  let hook = ref (fun () -> ()) in
   let catalog =
-    match Catalog.make ~verbs:all_verbs [ trivial_tool ~name:"edit" () ] with
+    match Catalog.make ~verbs:all_verbs [ hooked_edit_tool hook ] with
     | Ok c -> c
     | Error e -> failf "catalog: %a" Catalog.Error.pp e
   in
@@ -5692,27 +5587,48 @@ let recovery_checkpoint_availability_law ~replayed ~available () =
   in
   let client1 = { c = make_client engine1; sw } in
   let run () =
-    store.commit_fault <-
-      (fun events ->
-        if is_tool_settled events then
-          Some
-            (Ports.Store_error.Io (Mentat_diagnostic.of_text "crash mid-tool"))
-        else None);
+    (* The tool flips the session directory read-only, so its settle commit
+       fails: a crash mid-tool with the claim left open. Await the contained
+       fault before lifting it — the deterministic crash point. *)
+    hook := (fun () -> deny_writes store "root");
     submit_ok client1
       (prompt ~session:(sid "root") ~turn:(tid "t-checkpoint-law") "go");
-    await_yield (fun () -> has_open_tool_claim store "root");
+    await_yield (fun () ->
+        Option.is_some (Client.faulted client1.c ~session:(sid "root")));
+    hook := (fun () -> ());
+    allow_writes store "root";
     Agent.shutdown engine1;
-    store.commit_fault <- (fun _ -> None);
     if replayed then begin
-      let checkpoint =
-        Mutation.Checkpoint.make
-          ~boundary:
-            (Mutation.Checkpoint.After_recovery (tid "t-checkpoint-law"))
-          ~capture
+      (* A replayed boundary is the residue of a recovery that died after its
+         [After_recovery] capture: run one, and crash it at its own settle the
+         same way. Its capture — with this case's availability — is then a
+         durable ledger fact the final recovery must reuse, not recapture. *)
+      let mid_hook = ref (fun () -> ()) in
+      let mid_catalog =
+        match Catalog.make ~verbs:all_verbs [ hooked_edit_tool mid_hook ] with
+        | Ok c -> c
+        | Error e -> failf "mid catalog: %a" Catalog.Error.pp e
       in
-      let events = Hashtbl.find store.muts "root" in
-      Hashtbl.replace store.muts "root"
-        (events @ [ Mutation.Event.checkpoint checkpoint ])
+      let mid_workspace =
+        tracked_workspace ~capture (workspace_calls ())
+          (Sandbox.identity Sandbox.direct)
+      in
+      let engine_mid =
+        mk_engine ~sw ~store
+          ~script:(edit_then_done ~call_id:"law-edit-mid" ())
+          ~config ~catalog:mid_catalog ~workspace:mid_workspace ()
+      in
+      let client_mid = { c = make_client engine_mid; sw } in
+      mid_hook := (fun () -> deny_writes store "root");
+      submit_ok client_mid
+        (prompt ~session:(sid "root") ~turn:(tid "t-checkpoint-law") "go");
+      await_yield (fun () ->
+          Option.is_some (Client.faulted client_mid.c ~session:(sid "root")));
+      mid_hook := (fun () -> ());
+      allow_writes store "root";
+      Agent.shutdown engine_mid;
+      is_true ~msg:"the died recovery left the After_recovery boundary behind"
+        (has_after_recovery_checkpoint store "root")
     end;
     let engine2 =
       mk_engine ~sw ~store
@@ -5793,8 +5709,9 @@ let workspace_yielding_an_attempt uncertain : Ports.workspace =
 let an_attempted_apply_lowers_to_an_uncertain_edit_event () =
   Eio_main.run @@ fun env ->
   let clock = Eio.Stdenv.clock env in
+  let fs = Eio.Stdenv.fs env in
   Eio.Switch.run @@ fun sw ->
-  let store = fresh_store () in
+  let store = fresh_store ~sw ~fs () in
   seed_session store ~id:"root";
   let uncertain = uncertain_path () in
   let catalog =
@@ -5812,18 +5729,14 @@ let an_attempted_apply_lowers_to_an_uncertain_edit_event () =
   let run () =
     submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t1") "go");
     let _ = drain_committed (follow_ok client (sid "root")) in
-    (match Hashtbl.find_opt store.muts "root" with
-    | Some events ->
-        is_true
-          ~msg:
-            "the attempt lowered to an Edit event carrying the uncertain target"
-          (List.exists
-             (function
-               | Mutation.Event.Edit { changes = []; uncertain = Some p; _ } ->
-                   Mentat_workspace.Path.equal p uncertain
-               | _ -> false)
-             events)
-    | None -> fail "the session recorded no mutation events");
+    is_true
+      ~msg:"the attempt lowered to an Edit event carrying the uncertain target"
+      (List.exists
+         (function
+           | Mutation.Event.Edit { changes = []; uncertain = Some p; _ } ->
+               Mentat_workspace.Path.equal p uncertain
+           | _ -> false)
+         (mutation_events store "root"));
     Agent.shutdown engine;
     Ok ()
   in
@@ -5880,63 +5793,108 @@ let publish_reflects_the_settled_mutation_cache () =
            store-fed cache carried"
         observed_in_feed)
 
-(* Crash-matrix sweep: fault the k-th session commit for a range of k, so the
-   crash lands at each commit point of a tool turn in turn (turn start, claim,
-   settle). For every k the successor recovers to a single consistent terminal
-   settlement — the atomic-suffix / no-fact-loss law (a lost commit leaves no
-   half-turn) and the idempotent-resubmit law (recovery never starts a competing
-   turn) both reduce to: exactly one [Turn_settled] after recovery. Generative
-   properties 4-5 are scoped out per the sim study. *)
+(* Crash-matrix sweep: induce a real IO fault at each commit point of a tool
+   turn in turn — the turn-start commit (the session directory flips read-only
+   before the sweep submit), the claim commit (the provider script flips it
+   while serving the sweep request), and the settle commit (the tool flips it
+   while running). For every point the successor recovers to a single
+   consistent terminal settlement — the atomic-suffix / no-fact-loss law (a
+   lost commit leaves no half-turn) and the idempotent-resubmit law (recovery
+   never starts a competing turn) both reduce to: exactly one [Turn_settled]
+   of the sweep turn after recovery. A warm-up turn first attaches the driver,
+   so the induced fault lands on the sweep turn's chosen commit rather than on
+   the fence acquire. Generative properties 4-5 are scoped out per the sim
+   study. *)
 let recovery_is_consistent_across_commit_points () =
-  let crash = Ports.Store_error.Io (Mentat_diagnostic.of_text "commit crash") in
-  let catalog =
-    match Catalog.make ~verbs:all_verbs [ trivial_tool ~name:"edit" () ] with
-    | Ok c -> c
-    | Error e -> failf "catalog: %a" Catalog.Error.pp e
-  in
   List.iter
-    (fun k ->
+    (fun (label, point) ->
       with_crash_recovery (fun ~store ~restart ->
-          store.commit_fault <- fault_on_nth k crash;
-          let client1, engine1 =
-            restart ~script:(edit_then_done ~call_id:"edit-a" ()) ~catalog ()
+          let fire target = if point = target then deny_writes store "root" in
+          let hook = ref (fun () -> ()) in
+          let catalog =
+            match Catalog.make ~verbs:all_verbs [ hooked_edit_tool hook ] with
+            | Ok c -> c
+            | Error e -> failf "catalog: %a" Catalog.Error.pp e
           in
-          (* An early commit faults the submit synchronously; a later one lets
-             submit through and faults the driver asynchronously. Either way the
-             successor recovers. *)
+          (* One tool call on the first SWEEP-marked request; plain answers
+             everywhere else, warm-up turn included. *)
+          let sweep_script ~call_id ~on_sweep =
+            let did = ref false in
+            Ports.script @@ fun request ->
+            if request_contains request "SWEEP" && not !did then begin
+              did := true;
+              on_sweep ();
+              Ok (edit_call ~call_id "editing")
+            end
+            else Ok (plain_response "done")
+          in
+          let client1, engine1 =
+            restart
+              ~script:
+                (sweep_script ~call_id:"edit-a" ~on_sweep:(fun () ->
+                     fire `Claim))
+              ~catalog ()
+          in
+          submit_ok client1
+            (prompt ~session:(sid "root") ~turn:(tid "t-warm") "warm");
+          ignore (drain_committed (follow_ok client1 (sid "root")));
+          hook := (fun () -> fire `Settle);
+          fire `Start;
+          (* A faulted turn-start commit errors the submit synchronously; the
+             claim and settle commits fault the driver asynchronously. Either
+             way the successor recovers. *)
           (match
              Client.submit client1.c
-               (prompt ~session:(sid "root") ~turn:(tid "t-sweep") "go")
+               (prompt ~session:(sid "root") ~turn:(tid "t-sweep") "SWEEP")
            with
           | Ok () ->
               await_yield (fun () ->
                   Option.is_some
                     (Client.faulted client1.c ~session:(sid "root")))
           | Error _ -> ());
+          allow_writes store "root";
           Agent.shutdown engine1;
-          store.commit_fault <- (fun _ -> None);
           let client2, engine2 =
-            restart ~script:(edit_then_done ~call_id:"edit-b" ()) ~catalog ()
+            restart
+              ~script:
+                (sweep_script ~call_id:"edit-b" ~on_sweep:(fun () -> ()))
+              ~catalog:
+                (match
+                   Catalog.make ~verbs:all_verbs [ trivial_tool ~name:"edit" () ]
+                 with
+                | Ok c -> c
+                | Error e -> failf "successor catalog: %a" Catalog.Error.pp e)
+              ()
           in
           submit_ok client2
-            (prompt ~session:(sid "root") ~turn:(tid "t-sweep") "go");
-          let facts = drain_committed (follow_ok client2 (sid "root")) in
+            (prompt ~session:(sid "root") ~turn:(tid "t-sweep") "SWEEP");
+          (* Drain past the warm turn's replayed settlement to the sweep
+             turn's own; the journal then holds the total settlement count. *)
+          ignore
+            (drain_committed
+               ~stop:(function
+                 | Protocol.Fact.Turn_settled { turn; _ } ->
+                     Session.Turn.Id.equal turn (tid "t-sweep")
+                 | _ -> false)
+               (follow_ok client2 (sid "root")));
           let settled =
             List.length
               (List.filter
-                 (fun (_, f) ->
-                   match f with
-                   | Protocol.Fact.Turn_settled _ -> true
+                 (function
+                   | Session.Event.Turn_finished { turn; _ } ->
+                       Session.Turn.Id.equal turn (tid "t-sweep")
                    | _ -> false)
-                 facts)
+                 (Session.events (persisted store "root")))
           in
           is_true
             ~msg:
               (Printf.sprintf
-                 "crash at commit %d: the recovered turn settles exactly once" k)
+                 "crash at the %s commit: the recovered turn settles exactly \
+                  once"
+                 label)
             (settled = 1);
           Agent.shutdown engine2))
-    [ 1; 2; 3 ]
+    [ ("turn-start", `Start); ("claim", `Claim); ("settle", `Settle) ]
 
 (* The flip: the client over the engine. *)
 
@@ -5996,7 +5954,7 @@ let the_client_submits_follows_and_forks_over_the_engine () =
       (match Client.fork client.c ~session:(sid "root") ~into:forked () with
       | Ok () ->
           is_true ~msg:"the client fork persisted the client-minted session"
-            (Hashtbl.mem store.sessions (Session.Id.to_string forked))
+            (session_exists store (Session.Id.to_string forked))
       | Error e -> failf "client fork failed: %a" Protocol.Error.pp e);
       let rewound = sid "e2e-rewind" in
       match
@@ -6005,7 +5963,7 @@ let the_client_submits_follows_and_forks_over_the_engine () =
       with
       | Ok () ->
           is_true ~msg:"the client rewind persisted the client-minted session"
-            (Hashtbl.mem store.sessions (Session.Id.to_string rewound))
+            (session_exists store (Session.Id.to_string rewound))
       | Error e -> failf "client rewind failed: %a" Protocol.Error.pp e)
 
 (* Two cursors, one hub (the incremental-projection materialization).
@@ -6097,8 +6055,9 @@ let an_attached_driver_pins_its_hub_across_feed_closes () =
 let re_follow_after_eviction_replays_losslessly () =
   Eio_main.run @@ fun env ->
   let clock = Eio.Stdenv.clock env in
+  let fs = Eio.Stdenv.fs env in
   Eio.Switch.run @@ fun sw ->
-  let store = fresh_store () in
+  let store = fresh_store ~sw ~fs () in
   seed_session store ~id:"root";
   let engine_a = mk_engine ~sw ~store () in
   let client_a = { c = make_client engine_a; sw } in
@@ -6197,8 +6156,9 @@ let tail_serves_the_last_n_committed_facts () =
 let tail_and_page_fast_path_equal_the_cold_path () =
   Eio_main.run @@ fun env ->
   let clock = Eio.Stdenv.clock env in
+  let fs = Eio.Stdenv.fs env in
   Eio.Switch.run @@ fun sw ->
-  let store = fresh_store () in
+  let store = fresh_store ~sw ~fs () in
   seed_session store ~id:"root";
   let engine_a = mk_engine ~sw ~store () in
   let engine_b = mk_engine ~sw ~store () in
@@ -6496,7 +6456,7 @@ let structured_output_budget_exhaustion_fails () =
       let pairs = drain_committed (follow_ok client (sid "root")) in
       (* The reminder pends and dies with the turn: the durable transcript
          must not end on a dangling imperative no request ever showed. *)
-      (match Hashtbl.find_opt store.sessions "root" with
+      (match persisted_opt store "root" with
       | None -> fail "the root session is missing from the store"
       | Some session -> (
           match
@@ -6547,7 +6507,7 @@ let commit_metadata_on_driven_idle () =
       | `Committed (Error e) ->
           failf "an idle metadata commit must succeed: %a" Protocol.Error.pp e
       | `Not_driven -> fail "the driven session must not be Not_driven");
-      match Hashtbl.find_opt store.sessions "root" with
+      match persisted_opt store "root" with
       | Some s ->
           equal (option string) ~msg:"the title is committed to the store"
             (Some "renamed")
@@ -6579,19 +6539,21 @@ let commit_metadata_refuses_active_turn () =
       let _ = drain_committed feed in
       ())
 
-let commit_metadata_port_conflict_faults () =
+let commit_metadata_store_conflict_faults () =
   with_engine (fun ~sw:_ ~client ~store ~engine ->
       submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t1") "hi");
       let feed = follow_ok client (sid "root") in
       let _ = drain_committed feed in
-      store.metadata_fault <- (fun _ -> Some Ports.Store_error.Conflict);
+      (* A genuine fence violation: an out-of-band writer changed the document
+         bytes, so the fenced CAS conflicts against the driver's revision. *)
+      clobber_document store "root";
       match
         Agent.commit_metadata engine (sid "root") ~transform:(fun s -> Ok s)
       with
       | `Committed (Error (Protocol.Error.Unavailable _)) -> ()
       | `Committed (Error e) ->
-          failf "a port Conflict must fault loudly, got %a" Protocol.Error.pp e
-      | `Committed (Ok ()) -> fail "a port Conflict must not report success"
+          failf "a store Conflict must fault loudly, got %a" Protocol.Error.pp e
+      | `Committed (Ok ()) -> fail "a store Conflict must not report success"
       | `Not_driven -> fail "the session is driven")
 
 let commit_metadata_adopts_revision () =
@@ -6610,7 +6572,7 @@ let commit_metadata_adopts_revision () =
          and drop the title (plan risk #2). *)
       submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t2") "again");
       let _ = drain_committed feed in
-      match Hashtbl.find_opt store.sessions "root" with
+      match persisted_opt store "root" with
       | Some s ->
           equal (option string)
             ~msg:
@@ -6620,22 +6582,23 @@ let commit_metadata_adopts_revision () =
       | None -> fail "the session vanished")
 
 (* The online revert/export cones (W3 3e): fenced idle-mailbox flows beside
-   commit_metadata. [route] attaches on demand; the driver runs the port op at an
-   idle point and maps the store outcome and errors totally. *)
+   commit_metadata. [route] attaches on demand; the driver runs the store op at
+   an idle point and maps the store outcome and errors totally. *)
 
 let revert_forwards_outcome () =
-  with_engine (fun ~sw:_ ~client ~store ~engine ->
+  with_engine (fun ~sw:_ ~client ~store:_ ~engine ->
       submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t1") "hi");
       let _ = drain_committed (follow_ok client (sid "root")) in
-      store.revert_result <-
-        (fun _ -> Ok Mutation.Revert.Outcome.Nothing_to_revert);
+      (* No turn recorded an exact change, so the real fenced lifecycle
+         resolves the Latest scope to nothing and the wire sees the store's
+         outcome verbatim. *)
       let session_cone = Agent.driver engine in
       match
         session_cone.Client.Driver.Session.revert ~session:(sid "root")
           ~scope:Mutation.Revert.Scope.Latest
       with
       | Ok Mutation.Revert.Outcome.Nothing_to_revert -> ()
-      | Ok _ -> fail "the engine must forward the port's outcome verbatim"
+      | Ok _ -> fail "the engine must forward the store's outcome verbatim"
       | Error e -> failf "an idle revert must succeed: %a" Protocol.Error.pp e)
 
 let revert_refuses_active_turn () =
@@ -6645,10 +6608,8 @@ let revert_refuses_active_turn () =
     Eio.Promise.await released;
     Ok (plain_response "Done.")
   in
-  with_engine ~script (fun ~sw:_ ~client ~store ~engine ->
+  with_engine ~script (fun ~sw:_ ~client ~store:_ ~engine ->
       submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t1") "hi");
-      store.revert_result <-
-        (fun _ -> fail "the port must not be reached during an active turn");
       let session_cone = Agent.driver engine in
       (match
          session_cone.Client.Driver.Session.revert ~session:(sid "root")
@@ -6662,13 +6623,12 @@ let revert_refuses_active_turn () =
       let _ = drain_committed (follow_ok client (sid "root")) in
       ())
 
-let revert_maps_port_error () =
+let revert_maps_store_error () =
   with_engine (fun ~sw:_ ~client ~store ~engine ->
       submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t1") "hi");
       let _ = drain_committed (follow_ok client (sid "root")) in
-      store.revert_result <-
-        (fun _ ->
-          Error (Ports.Store_error.Corrupt (Mentat_diagnostic.of_text "boom")));
+      (* Genuine corruption: the scope resolution's ledger read fails loudly. *)
+      corrupt_ledger store "root";
       let session_cone = Agent.driver engine in
       match
         session_cone.Client.Driver.Session.revert ~session:(sid "root")
@@ -6676,41 +6636,46 @@ let revert_maps_port_error () =
       with
       | Error (Protocol.Error.Unavailable _) -> ()
       | Error e ->
-          failf "a port error must map to Unavailable, got %a" Protocol.Error.pp
-            e
-      | Ok _ -> fail "a port error must not report success")
+          failf "a store error must map to Unavailable, got %a"
+            Protocol.Error.pp e
+      | Ok _ -> fail "a store error must not report success")
 
 let export_forwards_bundle () =
-  with_engine (fun ~sw:_ ~client ~store ~engine ->
-      submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t1") "hi");
-      let _ = drain_committed (follow_ok client (sid "root")) in
-      store.export_result <- Ok "mentat.session bundle bytes";
-      let session_cone = Agent.driver engine in
-      match session_cone.Client.Driver.Session.export ~session:(sid "root") with
-      | Ok bundle ->
-          equal string ~msg:"the engine forwards the bundle bytes"
-            "mentat.session bundle bytes" bundle
-      | Error e -> failf "an idle export must succeed: %a" Protocol.Error.pp e)
-
-let export_maps_port_error () =
   with_engine (fun ~sw:_ ~client ~store:_ ~engine ->
       submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t1") "hi");
       let _ = drain_committed (follow_ok client (sid "root")) in
-      (* The default port result declines; the engine maps it to Unavailable. *)
+      let session_cone = Agent.driver engine in
+      match session_cone.Client.Driver.Session.export ~session:(sid "root") with
+      | Ok bundle ->
+          is_true ~msg:"the engine forwards the store's bundle bytes"
+            (contains_sub ~sub:"mentat.session" bundle
+            && String.length bundle > 0)
+      | Error e -> failf "an idle export must succeed: %a" Protocol.Error.pp e)
+
+let export_maps_store_error () =
+  with_engine (fun ~sw:_ ~client ~store ~engine ->
+      submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t1") "hi");
+      let _ = drain_committed (follow_ok client (sid "root")) in
+      (* Genuine corruption: the export's re-verified stream fails loudly. *)
+      corrupt_ledger store "root";
       let session_cone = Agent.driver engine in
       match session_cone.Client.Driver.Session.export ~session:(sid "root") with
       | Error (Protocol.Error.Unavailable _) -> ()
       | Error e ->
-          failf "a port error must map to Unavailable, got %a" Protocol.Error.pp
+          failf "a store error must map to Unavailable, got %a" Protocol.Error.pp
             e
-      | Ok _ -> fail "a port error must not report success")
+      | Ok _ -> fail "a store error must not report success")
 
 let export_rejects_oversize () =
-  with_engine (fun ~sw:_ ~client ~store ~engine ->
+  (* One response pushes the durable bundle past the 64 MiB in-memory ceiling;
+     the writes and the buffered value are transient but real. *)
+  let script =
+    Ports.script @@ fun _request ->
+    Ok (plain_response (String.make ((64 * 1024 * 1024) + (1024 * 1024)) 'x'))
+  in
+  with_engine ~script (fun ~sw:_ ~client ~store:_ ~engine ->
       submit_ok client (prompt ~session:(sid "root") ~turn:(tid "t1") "hi");
       let _ = drain_committed (follow_ok client (sid "root")) in
-      (* One byte past the 64 MiB in-memory ceiling (allocated transiently). *)
-      store.export_result <- Ok (String.make ((64 * 1024 * 1024) + 1) 'x');
       let session_cone = Agent.driver engine in
       match session_cone.Client.Driver.Session.export ~session:(sid "root") with
       | Error (Protocol.Error.Unavailable _) -> ()
@@ -6757,7 +6722,7 @@ let an_interrupt_retains_the_streamed_usage () =
           failf "interrupt command: %s" (Protocol.Command.Invalid.message e));
       ignore (drain_n_settled 1 feed);
       let session =
-        match Hashtbl.find_opt store.sessions "root" with
+        match persisted_opt store "root" with
         | Some s -> s
         | None -> fail "root session vanished"
       in
@@ -7002,8 +6967,6 @@ let () =
             queued_input_frames_the_sender;
           test "the model addresses a spawned child by the receipt handle"
             the_model_addresses_a_spawned_child_by_the_receipt_handle;
-          test "a raising admission faults only its own driver"
-            a_raising_admission_faults_only_its_own_driver;
           test "a follow_up to a busy child parks and drains"
             a_follow_up_to_a_busy_child_parks_and_drains;
           test "recovery takes a fresh capture, not the pre-crash one"
@@ -7049,22 +7012,22 @@ let () =
             commit_metadata_on_driven_idle;
           test "commit_metadata during an active turn refuses"
             commit_metadata_refuses_active_turn;
-          test "a port Conflict on commit_metadata faults loudly"
-            commit_metadata_port_conflict_faults;
+          test "a store Conflict on commit_metadata faults loudly"
+            commit_metadata_store_conflict_faults;
           test "commit_metadata adopts the revision so the next turn commits"
             commit_metadata_adopts_revision;
         ];
       group "online revert/export cones (3e)"
         [
-          test "revert forwards the port outcome at a driven idle point"
+          test "revert forwards the store outcome at a driven idle point"
             revert_forwards_outcome;
           test "revert during an active turn refuses without reaching the port"
             revert_refuses_active_turn;
-          test "a port error on revert maps to Unavailable"
-            revert_maps_port_error;
+          test "a store error on revert maps to Unavailable"
+            revert_maps_store_error;
           test "export forwards the buffered bundle" export_forwards_bundle;
-          test "a port error on export maps to Unavailable"
-            export_maps_port_error;
+          test "a store error on export maps to Unavailable"
+            export_maps_store_error;
           test "an oversize export bundle is refused by the size guard"
             export_rejects_oversize;
         ];

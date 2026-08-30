@@ -2412,7 +2412,7 @@ let check_sandbox_requirement t capability =
 
 (* The offline execution layer: the sealed workspace capabilities, the per-mode
    execution assembly the engine consumes, and the per-mode tool declarations an
-   inspector reads. Built without the engine, provider, or store adapters, so
+   inspector reads. Built without the engine or provider adapter, so
    {!tool_declarations} projects the boot-fixed catalogs a run seals without ever
    opening a client. *)
 type execution_layer = {
@@ -2430,7 +2430,7 @@ type execution_layer = {
 (* The catalog and execution assembly, factored from {!build_client} so [debug
    tools] can project the sealed tool declarations offline. It seals the
    workspaces, resolves the toolchain programs, and builds every boot-fixed
-   catalog family, but constructs no engine, provider, or store adapter — those
+   catalog family, but constructs no engine or provider adapter — those
    are {!build_client}'s alone. *)
 let build_execution_layer t : (execution_layer, Exit_status.t) result =
   let ( let* ) = Result.bind in
@@ -3345,21 +3345,13 @@ let build_driver t :
     build_execution_layer t
   in
   let build_product_rules = product_rules build_capability in
-  (* The store adapter's online revert cone applies through the build capability
+  (* The engine's online revert cone applies through the build capability
      and captures a [Before_revert] boundary into the same snapshot store the
      engine's turn checkpoints use. A notice-free workspace value is enough — the
      checkpoint is all revert needs from it. *)
   let revert_workspace =
     Workspace_adapter.make ~store:(snapshot_store t)
       ?self_prefix:(snapshot_self_prefix t) build_capability
-  in
-  let store_port =
-    Store_adapter.make ~sw:t.switch ~root:t.shared.store ~owner:t.owner
-      ~now:(fun () -> now_time t)
-      ~merge:(configured_revert_merge t)
-      ~capability:build_capability
-      ~checkpoint:revert_workspace.Mentat_agent.Ports.checkpoint
-      ~new_id:Session_meta.fresh_revert_id
   in
   let base_provider_call = make_provider_call t in
   (* Vision gate (backstop to the frontend pre-warning): strip a media block the
@@ -3376,11 +3368,17 @@ let build_driver t :
   in
   let broker = broker t in
   let engine =
-    Engine.create ~sw:t.switch ~store:store_port ~provider:provider_call
+    Engine.create ~sw:t.switch ~store:t.shared.store ~owner:t.owner
+      ~provider:provider_call
       ~config:(config_callback t ~product_rules:build_product_rules)
       ~now:(fun () -> now_time t)
-      ~max_children ~broker ~broker_engine:(broker_engine t)
-      ~execution_for_mode ~delegated_execution ()
+      ~merge:(configured_revert_merge t)
+      ~revert_observe:(Workspace_adapter.observe build_capability)
+      ~revert_checkpoint:revert_workspace.Mentat_agent.Ports.checkpoint
+      ~revert_apply:(Mentat_workspace_io.Edit.apply build_capability)
+      ~revert_new_id:Session_meta.fresh_revert_id ~max_children ~broker
+      ~broker_engine:(broker_engine t) ~execution_for_mode ~delegated_execution
+      ()
   in
   t.engine <- Some engine;
   let driver_record : Client.Driver.t =
@@ -3539,7 +3537,7 @@ let tui_capabilities t :
     (build_execution_layer t)
 
 (* Offline: the execution layer seals the workspaces and builds the catalog
-   families, but no engine, provider, store adapter, or client. Each call
+   families, but no engine, provider adapter, or client. Each call
    re-seals; a debug command pays that once and never caches a client. *)
 let tool_declarations t ~mode ~model =
   Result.map
