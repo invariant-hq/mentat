@@ -1,5 +1,6 @@
 ; CR: not sure why we have both a connector and boot. Should this move to boot?
 (library
  (name mentat_connector)
- (modules review_finding publication)
- (libraries jsont jsont.bytesrw mentat_digest mentat_json))
+ (modules review_finding publication json)
+ (private_modules json)
+ (libraries jsont jsont.bytesrw mentat_digest))

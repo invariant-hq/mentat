@@ -39,7 +39,6 @@
   mentat_routine
   mentat_client
   mentat_connector
-  mentat_json
   mentat_server
   mentat_provider_runtime
   mentat_provider

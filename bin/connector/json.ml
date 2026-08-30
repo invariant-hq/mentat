@@ -1,0 +1,74 @@
+(*---------------------------------------------------------------------------
+  Copyright (c) 2026 Invariant Systems. All rights reserved.
+  SPDX-License-Identifier: ISC
+ ---------------------------------------------------------------------------*)
+
+module Error = struct
+  type t = { context : string; reason : string }
+
+  let make ~context reason = { context; reason }
+
+  let message e =
+    if String.equal e.context "" then e.reason
+    else Printf.sprintf "%s: %s" e.context e.reason
+
+  let pp ppf e = Format.pp_print_string ppf (message e)
+end
+
+let error ~context reason = Error (Error.make ~context reason)
+
+let as_string ~context = function
+  | Jsont.String (s, _) -> Ok s
+  | _ -> error ~context "must be a string"
+
+let as_non_empty_string ~context json =
+  Result.bind (as_string ~context json) (fun s ->
+      if String.equal s "" then error ~context "must be a non-empty string"
+      else Ok s)
+
+(* [Jsont.Number] carries a float; accept only values that are an integer
+   round-trip so an out-of-range magnitude cannot alias a valid value. *)
+let positive_int ~context = function
+  | Jsont.Number (v, _)
+    when Float.compare v 1.0 >= 0
+         && Float.equal (float_of_int (int_of_float v)) v ->
+      Ok (int_of_float v)
+  | _ -> error ~context "must be a positive integer"
+
+(* Route each member of [mems] into its slot exactly once; an unlisted or
+   repeated member is the caller's strictness error. *)
+let route_members ~context ~slots mems =
+  List.fold_left
+    (fun acc mem ->
+      Result.bind acc (fun () ->
+          let name = fst (fst mem) in
+          match List.assoc_opt name slots with
+          | None -> error ~context (Printf.sprintf "unknown member %S" name)
+          | Some slot -> (
+              match !slot with
+              | Some _ ->
+                  error ~context (Printf.sprintf "duplicate member %S" name)
+              | None ->
+                  slot := Some (snd mem);
+                  Ok ())))
+    (Ok ()) mems
+
+let require ~context name slot =
+  match !slot with
+  | Some json -> Ok json
+  | None -> error ~context (Printf.sprintf "missing member %S" name)
+
+module Lenient = struct
+  let mem name = function
+    | Jsont.Object (mems, _) ->
+        Option.map snd (Jsont.Json.find_mem name mems)
+    | _ -> None
+
+  let string = function Jsont.String (s, _) -> Some s | _ -> None
+  let number = function Jsont.Number (v, _) -> Some v | _ -> None
+
+  let decode bytes =
+    match Jsont_bytesrw.decode_string Jsont.json bytes with
+    | Ok json -> Some json
+    | Error _ -> None
+end

@@ -54,7 +54,7 @@ module Body = struct
   let text t = t
 end
 
-module Error = Mentat_json.Error
+module Error = Json.Error
 
 type t = {
   severity : Severity.t;
@@ -112,10 +112,10 @@ module Document = struct
             ("body", body);
           ]
         in
-        let* () = Mentat_json.route_members ~context ~slots mems in
+        let* () = Json.route_members ~context ~slots mems in
         let* severity =
-          let* json = Mentat_json.require ~context "severity" severity in
-          let* s = Mentat_json.as_string ~context:(in_finding "severity") json in
+          let* json = Json.require ~context "severity" severity in
+          let* s = Json.as_string ~context:(in_finding "severity") json in
           match Severity.of_string s with
           | Some severity -> Ok severity
           | None ->
@@ -123,19 +123,19 @@ module Document = struct
                 "must be one of P0, P1, P2, or P3"
         in
         let* path =
-          let* json = Mentat_json.require ~context "path" path in
-          Mentat_json.as_non_empty_string ~context:(in_finding "path") json
+          let* json = Json.require ~context "path" path in
+          Json.as_non_empty_string ~context:(in_finding "path") json
         in
         let* line =
-          let* json = Mentat_json.require ~context "line" line in
-          Mentat_json.positive_int ~context:(in_finding "line") json
+          let* json = Json.require ~context "line" line in
+          Json.positive_int ~context:(in_finding "line") json
         in
         let* end_line =
           match !end_line with
           | None -> Ok None
           | Some json ->
               let* value =
-                Mentat_json.positive_int ~context:(in_finding "end_line") json
+                Json.positive_int ~context:(in_finding "end_line") json
               in
               if value < line then
                 error ~context:(in_finding "end_line")
@@ -143,19 +143,19 @@ module Document = struct
               else Ok (Some value)
         in
         let* anchor =
-          let* json = Mentat_json.require ~context "anchor" anchor in
-          let* anchor = Mentat_json.as_non_empty_string ~context:(in_finding "anchor") json in
+          let* json = Json.require ~context "anchor" anchor in
+          let* anchor = Json.as_non_empty_string ~context:(in_finding "anchor") json in
           if String.equal (String.trim anchor) "" then
             error ~context:(in_finding "anchor") "must not be only whitespace"
           else Ok anchor
         in
         let* title =
-          let* json = Mentat_json.require ~context "title" title in
-          Mentat_json.as_non_empty_string ~context:(in_finding "title") json
+          let* json = Json.require ~context "title" title in
+          Json.as_non_empty_string ~context:(in_finding "title") json
         in
         let* body =
-          let* json = Mentat_json.require ~context "body" body in
-          Mentat_json.as_string ~context:(in_finding "body") json
+          let* json = Json.require ~context "body" body in
+          Json.as_string ~context:(in_finding "body") json
         in
         Ok
           {
@@ -175,13 +175,13 @@ module Document = struct
     | Ok (Jsont.Object (mems, _)) ->
         let summary = ref None and findings = ref None in
         let slots = [ ("summary", summary); ("findings", findings) ] in
-        let* () = Mentat_json.route_members ~context:"" ~slots mems in
+        let* () = Json.route_members ~context:"" ~slots mems in
         let* summary =
-          let* json = Mentat_json.require ~context:"" "summary" summary in
-          Mentat_json.as_string ~context:"summary" json
+          let* json = Json.require ~context:"" "summary" summary in
+          Json.as_string ~context:"summary" json
         in
         let* findings =
-          let* json = Mentat_json.require ~context:"" "findings" findings in
+          let* json = Json.require ~context:"" "findings" findings in
           match json with
           | Jsont.Array (elements, _) ->
               let* _, reversed =

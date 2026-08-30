@@ -3,7 +3,7 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-module Error = Mentat_json.Error
+module Error = Json.Error
 
 module Diff = struct
   (* Per new-side file: the hunks as inclusive new-side intervals, in diff
@@ -334,7 +334,7 @@ module Posted = struct
         let* id =
           match Jsont.Json.find_mem "id" mems with
           | Some (_, json) ->
-              Mentat_json.positive_int ~context:(context ^ ".id") json
+              Json.positive_int ~context:(context ^ ".id") json
           | None -> error ~context {|missing member "id"|}
         in
         let* body =
@@ -569,10 +569,10 @@ module Outcome = struct
   let lines bytes =
     List.filter_map
       (fun line ->
-        match Mentat_json.Lenient.decode line with
+        match Json.Lenient.decode line with
         | Some json
-          when Option.bind (Mentat_json.Lenient.mem "type" json)
-                 Mentat_json.Lenient.string
+          when Option.bind (Json.Lenient.mem "type" json)
+                 Json.Lenient.string
                = Some type_ ->
             Some json
         | Some _ | None -> None)
@@ -580,14 +580,14 @@ module Outcome = struct
 
   let two_xx json =
     match
-      Option.bind (Mentat_json.Lenient.mem "status" json)
-        Mentat_json.Lenient.number
+      Option.bind (Json.Lenient.mem "status" json)
+        Json.Lenient.number
     with
     | Some v -> v >= 200.0 && v < 300.0
     | None -> false
 
   let labeled json =
-    match Mentat_json.Lenient.mem "label" json with
+    match Json.Lenient.mem "label" json with
     | Some (Jsont.Null _) | None -> false
     | Some _ -> true
 

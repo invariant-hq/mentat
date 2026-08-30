@@ -71,10 +71,10 @@ let webhook_arm t =
 let delivery_trigger t =
   match webhook_arm t with Some _ -> `Webhook | None -> `Cli
 
-module Error = Mentat_json.Error
+module Error = Json.Error
 
 let ( let* ) = Result.bind
-let error ~context reason = Error (Mentat_json.Error.make ~context reason)
+let error ~context reason = Error (Json.Error.make ~context reason)
 
 (* The routine-name grammar: a plain token, never a path. The name persists
    as the [source] member of the trigger-origin mail a fire delivers
@@ -87,11 +87,11 @@ let name_char c =
 
 let route ~context ~names mems =
   let slots = List.map (fun name -> (name, ref None)) names in
-  let* () = Mentat_json.route_members ~context ~slots mems in
+  let* () = Json.route_members ~context ~slots mems in
   Ok slots
 
 let required ~context slots name =
-  Mentat_json.require ~context name (List.assoc name slots)
+  Json.require ~context name (List.assoc name slots)
 
 let optional slots name = !(List.assoc name slots)
 
@@ -104,7 +104,7 @@ let string_list ~context json =
           (fun acc element ->
             let* index, reversed = acc in
             let* value =
-              Mentat_json.as_non_empty_string
+              Json.as_non_empty_string
                 ~context:(Printf.sprintf "%s[%d]" context index)
                 element
             in
@@ -146,7 +146,7 @@ let duration ~context s =
         | _ -> malformed ()
 
 let relative_file ~context json =
-  let* s = Mentat_json.as_non_empty_string ~context json in
+  let* s = Json.as_non_empty_string ~context json in
   if Char.equal s.[0] '/' then
     error ~context "must be a relative path inside the routine directory"
   else
@@ -237,7 +237,7 @@ let decode_gate ~context json =
       let* drafts =
         match optional slots "drafts" with
         | None -> Ok false
-        | Some json -> Mentat_json.as_bool ~context:(context ^ ".drafts") json
+        | Some json -> Json.as_bool ~context:(context ^ ".drafts") json
       in
       let* associations =
         match optional slots "associations" with
@@ -365,7 +365,7 @@ let decode_run json =
       in
       let* () =
         let* json = required ~context slots "mode" in
-        let* mode = Mentat_json.as_string ~context:"run.mode" json in
+        let* mode = Json.as_string ~context:"run.mode" json in
         if String.equal mode "review" then Ok ()
         else error ~context:"run.mode" "v1 admits only \"review\""
       in
@@ -374,13 +374,13 @@ let decode_run json =
         | None -> Ok None
         | Some json ->
             Result.map Option.some
-              (Mentat_json.as_non_empty_string ~context:"run.model" json)
+              (Json.as_non_empty_string ~context:"run.model" json)
       in
       let* reasoning =
         match optional slots "reasoning" with
         | None -> Ok None
         | Some json ->
-            let* value = Mentat_json.as_string ~context:"run.reasoning" json in
+            let* value = Json.as_string ~context:"run.reasoning" json in
             if List.mem value reasoning_vocabulary then Ok (Some value)
             else
               error ~context:"run.reasoning"
@@ -389,7 +389,7 @@ let decode_run json =
       let* max_steps =
         match optional slots "max_steps" with
         | None -> Ok 60
-        | Some json -> Mentat_json.positive_int ~context:"run.max_steps" json
+        | Some json -> Json.positive_int ~context:"run.max_steps" json
       in
       let* prompt =
         let* json = required ~context slots "prompt" in
@@ -412,7 +412,7 @@ let decode_run json =
         | None -> Ok None
         | Some json ->
             Result.map Option.some
-              (Mentat_json.as_bool ~context:"run.project_instructions" json)
+              (Json.as_bool ~context:"run.project_instructions" json)
       in
       Ok
         {
@@ -438,7 +438,7 @@ let decode_budget json =
             let* slots = route ~context ~names:[ "wall_clock" ] mems in
             let* json = required ~context slots "wall_clock" in
             let* value =
-              Mentat_json.as_string ~context:"budget.per_run.wall_clock" json
+              Json.as_string ~context:"budget.per_run.wall_clock" json
             in
             duration ~context:"budget.per_run.wall_clock" value
         | _ -> error ~context:"budget.per_run" "must be a JSON object"
@@ -456,7 +456,7 @@ let decode_budget json =
               | None -> Ok None
               | Some json ->
                   Result.map Option.some
-                    (Mentat_json.positive_number
+                    (Json.positive_number
                        ~context:"budget.per_routine.usd_per_day" json)
             in
             let* runs_per_hour =
@@ -464,7 +464,7 @@ let decode_budget json =
               | None -> Ok None
               | Some json ->
                   Result.map Option.some
-                    (Mentat_json.positive_int
+                    (Json.positive_int
                        ~context:"budget.per_routine.runs_per_hour" json)
             in
             Ok (usd_per_day, runs_per_hour)
@@ -479,7 +479,7 @@ let decode_publish json =
   | Jsont.Object (mems, _) ->
       let* slots = route ~context ~names:[ "github" ] mems in
       let* json = required ~context slots "github" in
-      let* value = Mentat_json.as_string ~context:"publish.github" json in
+      let* value = Json.as_string ~context:"publish.github" json in
       if String.equal value "review-threads" then Ok ()
       else error ~context:"publish.github" "v1 admits only \"review-threads\""
   | _ -> error ~context "must be a JSON object"
@@ -520,7 +520,7 @@ let decode_notify json =
                 (fun acc element ->
                   let* index, reversed = acc in
                   let* value =
-                    Mentat_json.as_string
+                    Json.as_string
                       ~context:(Printf.sprintf "%s[%d]" command_context index)
                       element
                   in
@@ -564,7 +564,7 @@ let decode bytes =
       in
       let* () =
         let* json = required ~context:"" slots "routine" in
-        let* version = Mentat_json.positive_int ~context:"routine" json in
+        let* version = Json.positive_int ~context:"routine" json in
         if version = 1 then Ok ()
         else
           error ~context:"routine"
@@ -573,7 +573,7 @@ let decode bytes =
       in
       let* name =
         let* json = required ~context:"" slots "name" in
-        let* name = Mentat_json.as_non_empty_string ~context:"name" json in
+        let* name = Json.as_non_empty_string ~context:"name" json in
         if String.for_all name_char name then Ok name
         else
           error ~context:"name"
@@ -582,7 +582,7 @@ let decode bytes =
       let* enabled =
         match optional slots "enabled" with
         | None -> Ok true
-        | Some json -> Mentat_json.as_bool ~context:"enabled" json
+        | Some json -> Json.as_bool ~context:"enabled" json
       in
       let* repo =
         let* json = required ~context:"" slots "workspace" in
@@ -590,8 +590,8 @@ let decode bytes =
         | Jsont.Object (mems, _) ->
             let* slots = route ~context:"workspace" ~names:[ "repo" ] mems in
             let* json = required ~context:"workspace" slots "repo" in
-            let* repo = Mentat_json.as_string ~context:"workspace.repo" json in
-            Mentat_json.repo_full_name ~context:"workspace.repo" repo
+            let* repo = Json.as_string ~context:"workspace.repo" json in
+            Json.repo_full_name ~context:"workspace.repo" repo
         | _ -> error ~context:"workspace" "must be a JSON object"
       in
       let* triggers =
@@ -622,7 +622,7 @@ let decode bytes =
             let context = "suppress" in
             let* slots = route ~context ~names:[ "clean_run" ] mems in
             let* json = required ~context slots "clean_run" in
-            let* value = Mentat_json.as_string ~context:"suppress.clean_run" json in
+            let* value = Json.as_string ~context:"suppress.clean_run" json in
             if String.equal value "silent" then Ok true
             else error ~context:"suppress.clean_run" "v1 admits only \"silent\""
         | Some _ -> error ~context:"suppress" "must be a JSON object"
@@ -648,7 +648,7 @@ let decode bytes =
         match optional slots "sandbox" with
         | None -> Ok ()
         | Some json ->
-            let* value = Mentat_json.as_string ~context:"sandbox" json in
+            let* value = Json.as_string ~context:"sandbox" json in
             if String.equal value "read-only" then Ok ()
             else error ~context:"sandbox" "v1 admits only \"read-only\""
       in
@@ -657,7 +657,7 @@ let decode bytes =
         | None -> Ok None
         | Some json -> (
             let* value =
-              Mentat_json.as_string ~context:"permission_unattended" json
+              Json.as_string ~context:"permission_unattended" json
             in
             match value with
             | "deny" -> Ok (Some Unattended.Deny)

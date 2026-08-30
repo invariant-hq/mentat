@@ -24,10 +24,10 @@ module Pull_request = struct
     repo : string;
   }
 
-  module Error = Mentat_json.Error
+  module Error = Json.Error
 
   let ( let* ) = Result.bind
-  let error ~context reason = Error (Mentat_json.Error.make ~context reason)
+  let error ~context reason = Error (Json.Error.make ~context reason)
 
   (* Narrow member access: take the named member, ignore its siblings. *)
   let member ~context name mems =
@@ -41,15 +41,15 @@ module Pull_request = struct
 
   let member_string ~context name mems =
     let* json = member ~context name mems in
-    Mentat_json.as_string ~context:(path ~context name) json
+    Json.as_string ~context:(path ~context name) json
 
   let member_bool ~context name mems =
     let* json = member ~context name mems in
-    Mentat_json.as_bool ~context:(path ~context name) json
+    Json.as_bool ~context:(path ~context name) json
 
   let member_int ~context name mems =
     let* json = member ~context name mems in
-    Mentat_json.positive_int ~context:(path ~context name) json
+    Json.positive_int ~context:(path ~context name) json
 
   let member_object ~context name mems =
     let* json = member ~context name mems in
@@ -150,7 +150,7 @@ module Pull_request = struct
         let* repository = member_object ~context:"" "repository" mems in
         let* repo =
           let* name = member_string ~context:"repository" "full_name" repository in
-          Mentat_json.repo_full_name ~context:"repository.full_name" name
+          Json.repo_full_name ~context:"repository.full_name" name
         in
         let* pull_request = member_object ~context:"" "pull_request" mems in
         let in_pr = "pull_request" in
@@ -225,7 +225,7 @@ module Pull_request = struct
         | None -> None
         | Some number ->
             let repo_ok =
-              match Mentat_json.repo_full_name ~context:"" repo with
+              match Json.repo_full_name ~context:"" repo with
               | Ok _ -> true
               | Error _ -> false
             in
@@ -250,11 +250,11 @@ module Pull_request = struct
 end
 
 let ping bytes =
-  match Mentat_json.Lenient.decode bytes with
+  match Json.Lenient.decode bytes with
   | None -> false
   | Some json ->
-      Option.is_some (Mentat_json.Lenient.mem "zen" json)
-      || Option.is_some (Mentat_json.Lenient.mem "hook_id" json)
+      Option.is_some (Json.Lenient.mem "zen" json)
+      || Option.is_some (Json.Lenient.mem "hook_id" json)
 
 module Identity = struct
   type t = string

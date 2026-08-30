@@ -1,5 +1,5 @@
 (library
  (name mentat_routine)
- (modules routine receipt event gate fence record run_id)
- ; CR: This should not depend on mentat_json
- (libraries jsont jsont.bytesrw mentat_digest mentat_json))
+ (modules routine receipt event gate fence record run_id json)
+ (private_modules json)
+ (libraries jsont jsont.bytesrw mentat_digest))

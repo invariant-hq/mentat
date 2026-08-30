@@ -1,4 +1,0 @@
-; CR: Probably fold this library into boot, or maybe inline these helpers where they are used, I am really not sure we want a jsont helper lib.
-(library
- (name mentat_json)
- (libraries jsont jsont.bytesrw))

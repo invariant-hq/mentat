@@ -3,15 +3,15 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
-(** JSON reading machinery shared by the executable's document readers.
+(** JSON reading discipline for the documents this library decodes.
 
-    Two postures over decoded {!Jsont.json} values, matching the two kinds
-    of document this executable reads. The strict readers serve closed
-    envelopes this program owns — every member routed exactly once, an
-    unknown or missing member an {!Error.t} naming it. {!Lenient} serves
-    another service's documents — take the named member if it has the
-    expected shape, ignore everything else, and let the caller decide what
-    absence means. *)
+    Two postures over decoded {!Jsont.json} values. The strict readers
+    demand a member's expected shape — anything else is an {!Error.t}
+    naming the offending part — and {!route_members} with {!require} read
+    the closed envelopes the library owns, every member routed exactly
+    once. {!Lenient} serves the foreign webhook body — take the named
+    member if it has the expected shape, ignore everything else, and let
+    the caller decide what absence means. *)
 
 (** Read errors. *)
 module Error : sig
@@ -89,19 +89,6 @@ module Lenient : sig
   val mem : string -> Jsont.json -> Jsont.json option
   (** [mem name json] is the value of member [name] when [json] is an
       object carrying it. *)
-
-  val string : Jsont.json -> string option
-  (** [string json] is [json]'s value when it is a string. *)
-
-  val bool : Jsont.json -> bool option
-  (** [bool json] is [json]'s value when it is a boolean. *)
-
-  val number : Jsont.json -> float option
-  (** [number json] is [json]'s value when it is a number. *)
-
-  val int : Jsont.json -> int option
-  (** [int json] is [json]'s value when it is a number that is an exact
-      integer. *)
 
   val decode : string -> Jsont.json option
   (** [decode bytes] is the JSON value [bytes] denotes, or [None] when it

@@ -621,17 +621,17 @@ let alert_identity env (loaded : Routine_store.Loaded.t) ~digest ~identity ~tran
    token in its environment alone. Both are short-lived [mentat] children. *)
 
 let findings_count bytes =
-  match
-    Option.bind (Mentat_json.Lenient.decode bytes)
-      (Mentat_json.Lenient.mem "findings")
-  with
-  | Some (Jsont.Array (items, _)) -> List.length items
-  | Some _ | None -> 1
+  match Jsont_bytesrw.decode_string Jsont.json bytes with
+  | Ok (Jsont.Object (mems, _)) -> (
+      match Jsont.Json.find_mem "findings" mems with
+      | Some (_, Jsont.Array (items, _)) -> List.length items
+      | Some _ | None -> 1)
+  | Ok _ | Error _ -> 1
 
 let posted_empty bytes =
-  match Mentat_json.Lenient.decode bytes with
-  | Some (Jsont.Array ([], _)) -> true
-  | Some _ | None -> false
+  match Jsont_bytesrw.decode_string Jsont.json bytes with
+  | Ok (Jsont.Array ([], _)) -> true
+  | Ok _ | Error _ -> false
 
 let publish env ~(repo : Repo.t) (loaded : Routine_store.Loaded.t)
     ~(event : Event.Pull_request.t) ~identity ~session ~run_root ~diff_rel

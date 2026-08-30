@@ -163,10 +163,10 @@ end
 
 type t = { at : float; identity : string; digest : string; kind : Kind.t }
 
-module Error = Mentat_json.Error
+module Error = Json.Error
 
 let ( let* ) = Result.bind
-let error ~context reason = Error (Mentat_json.Error.make ~context reason)
+let error ~context reason = Error (Json.Error.make ~context reason)
 
 (* Encoding. *)
 
@@ -287,15 +287,15 @@ let decode line =
             (fun name -> (name, ref None))
             ([ "kind"; "at"; "identity"; "digest" ] @ extra)
         in
-        let* () = Mentat_json.route_members ~context:"" ~slots mems in
+        let* () = Json.route_members ~context:"" ~slots mems in
         Ok slots
       in
       let value slots name =
-        Mentat_json.require ~context:"" name (List.assoc name slots)
+        Json.require ~context:"" name (List.assoc name slots)
       in
       let string_value slots name =
         let* json = value slots name in
-        Mentat_json.as_string ~context:name json
+        Json.as_string ~context:name json
       in
       let finish slots kind =
         let* at =
@@ -304,7 +304,7 @@ let decode line =
         in
         let* identity =
           let* json = value slots "identity" in
-          Mentat_json.as_non_empty_string ~context:"identity" json
+          Json.as_non_empty_string ~context:"identity" json
         in
         let* digest =
           let* digest = string_value slots "digest" in
@@ -316,13 +316,13 @@ let decode line =
       let reason_disposition slots wrap =
         let* reason =
           let* json = value slots "reason" in
-          Mentat_json.as_non_empty_string ~context:"reason" json
+          Json.as_non_empty_string ~context:"reason" json
         in
         finish slots (Kind.Disposition (wrap reason))
       in
       let session_value slots =
         let* json = value slots "session" in
-        Mentat_json.as_non_empty_string ~context:"session" json
+        Json.as_non_empty_string ~context:"session" json
       in
       let* kind_word = peek_string "kind" mems in
       (match kind_word with
@@ -341,19 +341,19 @@ let decode line =
           else
             let* action =
               let* json = value slots "action" in
-              Mentat_json.as_non_empty_string ~context:"action" json
+              Json.as_non_empty_string ~context:"action" json
             in
             let* base_ref =
               let* json = value slots "base_ref" in
-              Mentat_json.as_non_empty_string ~context:"base_ref" json
+              Json.as_non_empty_string ~context:"base_ref" json
             in
             let* draft =
               let* json = value slots "draft" in
-              Mentat_json.as_bool ~context:"draft" json
+              Json.as_bool ~context:"draft" json
             in
             let* author_association =
               let* json = value slots "author_association" in
-              Mentat_json.as_non_empty_string ~context:"author_association"
+              Json.as_non_empty_string ~context:"author_association"
                 json
             in
             finish slots
@@ -402,7 +402,7 @@ let decode line =
               let* session = session_value slots in
               let* exit =
                 let* json = value slots "exit" in
-                let* exit = Mentat_json.non_negative_int ~context:"exit" json in
+                let* exit = Json.non_negative_int ~context:"exit" json in
                 if exit <= 255 then Ok exit
                 else error ~context:"exit" "must be at most 255"
               in
@@ -454,7 +454,7 @@ let decode line =
           in
           let* threads =
             let* json = value slots "threads" in
-            Mentat_json.non_negative_int ~context:"threads" json
+            Json.non_negative_int ~context:"threads" json
           in
           finish slots (Kind.Egress { summary; threads })
       | "alert" ->
