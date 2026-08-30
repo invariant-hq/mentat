@@ -815,7 +815,7 @@ let diff_selection ~latest ~turn ~path state =
   | true, _, _ ->
       Option.map
         (fun t -> Revert.Selection.turns [ t ])
-        (Session_meta.latest_edit_turn state)
+        (State.latest_edit_turn state)
   | _, Some turn, _ -> Some (Revert.Selection.turns [ Turn.Id.of_string turn ])
   | _, _, Some path -> paths_selection ~path state
   | _ -> Some Revert.Selection.all
@@ -1011,7 +1011,7 @@ let revert_selection ~latest ~change ~path state =
   | true, _, _ ->
       Option.map
         (fun t -> Revert.Selection.turns [ t ])
-        (Session_meta.latest_edit_turn state)
+        (State.latest_edit_turn state)
   | _, Some change, _ ->
       Some (Revert.Selection.changes [ Change.Id.of_string change ])
   | _, _, Some path -> paths_selection ~path state
@@ -1121,12 +1121,12 @@ let revert_apply t ~json ~document ~latest ~change ~path ~force =
           (* The offline twin over the shared revert lifecycle: it
              resolves the selection from its command flags — including the
              whole-session and string-path scopes the wire [Scope.t] does not
-             carry — then runs the same {!Session_meta.revert} the online cone's
-             store adapter runs, under a fence it acquires itself. *)
+             carry — then runs the same {!Mentat_store.Mutation.revert_apply}
+             the online cone runs, under a fence it acquires itself. *)
           let run fence override =
-            Session_meta.revert
+            Mutation.revert_apply
               ~merge:(Composition.configured_revert_merge t)
-              ~override ~store ~fence ~document ~selection ~observe
+              ?override store ~fence ~document ~selection ~observe
               ~checkpoint:ports.Ports.checkpoint
               ~apply:(Mentat_workspace_io.Edit.apply capability)
               ~new_id:Session_meta.fresh_revert_id

@@ -56,6 +56,13 @@ module Scope : sig
     | Path of Mentat_workspace.Path.t
         (** Every recorded change touching this workspace path. *)
 
+  val resolve : State.t -> t -> Selection.t option
+  (** [resolve state scope] is the canonical selection [scope] names against
+      [state]'s recorded history, or [None] when [Latest] finds no editing turn
+      ({!State.latest_edit_turn}). [Change] and [Path] resolve structurally;
+      whether they name recorded work is preparation's question, not
+      resolution's. *)
+
   val jsont : t Jsont.t
   (** [jsont] maps a scope to a tagged JSON object ([type] =
       latest/change/path). *)

@@ -601,6 +601,12 @@ let prefix_for_turns t ~keep =
 let resolve t selection = resolve_rows t.changes selection
 let net t selection = Change.net (resolve t selection)
 
+(* Only an editing turn qualifies: observations and reverts carry no turn. *)
+let latest_edit_turn t =
+  List.fold_left
+    (fun acc -> function Event.Edit { turn; _ } -> Some turn | _ -> acc)
+    None t.events
+
 (* Internal: the ledger's last recorded change for a path. *)
 let head t path = Mentat_workspace.Path.Map.find_opt path t.heads
 

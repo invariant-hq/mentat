@@ -224,3 +224,10 @@ val resolve : t -> Revert_data.Selection.t -> Change.t list
 (** [resolve t selection] is the selection's resolved change rows in ledger
     order — the shared input of {!net}, {!revertability}, and {!Revert.prepare}.
     Restoration rows carry no turn, so a turns selection never resolves them. *)
+
+val latest_edit_turn : t -> Mentat_session.Turn.Id.t option
+(** [latest_edit_turn t] is the most recent turn that recorded an exact change,
+    or [None] when no turn has — observations and reverts carry no turn, so
+    only an editing turn qualifies. The one resolver behind every
+    latest-revertable-work selection (a wire [Latest] revert scope, an offline
+    [--latest] flag), so its consumers cannot drift. *)

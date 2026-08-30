@@ -20,6 +20,14 @@ let invalid fn message = invalid_arg' "Mentat_mutation.Revert" fn message
 module Scope = struct
   type t = Latest | Change of Change.Id.t | Path of Mentat_workspace.Path.t
 
+  let resolve state = function
+    | Latest ->
+        Option.map
+          (fun turn -> Selection.turns [ turn ])
+          (State.latest_edit_turn state)
+    | Change id -> Some (Selection.changes [ id ])
+    | Path path -> Some (Selection.paths [ path ])
+
   let jsont =
     let latest_case =
       Jsont.Object.map ~kind:"latest scope" Latest

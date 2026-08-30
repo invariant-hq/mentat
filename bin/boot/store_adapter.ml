@@ -41,10 +41,10 @@ let make ~sw ~root ~owner ~now ~merge ~capability ~checkpoint ~new_id :
       | Store.Mutation.Error.Non_regular_file _ ->
           Ports.Store_error.Corrupt (Store.Mutation.Error.diagnostic ~session e)
 
-    (* The wire outcome the online port carries: [Session_meta.revert] keeps the
-       refusal structured, so the online cone projects it to the port's
-       string-valued [Refused] here — the offline twin instead reads the
-       structured problems for its consent surface. *)
+    (* The wire outcome the online port carries: [Mentat_store.Mutation.
+       revert_apply] keeps the refusal structured, so the online cone projects
+       it to the port's string-valued [Refused] here — the offline twin instead
+       reads the structured problems for its consent surface. *)
     let outcome_of_store :
         Store.Mutation.revert_outcome -> Mentat_mutation.Revert.Outcome.t =
       function
@@ -143,33 +143,38 @@ let make ~sw ~root ~owner ~now ~merge ~capability ~checkpoint ~new_id :
         (of_attachment_error ~session:id)
         (Store.Attachment.get root ~session:id ref)
 
-    (* The online revert cone: resolve the scope and run the fenced lifecycle
-       through the shared assembly, closing over this adapter's workspace-write
-       capability (observe/apply), boundary checkpoint, and revert-id minter. The
-       offline twin composes the same {!Session_meta.revert} under its own
-       acquire. *)
+    (* The online revert cone: resolve the scope against the replayed history
+       and run the fenced lifecycle {!Mentat_store.Mutation.revert_apply}
+       composes, closing over this adapter's workspace-write capability
+       (observe/apply), boundary checkpoint, and revert-id minter. The offline
+       twin composes the same lifecycle under its own acquire. *)
     let revert guard loaded ~scope =
       let session = Store.Run_lock.session guard in
       let observe = Workspace_adapter.observe capability in
-      Result.map_error
-        (of_mutation_error ~session)
-        (Result.map outcome_of_store
-           (Session_meta.revert_scope ~merge ~override:None ~store:root
-              ~fence:guard ~document:loaded ~scope ~observe ~checkpoint
-              ~apply:(Mentat_workspace_io.Edit.apply capability)
-              ~new_id))
+      match Store.Mutation.read root loaded with
+      | Error e -> Error (of_mutation_error ~session e)
+      | Ok state ->
+          Result.map_error
+            (of_mutation_error ~session)
+            (Result.map outcome_of_store
+               (Store.Mutation.revert_apply ~merge root ~fence:guard
+                  ~document:loaded
+                  ~selection:(Mentat_mutation.Revert.Scope.resolve state scope)
+                  ~observe ~checkpoint
+                  ~apply:(Mentat_workspace_io.Edit.apply capability)
+                  ~new_id))
 
     (* The undo cone's file half: a multi-turn or multi-change [Selection] the
        online [revert] scope cannot express, run through the same fenced
-       lifecycle assembly. The undo flow drives it for the boundary revert and
-       the widen/narrow un-revert. *)
+       lifecycle. The undo flow drives it for the boundary revert and the
+       widen/narrow un-revert. *)
     let revert_selection guard loaded ~selection =
       let session = Store.Run_lock.session guard in
       let observe = Workspace_adapter.observe capability in
       Result.map_error
         (of_mutation_error ~session)
         (Result.map outcome_of_store
-           (Session_meta.revert ~merge ~override:None ~store:root ~fence:guard
+           (Store.Mutation.revert_apply ~merge root ~fence:guard
               ~document:loaded ~selection:(Some selection) ~observe ~checkpoint
               ~apply:(Mentat_workspace_io.Edit.apply capability)
               ~new_id))
