@@ -755,10 +755,6 @@ let context_for config id inputs =
               requested))
 
 let client ~sw ~env ?http ?observe_download ?(config = Config.default) () =
-  let accepts model =
-    Llm.Provider.equal provider (Llm.Model.provider model)
-    && Llm.Model.Api.equal api (Llm.Model.api model)
-  in
   let run ~cancelled ~on_event request =
     if cancelled () then Error (cancelled_error ())
     else
@@ -794,4 +790,4 @@ let client ~sw ~env ?http ?observe_download ?(config = Config.default) () =
       in
       Chat_completions.run endpoint ~cancelled ~on_event request
   in
-  Llm.Client.make ~provider ~accepts ~run ()
+  Llm.Client.make ~provider ~apis:[ api ] ~run

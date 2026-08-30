@@ -58,8 +58,4 @@ let run config credential ~env ~cancelled ~on_event request =
   Messages.run endpoint ~cancelled ~on_event request
 
 let client ~env ?(config = Config.default) ~credential () =
-  let accepts model =
-    Llm.Provider.equal provider (Llm.Model.provider model)
-    && Llm.Model.Api.equal api (Llm.Model.api model)
-  in
-  Llm.Client.make ~provider ~accepts ~run:(run config credential ~env) ()
+  Llm.Client.make ~provider ~apis:[ api ] ~run:(run config credential ~env)

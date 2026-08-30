@@ -22,12 +22,6 @@ type cancellation = unit -> bool
     returning [true]. A plain predicate keeps [mentat.llm] free of any runtime,
     fiber, or signal. *)
 
-type accepts = Model.t -> bool
-(** The type for model compatibility predicates.
-
-    The predicate is stable for the client's lifetime and is checked before
-    {!run}. *)
-
 type run =
   cancelled:cancellation ->
   on_event:(Event.t -> unit) ->
@@ -48,17 +42,21 @@ type run =
 type t
 (** The type for provider clients. *)
 
-val make : provider:Provider.t -> ?accepts:accepts -> run:run -> unit -> t
-(** [make ~provider ?accepts ~run ()] is a provider client backed by [run].
+val make : provider:Provider.t -> apis:Model.Api.t list -> run:run -> t
+(** [make ~provider ~apis ~run] is a provider client backed by [run].
 
-    [accepts] defaults to accepting models whose provider is [provider]. A
-    custom predicate may further restrict accepted APIs or model ids. *)
+    The client accepts exactly the models whose provider is [provider] and
+    whose API is a member of [apis]. *)
 
 val provider : t -> Provider.t
 (** [provider t] is the provider interpreted by [t]. *)
 
+val apis : t -> Model.Api.t list
+(** [apis t] is the API families [t] interprets, as given to {!make}. *)
+
 val accepts : t -> Model.t -> bool
-(** [accepts t model] is [true] iff [t] can interpret [model]. *)
+(** [accepts t model] is [true] iff [model]'s provider is {!provider} and its
+    API is one of {!apis}. *)
 
 val response :
   ?cancelled:cancellation ->

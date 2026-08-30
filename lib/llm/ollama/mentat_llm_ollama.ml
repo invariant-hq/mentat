@@ -75,10 +75,6 @@ module Credential = struct
 end
 
 let client ~env ?(config = Config.default) ?credential () =
-  let accepts model =
-    Llm.Provider.equal provider (Llm.Model.provider model)
-    && Llm.Model.Api.equal api (Llm.Model.api model)
-  in
   let headers = Option.map Credential.header credential |> Option.to_list in
   let run ~cancelled ~on_event request =
     Eio.Switch.run ~name:"ollama.request" @@ fun sw ->
@@ -91,4 +87,4 @@ let client ~env ?(config = Config.default) ?credential () =
     in
     Chat_completions.run endpoint ~cancelled ~on_event request
   in
-  Llm.Client.make ~provider ~accepts ~run ()
+  Llm.Client.make ~provider ~apis:[ api ] ~run

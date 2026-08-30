@@ -927,8 +927,4 @@ let run ~env config credential ~cancelled ~on_event request =
       Error (timeout_error ~phase:!phase (Config.timeout_s config))
 
 let client ~env ?(config = Config.default) ~credential () =
-  let accepts model =
-    Llm.Provider.equal provider (Llm.Model.provider model)
-    && Llm.Model.Api.equal api (Llm.Model.api model)
-  in
-  Llm.Client.make ~provider ~accepts ~run:(run ~env config credential) ()
+  Llm.Client.make ~provider ~apis:[ api ] ~run:(run ~env config credential)

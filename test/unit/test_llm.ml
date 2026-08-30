@@ -1822,16 +1822,20 @@ let digest_contracts =
 let client_contracts =
   group "Client"
     [
-      test "provider and accepts predicate" (fun () ->
+      test "provider, apis, and derived acceptance" (fun () ->
           let client =
-            Client.make ~provider:openai
+            Client.make ~provider:openai ~apis:[ responses ]
               ~run:(fun ~cancelled:_ ~on_event:_ _ -> Ok (response ()))
-              ()
           in
           equal provider_t ~msg:"provider" openai (Client.provider client);
-          is_true ~msg:"accepts own provider" (Client.accepts client gpt);
+          equal (list api_t) ~msg:"apis" [ responses ] (Client.apis client);
+          is_true ~msg:"accepts a served provider and api"
+            (Client.accepts client gpt);
           is_false ~msg:"rejects other provider"
-            (Client.accepts client (model ~provider:anthropic "claude")));
+            (Client.accepts client (model ~provider:anthropic "claude"));
+          is_false ~msg:"rejects an unserved api"
+            (Client.accepts client
+               (model ~api:(Model.Api.make "chat") "gpt-5")));
       test "dispatch passes cancellation, streams events, returns terminal"
         (fun () ->
           let terminal = response () in
@@ -1844,14 +1848,13 @@ let client_contracts =
             ]
           in
           let client =
-            Client.make ~provider:openai
+            Client.make ~provider:openai ~apis:[ responses ]
               ~run:(fun ~cancelled ~on_event request ->
                 seen_cancelled := cancelled ();
                 equal model_t ~msg:"run receives request" gpt
                   (Request.model request);
                 List.iter on_event events;
                 Ok terminal)
-              ()
           in
           let observed = ref [] in
           let outcome =
@@ -1872,11 +1875,10 @@ let client_contracts =
         (fun () ->
           let called = ref false in
           let client =
-            Client.make ~provider:openai
+            Client.make ~provider:openai ~apis:[ responses ]
               ~run:(fun ~cancelled:_ ~on_event:_ _ ->
                 called := true;
                 Ok (response ()))
-              ()
           in
           let wrong =
             Request.make_exn
@@ -1889,14 +1891,10 @@ let client_contracts =
               equal (option provider_t) ~msg:"provider" (Some openai)
                 (Error.provider e));
           is_false ~msg:"run was never invoked" !called);
-      test "a custom accepts predicate can reject an API" (fun () ->
+      test "rejects a model whose API the client does not serve" (fun () ->
           let client =
-            Client.make ~provider:openai
-              ~accepts:(fun m ->
-                Provider.equal openai (Model.provider m)
-                && Model.Api.equal responses (Model.api m))
+            Client.make ~provider:openai ~apis:[ responses ]
               ~run:(fun ~cancelled:_ ~on_event:_ _ -> Ok (response ()))
-              ()
           in
           let wrong_api =
             Request.make_exn
@@ -1910,24 +1908,22 @@ let client_contracts =
         (fun () ->
           let request = Request.make_exn ~model:gpt (ready_transcript ()) in
           let startup =
-            Client.make ~provider:openai
+            Client.make ~provider:openai ~apis:[ responses ]
               ~run:(fun ~cancelled:_ ~on_event:_ _ ->
                 Error
                   (Error.make ~kind:Error.Auth ~phase:Error.Startup "no key"))
-              ()
           in
           expect_error "startup" (Client.response startup request) (fun e ->
               equal phase_t ~msg:"phase" Error.Startup (Error.phase e);
               equal string ~msg:"kind" "auth" (Error.label (Error.kind e)));
           let observed = ref [] in
           let streaming =
-            Client.make ~provider:openai
+            Client.make ~provider:openai ~apis:[ responses ]
               ~run:(fun ~cancelled:_ ~on_event _ ->
                 on_event (Event.text_delta "partial");
                 Error
                   (Error.make ~kind:Error.Provider ~phase:Error.Stream
                      "mid-stream"))
-              ()
           in
           expect_error "stream"
             (Client.response
@@ -2242,12 +2238,11 @@ let workflows =
           in
           (* The run emits live events, but only [Response.message] is durable. *)
           let client =
-            Client.make ~provider:openai
+            Client.make ~provider:openai ~apis:[ responses ]
               ~run:(fun ~cancelled:_ ~on_event _ ->
                 on_event (Event.text_delta "I will use a tool.");
                 on_event (Event.tool_call (call ()));
                 Ok terminal)
-              ()
           in
           let request = Request.make_exn ~model:gpt (ready_transcript ()) in
           match Client.response client request with

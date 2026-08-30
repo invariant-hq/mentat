@@ -147,21 +147,14 @@ let run_messages config credential ~env ~cancelled ~on_event request =
   in
   Messages.run endpoint ~cancelled ~on_event request
 
-let arms config credential =
-  [
-    (Chat_completions.api, run_chat config credential);
-    (Messages.api, run_messages config credential);
-  ]
-
 let client ~env ?(config = Config.default) ~credential () =
-  let arms = arms config credential in
-  let accepts model =
-    Llm.Provider.equal provider (Llm.Model.provider model)
-    && List.mem_assoc (Llm.Model.api model) arms
-  in
+  (* The acceptance gate admits only the two declared families, so any request
+     reaching [run] that is not messages speaks chat completions. *)
   let run ~cancelled ~on_event request =
-    match List.assoc_opt (Llm.Model.api (Llm.Request.model request)) arms with
-    | Some arm -> arm ~env ~cancelled ~on_event request
-    | None -> assert false (* accepts derives from the same list *)
+    let api = Llm.Model.api (Llm.Request.model request) in
+    let arm =
+      if Llm.Model.Api.equal api Messages.api then run_messages else run_chat
+    in
+    arm config credential ~env ~cancelled ~on_event request
   in
-  Llm.Client.make ~provider ~accepts ~run ()
+  Llm.Client.make ~provider ~apis:[ Chat_completions.api; Messages.api ] ~run
