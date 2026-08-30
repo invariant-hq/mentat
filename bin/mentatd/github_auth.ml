@@ -3,6 +3,10 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
+module Github_app_store = Mentat_boot.Github_app_store
+module Routine_fire = Mentat_boot.Routine_fire
+module Routine_store = Mentat_boot.Routine_store
+
 let ( let* ) = Result.bind
 let store_error e = Routine_store.Error.message e
 let app_error e = Github_app_store.Error.message e
@@ -43,7 +47,7 @@ let reads api ~watched ~posted_login =
   }
 
 let make_api ~net ~base_url ~token =
-  match Github_transport.make ?base_url ~token net with
+  match Mentat_boot.Github_transport.make ?base_url ~token net with
   | Ok api -> Ok api
   | Error e -> Error (Github.Api.Error.message e)
 

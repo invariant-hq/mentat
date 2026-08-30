@@ -6,6 +6,14 @@
 module Server = Mentat_server
 module Session = Mentat_session
 module Discovery = Server.Discovery
+module Agent_client = Mentat_boot.Agent_client
+module Composition = Mentat_boot.Composition
+module Daemon = Mentat_boot.Daemon
+module Exit_status = Mentat_boot.Exit_status
+module Routine_store = Mentat_boot.Routine_store
+module Session_meta = Mentat_boot.Session_meta
+module Stop_signal = Mentat_boot.Stop_signal
+module User_dirs = Mentat_boot.User_dirs
 
 (* The handshake floor recorded in the discovery file — the wire version
    [Mentat_server] negotiates on the ingress listener. It is diagnostic/gate

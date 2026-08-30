@@ -4,6 +4,11 @@
  ---------------------------------------------------------------------------*)
 
 open! Cmdliner
+module Exit_status = Mentat_boot.Exit_status
+module Github_app_store = Mentat_boot.Github_app_store
+module Github_transport = Mentat_boot.Github_transport
+module Output = Mentat_boot.Output
+module Routine_store = Mentat_boot.Routine_store
 
 let ( let* ) = Result.bind
 
@@ -48,7 +53,7 @@ let hook_url ~public_url ~ingress_id =
   Printf.sprintf "%s/ingress/github/%s" base ingress_id
 
 let resolve_dirs () =
-  match User_dirs.resolve ~getenv:Sys.getenv_opt with
+  match Mentat_boot.User_dirs.resolve ~getenv:Sys.getenv_opt with
   | Ok dirs -> Ok dirs
   | Error message -> Error (Exit_status.runtime message)
 

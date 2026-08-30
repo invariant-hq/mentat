@@ -18,6 +18,7 @@
    registers [$Global:_mentat_cmdliner]. Keep the fix on re-vendor. *)
 
 open! Cmdliner
+module Exit_status = Mentat_boot.Exit_status
 
 let bash_script =
   {script|_mentat_cmdliner() {
@@ -399,7 +400,7 @@ let script = function
   | Pwsh -> pwsh_script
 
 let completion shell =
-  Output.stdout_printf "%s\n" (script shell);
+  Mentat_boot.Output.stdout_printf "%s\n" (script shell);
   Exit_status.Success
 
 let shell_arg =

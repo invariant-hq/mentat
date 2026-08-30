@@ -38,8 +38,11 @@ module Observed : sig
       pending-run judgment reads. *)
 
   type routine = {
-    loaded : Routine_store.Loaded.t;  (** The loaded policy closure. *)
-    receipts : (Mentat_routine.Receipt.t list, Routine_store.Error.t) result;
+    loaded : Mentat_boot.Routine_store.Loaded.t;
+        (** The loaded policy closure. *)
+    receipts :
+      (Mentat_routine.Receipt.t list, Mentat_boot.Routine_store.Error.t)
+      result;
         (** The routine's receipt log, or why it could not be read. *)
     runs : run list;
         (** The open runs; empty when the receipts are unreadable. *)
@@ -47,16 +50,16 @@ module Observed : sig
   (** The type for observed loadable routines. *)
 
   type t =
-    | Broken of { name : string; error : Routine_store.Error.t }
+    | Broken of { name : string; error : Mentat_boot.Routine_store.Error.t }
         (** A roster entry that failed to load, with the refusal. *)
     | Routine of routine  (** A loaded routine and its record. *)
   (** The type for per-routine observations. *)
 end
 
 val observe :
-  dirs:User_dirs.t ->
+  dirs:Mentat_boot.User_dirs.t ->
   store:Mentat_store.t ->
-  (Observed.t list, Routine_store.Error.t) result
+  (Observed.t list, Mentat_boot.Routine_store.Error.t) result
 (** [observe ~dirs ~store] reads the installed roster and, per loadable
     routine, its receipt log and one fence probe per open run — all fresh
     on every call, since the files are the registration and an owner's
@@ -67,7 +70,7 @@ val observe :
 val page :
   now:float ->
   ingress:string option ->
-  (Observed.t list, Routine_store.Error.t) result ->
+  (Observed.t list, Mentat_boot.Routine_store.Error.t) result ->
   Mentat_web.Html.t
 (** [page ~now ~ingress observed] is the complete dashboard document for
     [observed]. Attention items render first, bucketed in fixed order —

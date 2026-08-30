@@ -6,6 +6,9 @@
 open! Cmdliner
 module Account = Mentat_provider.Account
 module Selector = Mentat_provider.Selector
+module Composition = Mentat_boot.Composition
+module Exit_status = Mentat_boot.Exit_status
+module Output = Mentat_boot.Output
 
 type level = Pass | Warn | Fail
 

@@ -3,7 +3,6 @@
  (name main)
  (public_name mentatd)
  (package mentat)
- (flags (:standard -open Mentat_boot))
  (modules
   github_auth
   github_cli

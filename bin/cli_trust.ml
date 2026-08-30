@@ -4,6 +4,9 @@
  ---------------------------------------------------------------------------*)
 
 open! Cmdliner
+module Composition = Mentat_boot.Composition
+module Exit_status = Mentat_boot.Exit_status
+module Trust_store = Mentat_boot.Trust_store
 
 (* Two standalone commands recording a user-side decision at
    config_home/trust.json for the nearest workspace root. A "trust group"
@@ -11,10 +14,10 @@ open! Cmdliner
 
 let set_and_report t status label =
   let root = Lpath.Abs.to_string (Composition.root t) in
-  let path = User_dirs.trust_file (Composition.dirs t) in
+  let path = Mentat_boot.User_dirs.trust_file (Composition.dirs t) in
   match Trust_store.set ~path ~root status with
   | Ok () ->
-      Output.stdout_printf "%s %s\n" label root;
+      Mentat_boot.Output.stdout_printf "%s %s\n" label root;
       Exit_status.Success
   | Error e -> Exit_status.runtime (Trust_store.Error.message e)
 

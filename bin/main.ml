@@ -124,4 +124,4 @@ let () =
     if names_internal_verb Sys.argv then advertised @ [ Cli_serve.cmd ]
     else advertised
   in
-  Entry.run ~version ~rewrite_argv:rewrite_run_prompt (root cmds)
+  Mentat_boot.Entry.run ~version ~rewrite_argv:rewrite_run_prompt (root cmds)

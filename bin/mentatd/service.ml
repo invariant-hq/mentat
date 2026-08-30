@@ -3,6 +3,10 @@
   SPDX-License-Identifier: ISC
  ---------------------------------------------------------------------------*)
 
+module Exit_status = Mentat_boot.Exit_status
+module Fs = Mentat_boot.Fs
+module User_dirs = Mentat_boot.User_dirs
+
 let ( let* ) = Result.bind
 
 module Platform = struct
@@ -374,7 +378,7 @@ let install_unit platform ~args =
   | Unit_file.Fresh | Unit_file.Unchanged | Unit_file.Replaceable -> (
       (* The manager appends the daemon's stdio under the daemon home, so the
          directory must exist before the first service start. *)
-      Daemon.ensure_daemon_dir dirs;
+      Mentat_boot.Daemon.ensure_daemon_dir dirs;
       let* () =
         match standing with
         | Unit_file.Unchanged -> Ok ()

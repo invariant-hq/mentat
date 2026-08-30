@@ -4,6 +4,14 @@
  ---------------------------------------------------------------------------*)
 
 open! Cmdliner
+module Agent_client = Mentat_boot.Agent_client
+module Composition = Mentat_boot.Composition
+module Exit_status = Mentat_boot.Exit_status
+module Fs = Mentat_boot.Fs
+module Log_setup = Mentat_boot.Log_setup
+module Output = Mentat_boot.Output
+module Trust_store = Mentat_boot.Trust_store
+module User_dirs = Mentat_boot.User_dirs
 
 let keybindings_log =
   Logs.Src.create "mentat.tui.keybindings"
@@ -404,7 +412,7 @@ let notify_hook t =
       Some
         (fun ~title ~body ->
           let stdenv = Composition.stdenv t in
-          Notify.fire
+          Mentat_boot.Notify.fire
             ~proc_mgr:(Eio.Stdenv.process_mgr stdenv)
             ~clock:(Eio.Stdenv.clock stdenv) ~argv
             ~event:
@@ -879,7 +887,7 @@ let run version session last continue sandbox mode_raw draft prompt cwd =
       let mode =
         match mode_raw with
         | None -> Ok Mentat_session.Contract.Mode.Build
-        | Some raw -> Argv.workflow_mode raw
+        | Some raw -> Mentat_boot.Argv.workflow_mode raw
       in
       match mode with
       | Error status -> status

@@ -6,14 +6,15 @@
 (** Session auto-titling: name a fresh session from its first prompt. *)
 
 val run :
-  Composition.t ->
+  Mentat_boot.Composition.t ->
   client:Mentat_client.t ->
   session:Mentat_session.Id.t ->
   prompt:string ->
   unit
 (** [run t ~client ~session ~prompt] gives [session] a short human-readable
     title derived from its first user [prompt], generated on the resolved
-    {!Composition.small_model} and persisted with {!Mentat_client.rename}.
+    {!Mentat_boot.Composition.small_model} and persisted with
+    {!Mentat_client.rename}.
 
     It is a best-effort side-call the executable makes exactly once for a fresh,
     still-untitled session, before the first prompt is submitted (submission

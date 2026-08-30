@@ -5,6 +5,7 @@
 
 open Mentat_routine
 open Mentat_web
+module Routine_store = Mentat_boot.Routine_store
 
 module Observed = struct
   type run = { pending : Receipt.Pending.t; fence : Record.fence }
@@ -40,7 +41,7 @@ let observe ~dirs ~store =
                        {
                          Observed.pending;
                          fence =
-                           Routine_fire.probe_fence store
+                           Mentat_boot.Routine_fire.probe_fence store
                              ~session:pending.Receipt.Pending.session;
                        })
                      (Receipt.pending_runs receipts)

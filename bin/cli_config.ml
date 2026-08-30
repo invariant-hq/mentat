@@ -8,6 +8,11 @@ module Config = Mentat_config
 module Catalog = Mentat_provider.Catalog
 module View = Config.Resolved.View
 module Entry = View.Entry
+module Argv = Mentat_boot.Argv
+module Composition = Mentat_boot.Composition
+module Config_io = Mentat_boot.Config_io
+module Exit_status = Mentat_boot.Exit_status
+module Output = Mentat_boot.Output
 
 let docs = Cli_common.s_config
 
@@ -358,7 +363,7 @@ let validate json strict path_opt cwd =
       let path =
         match path_opt with
         | Some p -> p
-        | None -> User_dirs.config_file (Composition.dirs t)
+        | None -> Mentat_boot.User_dirs.config_file (Composition.dirs t)
       in
       let ok () = report json ~errors:[] ~warnings:[] in
       match Config_io.read ~path with

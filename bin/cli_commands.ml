@@ -13,6 +13,9 @@ open! Cmdliner
 module Config = Mentat_config
 module Commands = Mentat_context.Commands
 module Command = Commands.Command
+module Composition = Mentat_boot.Composition
+module Exit_status = Mentat_boot.Exit_status
+module Output = Mentat_boot.Output
 
 let docs = Cli_common.s_diagnostic
 
@@ -28,7 +31,8 @@ let json_of codec value =
 let with_commands cwd f =
   Composition.with_base ~cwd ~overrides:[] (fun t ->
       let user_config_file =
-        Lpath.Abs.of_string_exn (User_dirs.config_file (Composition.dirs t))
+        Lpath.Abs.of_string_exn
+          (Mentat_boot.User_dirs.config_file (Composition.dirs t))
       in
       let commands =
         Commands.load ~stdenv:(Composition.stdenv t)

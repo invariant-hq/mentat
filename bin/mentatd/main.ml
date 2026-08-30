@@ -4,6 +4,8 @@
  ---------------------------------------------------------------------------*)
 
 open! Cmdliner
+module Daemon = Mentat_boot.Daemon
+module Exit_status = Mentat_boot.Exit_status
 
 let serve stop web web_port ingress_port github_base_url routine_git_base =
   if stop then Daemon.stop ()
@@ -329,4 +331,4 @@ let root =
     info
     [ stop_cmd; install_cmd; uninstall_cmd; Routine_cli.cmd; Github_cli.cmd ]
 
-let () = Entry.run ~version:Daemon.binary_version root
+let () = Mentat_boot.Entry.run ~version:Daemon.binary_version root

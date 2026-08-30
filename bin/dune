@@ -3,7 +3,6 @@
  (name main)
  (public_name mentat)
  (package mentat)
- (flags (:standard -open Mentat_boot))
  (modules
   auto_title
   session_locate

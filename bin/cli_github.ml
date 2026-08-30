@@ -5,6 +5,8 @@
 
 open! Cmdliner
 open Mentat_connector
+module Exit_status = Mentat_boot.Exit_status
+module Output = Mentat_boot.Output
 
 let docs = Cli_common.s_run
 let ( let* ) = Result.bind
@@ -110,7 +112,7 @@ let parse_origin raw =
 (* An unreadable or missing input file is an environment condition (exit 1),
    like any other IO failure; only the flag grammar itself is usage. *)
 let read_file ~flag path =
-  match Fs.read_capped ~max_bytes:input_cap path with
+  match Mentat_boot.Fs.read_capped ~max_bytes:input_cap path with
   | Ok (Some bytes) -> Ok bytes
   | Ok None ->
       Error
@@ -264,7 +266,9 @@ let publish pr =
    in
    Eio_main.run @@ fun env ->
    let base_url = Sys.getenv_opt "MENTAT_GITHUB_BASE_URL" in
-   match Github_transport.make ?base_url ~token (Eio.Stdenv.net env) with
+   match
+     Mentat_boot.Github_transport.make ?base_url ~token (Eio.Stdenv.net env)
+   with
    | Error e -> Error (Exit_status.runtime (Github.Api.Error.message e))
    | Ok api ->
        let* all_ok =

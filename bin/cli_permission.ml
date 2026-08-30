@@ -7,6 +7,10 @@ open! Cmdliner
 module Config = Mentat_config
 module Rule = Mentat_permission.Policy.Rule
 module Row = Config.Resolved.View.Permission_rule
+module Composition = Mentat_boot.Composition
+module Config_io = Mentat_boot.Config_io
+module Exit_status = Mentat_boot.Exit_status
+module Output = Mentat_boot.Output
 
 let docs = Cli_common.s_config
 

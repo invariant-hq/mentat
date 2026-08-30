@@ -4,6 +4,8 @@
  ---------------------------------------------------------------------------*)
 
 open Mentat_routine
+module Routine_fire = Mentat_boot.Routine_fire
+module Routine_store = Mentat_boot.Routine_store
 
 (* Drivers over the pure tables ([Mentat_routine.Record], the receipt
    folds). Probes and interpretation live here; every refusal and failure

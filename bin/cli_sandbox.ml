@@ -6,6 +6,9 @@
 open! Cmdliner
 module Cfg = Mentat_config
 module Sandbox = Mentat_sandbox
+module Composition = Mentat_boot.Composition
+module Exit_status = Mentat_boot.Exit_status
+module Output = Mentat_boot.Output
 
 let docs = Cli_common.s_diagnostic
 

@@ -7,8 +7,8 @@
     the CLI fire and the resident node, so the two invokers can never grow
     separate answers to which credential a routine fires with.
 
-    The mode is {!Routine_store.auth_mode}'s: PAT files win, else the
-    owner-level App, else a refusal naming both exits. The PAT arm is the
+    The mode is {!Mentat_boot.Routine_store.auth_mode}'s: PAT files win, else
+    the owner-level App, else a refusal naming both exits. The PAT arm is the
     existing journey byte for byte — the read token client, [/user] for the
     posting identity, [secrets/write-token] at publish time. The App arm
     mints per fire and holds nothing: a fresh JWT over the re-read key, the
@@ -20,12 +20,12 @@
     any caller may retain a connection across fires. *)
 
 val repo :
-  dirs:User_dirs.t ->
+  dirs:Mentat_boot.User_dirs.t ->
   net:_ Eio.Net.t ->
   base_url:string option ->
   git_url:string ->
-  Routine_store.Loaded.t ->
-  (Routine_fire.Repo.t, string) result
+  Mentat_boot.Routine_store.Loaded.t ->
+  (Mentat_boot.Routine_fire.Repo.t, string) result
 (** [repo ~dirs ~net ~base_url ~git_url loaded] is the per-fire connection
     for [loaded], mode-resolved and built fresh — credentials re-read or
     re-minted per call, so a rotated token or a replaced key is in force at

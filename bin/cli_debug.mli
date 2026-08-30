@@ -9,7 +9,7 @@
 val cmd : int Cmdliner.Cmd.t
 
 val session_bundle :
-  Composition.t ->
+  Mentat_boot.Composition.t ->
   Mentat_store.Session.Document.t ->
   Jsont.json * string list * string list
 (** [session_bundle t document] is what [debug session --json] prints for

@@ -18,6 +18,10 @@ module Discovery = Account.Discovery
 module Phase = Account.Phase
 module Credential_error = Mentat_provider.Credential_error
 module Provider = Mentat_llm.Provider
+module Composition = Mentat_boot.Composition
+module Config_io = Mentat_boot.Config_io
+module Exit_status = Mentat_boot.Exit_status
+module Output = Mentat_boot.Output
 
 let docs = Cli_common.s_config
 

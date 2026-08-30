@@ -9,7 +9,7 @@ let s_run = "RUN COMMANDS"
 let s_session = "SESSION COMMANDS"
 let s_config = "CONFIGURATION COMMANDS"
 let s_diagnostic = "DIAGNOSTIC COMMANDS"
-let exits = Exit_status.exits
+let exits = Mentat_boot.Exit_status.exits
 
 let cwd =
   let doc = "Run as if $(b,mentat) were invoked in directory $(docv)." in

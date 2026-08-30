@@ -8,9 +8,9 @@
     The foreground machinery behind [mentatd], consumed by its [main]. The
     daemon hosts the standing surfaces — the browser frontend and the webhook
     ingress — around sessions that are driven by their own agents; it stages
-    {!Composition.stage_shared} once, holds no engine and serves no wire
-    driver, and spawns and dials agents exactly as any frontend does
-    ({!Agent_client}). *)
+    {!Mentat_boot.Composition.stage_shared} once, holds no engine and serves
+    no wire driver, and spawns and dials agents exactly as any frontend does
+    ({!Mentat_boot.Agent_client}). *)
 
 val serve :
   web:bool ->
@@ -18,13 +18,13 @@ val serve :
   ingress_port:int option ->
   github_base_url:string option ->
   routine_git_base:string option ->
-  Exit_status.t
+  Mentat_boot.Exit_status.t
 (** [serve ~web ~web_port ~ingress_port ~github_base_url ~routine_git_base]
     runs the foreground daemon and blocks until a signal stops it. It stages
     the shared per-user state, takes the [daemon.lock] claim (returning a
-    {!Exit_status.Runtime_error} "already running" when it is held — the
-    serialisation that collapses racing starts to one), writes [daemon.json]
-    atomically, sweeps the endpoint residue of removed sessions
+    {!Mentat_boot.Exit_status.Runtime_error} "already running" when it is held
+    — the serialisation that collapses racing starts to one), writes
+    [daemon.json] atomically, sweeps the endpoint residue of removed sessions
     ({!Mentat_broker.sweep_endpoints}), and serves.
 
     The daemon is also the resident routine node ({!Node}): assembled at every

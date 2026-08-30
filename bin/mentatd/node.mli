@@ -15,9 +15,9 @@
 
     {b The 202 contract.} The intake is split at the pipeline's durability
     point. {!val-ingress}'s [deliver] callback runs on the serving fiber
-    and performs only {!Routine_fire.admit_delivery} — the size fence, the
-    narrow decode, and the durable delivery receipt — then hands the
-    admitted event to the node's queue and answers accepted: the wire's
+    and performs only {!Mentat_boot.Routine_fire.admit_delivery} — the size
+    fence, the narrow decode, and the durable delivery receipt — then hands
+    the admitted event to the node's queue and answers accepted: the wire's
     [202] means the delivery receipt is on disk, never that a run was
     gated, spawned, or finished. Everything after the receipt — gate, head
     check, fences, claim, checkout, run, publication — happens on {!pump}'s
@@ -43,9 +43,9 @@ type t
 (** The type for resident routine nodes. *)
 
 val create :
-  Composition.shared ->
+  Mentat_boot.Composition.shared ->
   broker:Mentat_broker.t ->
-  stop:Stop_signal.t ->
+  stop:Mentat_boot.Stop_signal.t ->
   ?github_base_url:string ->
   ?git_base:string ->
   unit ->
@@ -74,13 +74,16 @@ val create :
     never payload data. [Error message] when no [mentat] sibling binary
     resolves, so a node that could never spawn a run is refused at boot. *)
 
-val reconcile_env : t -> Routine_fire.env
+val reconcile_env : t -> Mentat_boot.Routine_fire.env
 (** [reconcile_env t] is the pipeline environment for the reconcile fold's
     drivers: the node's process-scoped effects with narration un-prefixed —
     the fold speaks for many routines in one pass and prefixes each line
     with the routine it concerns itself, exactly as {!val-env} would. *)
 
-val repo : t -> Routine_store.Loaded.t -> (Routine_fire.Repo.t, string) result
+val repo :
+  t ->
+  Mentat_boot.Routine_store.Loaded.t ->
+  (Mentat_boot.Routine_fire.Repo.t, string) result
 (** [repo t loaded] is the per-fire connection to [loaded]'s repository —
     {!Github_auth.repo} over the node's validated API base and derived
     remote: the injected reads and credential closures for whichever auth
@@ -117,7 +120,7 @@ val ingress : t -> Mentat_server.Ingress.t
     the queue. Deliveries rejected at the wire over their signature are
     counted and noted in the trace log. *)
 
-val pump : t -> after_reap:(Routine_store.Loaded.t -> unit) -> unit
+val pump : t -> after_reap:(Mentat_boot.Routine_store.Loaded.t -> unit) -> unit
 (** [pump t ~after_reap] consumes the queue and drives each admitted event
     to its disposition: the repository connection is rebuilt, then the
     pipeline's decision half runs with the current-head check on — one
@@ -145,7 +148,7 @@ val pump : t -> after_reap:(Routine_store.Loaded.t -> unit) -> unit
     unit testing. *)
 
 val resolution :
-  Routine_store.Binding.t list ->
+  Mentat_boot.Routine_store.Binding.t list ->
   ingress_id:string ->
   Mentat_server.Ingress.resolution
 (** [resolution bindings ~ingress_id] is the resolver's answer: the secret
@@ -168,10 +171,10 @@ val event_route :
     [pull_request] or was absent. *)
 
 val app_route :
-  Routine_store.Loaded.t list ->
-  app_mode:(Routine_store.Loaded.t -> bool) ->
+  Mentat_boot.Routine_store.Loaded.t list ->
+  app_mode:(Mentat_boot.Routine_store.Loaded.t -> bool) ->
   repo:string ->
-  Routine_store.Loaded.t list
+  Mentat_boot.Routine_store.Loaded.t list
 (** [app_route loadeds ~app_mode ~repo] is the routines a verified App
     delivery for [repo] selects: the webhook-armed routines watching
     [repo] that [app_mode] admits, in roster order. The predicate is

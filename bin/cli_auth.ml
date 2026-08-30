@@ -9,6 +9,10 @@ module Provider = Mentat_provider
 module Account = Provider.Account
 module Auth = Provider.Auth
 module Credential = Provider.Credential
+module Argv = Mentat_boot.Argv
+module Composition = Mentat_boot.Composition
+module Exit_status = Mentat_boot.Exit_status
+module Output = Mentat_boot.Output
 
 let docs = Cli_common.s_config
 let provider_of s = Mentat_llm.Provider.make s
@@ -177,7 +181,7 @@ let read_api_key ~api_key_stdin ~provider =
 let saved_location t name_opt =
   let name = Option.value ~default:"default" name_opt in
   Printf.sprintf "%s (file store %s)" name
-    (User_dirs.auth_file (Composition.dirs t))
+    (Mentat_boot.User_dirs.auth_file (Composition.dirs t))
 
 (* The full settle block uses the exact account observation returned for
    the committed credential; it never reloads or reconstructs readiness. *)

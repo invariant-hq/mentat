@@ -8,11 +8,11 @@
     This module is the executable side of the TUI boundary. It resolves launch
     arguments, builds the launch-fixed snapshot and executable-local
     persistence, file-enumeration, browser, and sandboxed-shell closures from
-    {!Composition.t}, resolves motion policy from the captured process
-    environment, obtains the client, and then hands only those values to
-    {!Mentat_tui.Runtime}. Before that handoff it reads workspace trust, owns
-    the persistence decision and launch gate, and delegates only the prompt
-    presentation to {!Cli_trust_prompt}. *)
+    {!Mentat_boot.Composition.t}, resolves motion policy from the captured
+    process environment, obtains the client, and then hands only those values
+    to {!Mentat_tui.Runtime}. Before that handoff it reads workspace trust,
+    owns the persistence decision and launch gate, and delegates only the
+    prompt presentation to {!Cli_trust_prompt}. *)
 
 open Cmdliner
 

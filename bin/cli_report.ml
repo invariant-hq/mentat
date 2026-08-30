@@ -4,6 +4,11 @@
  ---------------------------------------------------------------------------*)
 
 open! Cmdliner
+module Composition = Mentat_boot.Composition
+module Exit_status = Mentat_boot.Exit_status
+module Fs = Mentat_boot.Fs
+module Output = Mentat_boot.Output
+module Session_meta = Mentat_boot.Session_meta
 
 let docs = Cli_common.s_diagnostic
 

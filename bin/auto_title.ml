@@ -5,6 +5,7 @@
 
 module Client = Mentat_client
 module Session = Mentat_session
+module Composition = Mentat_boot.Composition
 
 let log_src = Logs.Src.create "mentat.auto-title" ~doc:"Session auto-titling"
 

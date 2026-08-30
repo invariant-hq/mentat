@@ -7,7 +7,8 @@
 
 val cmd : int Cmdliner.Cmd.t
 
-val print_warnings : ?about:Mentat_config.Field.any -> Composition.t -> unit
+val print_warnings :
+  ?about:Mentat_config.Field.any -> Mentat_boot.Composition.t -> unit
 (** [print_warnings t] writes [t]'s configuration resolution warnings to stderr,
     one [mentat: warning:] line each: config input that did not take effect,
     such as a workspace key outside the shared allowlist or a config file
@@ -17,7 +18,7 @@ val print_warnings : ?about:Mentat_config.Field.any -> Composition.t -> unit
     [about] restricts the report to warnings that bear on one key — its own,
     plus the file-level warnings that bear on every key. *)
 
-val resolved_json : Composition.t -> Jsont.json
+val resolved_json : Mentat_boot.Composition.t -> Jsont.json
 (** [resolved_json t] is the effective configuration with each value's
     provenance, as [config show --json --origins] renders it. Credentials are
     withheld because the library's view projects them that way — an API key

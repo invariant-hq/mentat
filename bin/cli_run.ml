@@ -13,6 +13,16 @@ module Session = Mentat_session
 module Turn = Mentat_session.Turn
 module Document = Mentat_store.Session.Document
 module Catalog = Mentat_provider.Catalog
+module Agent_client = Mentat_boot.Agent_client
+module Argv = Mentat_boot.Argv
+module Composition = Mentat_boot.Composition
+module Exit_status = Mentat_boot.Exit_status
+module Fs = Mentat_boot.Fs
+module Log_setup = Mentat_boot.Log_setup
+module Output = Mentat_boot.Output
+module Review_git = Mentat_boot.Review_git
+module Session_meta = Mentat_boot.Session_meta
+module User_dirs = Mentat_boot.User_dirs
 
 let docs = Cli_common.s_run
 let ( let* ) = Result.bind

@@ -13,12 +13,12 @@
     ({!Mentat_routine.Receipt.pending_runs}) — gains one broker watch
     ({!Mentat_broker.watch}, deduplicated across passes), whose terminal
     observation drives the honest settle
-    ([Routine_fire.settle_recovered]) — a run younger than the spawn grace
-    is not watched at all (its activation may still be staging, and a free
-    fence over an unfinished head would read holder-died either way), and a
-    run observed settled while its activation still lingers holding the
-    fence is left to the next pass, which re-watches; every reaped
-    disposition still owed
+    ([Mentat_boot.Routine_fire.settle_recovered]) — a run younger than the
+    spawn grace is not watched at all (its activation may still be staging,
+    and a free fence over an unfinished head would read holder-died either
+    way), and a run observed settled while its activation still lingers
+    holding the fence is left to the next pass, which re-watches; every
+    reaped disposition still owed
     its alert re-fires it — the reap and the alert are two appends with an
     external hook between them, so a crash window between them is repaired
     here, idempotently, off the receipt-log dedup; every delivery receipt
@@ -26,10 +26,10 @@
     decided, which the sender will not redeliver — is rebuilt from its own
     members and re-driven through the ordinary dispose, or closed with a
     skipped line when it cannot be rebuilt; and, for an enabled routine,
-    [Routine_fire.fire_sweep] drives the sweep half of the fold. A disabled
-    routine still settles pending runs, repairs alerts, and closes its open
-    deliveries as skipped-disabled — the money is already spent and the
-    record is owed — but sweeps nothing and publishes nothing.
+    [Mentat_boot.Routine_fire.fire_sweep] drives the sweep half of the fold.
+    A disabled routine still settles pending runs, repairs alerts, and closes
+    its open deliveries as skipped-disabled — the money is already spent and
+    the record is owed — but sweeps nothing and publishes nothing.
 
     All drivers narrate refusals and failures through the environment's
     line sink and never raise: a broken routine or an unreachable remote
@@ -43,9 +43,11 @@
     rather than parking its caller behind a full roster pass. *)
 
 val reconcile :
-  Routine_fire.env ->
-  repo_for:(Routine_store.Loaded.t -> (Routine_fire.Repo.t, string) result) ->
-  Routine_store.Loaded.t ->
+  Mentat_boot.Routine_fire.env ->
+  repo_for:
+    (Mentat_boot.Routine_store.Loaded.t ->
+    (Mentat_boot.Routine_fire.Repo.t, string) result) ->
+  Mentat_boot.Routine_store.Loaded.t ->
   unit
 (** [reconcile env ~repo_for loaded] is one routine's pass — the re-entry a
     caller runs for one routine after reaping one of its runs, so a
@@ -60,8 +62,10 @@ val reconcile :
     would stall every queued delivery for the pass's whole length. *)
 
 val pass :
-  Routine_fire.env ->
-  repo_for:(Routine_store.Loaded.t -> (Routine_fire.Repo.t, string) result) ->
+  Mentat_boot.Routine_fire.env ->
+  repo_for:
+    (Mentat_boot.Routine_store.Loaded.t ->
+    (Mentat_boot.Routine_fire.Repo.t, string) result) ->
   unit
 (** [pass env ~repo_for] reconciles every installed routine, reading the
     roster fresh; a routine that fails to load is narrated and passed over,
@@ -71,7 +75,7 @@ val pass :
     spawning under a stop would spend money the requester asked not to
     spend — and whatever it leaves is the next pass's to finish. *)
 
-val pass_settle : Routine_fire.env -> unit
+val pass_settle : Mentat_boot.Routine_fire.env -> unit
 (** [pass_settle env] is the settle-only half of {!pass}: every installed
     routine's pending runs gain their watches, and nothing else — no
     repository connection, no network, no re-drive, no sweep. This is the
@@ -81,8 +85,10 @@ val pass_settle : Routine_fire.env -> unit
     loop's own immediate first {!pass} is the boot sweep. *)
 
 val loop :
-  Routine_fire.env ->
-  repo_for:(Routine_store.Loaded.t -> (Routine_fire.Repo.t, string) result) ->
+  Mentat_boot.Routine_fire.env ->
+  repo_for:
+    (Mentat_boot.Routine_store.Loaded.t ->
+    (Mentat_boot.Routine_fire.Repo.t, string) result) ->
   unit
 (** [loop env ~repo_for] runs {!pass} now, then again every ten minutes,
     until the environment's stop seam asks for a stop or the fiber is

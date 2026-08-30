@@ -9,6 +9,10 @@ module Store = Mentat_store
 module Session = Mentat_session
 module Command = Mentat_protocol.Command
 module Driver = Mentat_client.Driver
+module Composition = Mentat_boot.Composition
+module Exit_status = Mentat_boot.Exit_status
+module Session_endpoint = Mentat_boot.Session_endpoint
+module Stop_signal = Mentat_boot.Stop_signal
 
 (* How long a settled session lingers before its server's clean exit — the
    shared [Mentat_broker.serve_linger_s], which the offline fence patience is
@@ -53,7 +57,7 @@ let recorded_overrides store served =
       with
       | None -> Ok []
       | Some policy -> (
-          match Run_policy_overlay.of_policy policy with
+          match Mentat_boot.Run_policy_overlay.of_policy policy with
           | Ok None -> Ok []
           | Ok (Some overlay) -> Ok [ overlay ]
           | Error message ->
@@ -236,8 +240,8 @@ let serve_run ~session ~socket_dir_override ~spawned ~interrupted ~cwd =
                     | Some dir -> dir
                     | None ->
                         let dir =
-                          User_dirs.child_socket_dir shared.Composition.dirs
-                            ~session
+                          Mentat_boot.User_dirs.child_socket_dir
+                            shared.Composition.dirs ~session
                         in
                         Session_endpoint.ensure_socket_parents dir;
                         dir

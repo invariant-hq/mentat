@@ -108,7 +108,7 @@ val install :
   routine_git_base:string option ->
   web:bool ->
   web_port:int option ->
-  Exit_status.t
+  Mentat_boot.Exit_status.t
 (** [install ~print ~ingress_port ~github_base_url ~routine_git_base ~web
     ~web_port] resolves the unit for this host and, when [print] is false,
     writes it (0644, atomically) and hands it to the service manager:
@@ -132,7 +132,7 @@ val install :
     system is touched — no directory is created, no file written, no manager
     spoken to. *)
 
-val uninstall : unit -> Exit_status.t
+val uninstall : unit -> Mentat_boot.Exit_status.t
 (** [uninstall ()] unloads the service from the manager and removes the unit
     file. An absent unit is a clean success with a note (idempotent
     uninstall); a foreign file at the unit path is a loud refusal. The

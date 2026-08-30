@@ -12,12 +12,12 @@ type error
     exact not-found facts until {!status}; no candidate/index concept crosses
     the frontend boundary. *)
 
-val status : error -> Exit_status.t
+val status : error -> Mentat_boot.Exit_status.t
 (** [status error] classifies invalid/ambiguous input as usage and store or
     availability failures as runtime errors. *)
 
 val resolve :
-  Composition.t ->
+  Mentat_boot.Composition.t ->
   session:string option ->
   last:bool ->
   (Mentat_store.Session.Document.t, error) result

@@ -5,6 +5,15 @@
 
 open! Cmdliner
 open Mentat_routine
+module Argv = Mentat_boot.Argv
+module Composition = Mentat_boot.Composition
+module Daemon = Mentat_boot.Daemon
+module Exit_status = Mentat_boot.Exit_status
+module Github_app_store = Mentat_boot.Github_app_store
+module Output = Mentat_boot.Output
+module Routine_fire = Mentat_boot.Routine_fire
+module Routine_store = Mentat_boot.Routine_store
+module User_dirs = Mentat_boot.User_dirs
 
 let ( let* ) = Result.bind
 
@@ -415,8 +424,8 @@ let fire name event_file sweep =
                          name)
                 | Some file, _ -> (
                     match
-                      Fs.read_capped ~max_bytes:Routine_fire.max_event_bytes
-                        file
+                      Mentat_boot.Fs.read_capped
+                        ~max_bytes:Routine_fire.max_event_bytes file
                     with
                     | Ok None ->
                         Exit_status.usage

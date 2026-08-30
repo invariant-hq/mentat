@@ -27,6 +27,10 @@ module Message = Mentat_llm.Message
 module Model = Mentat_provider.Model
 module Selector = Mentat_provider.Selector
 module Catalog = Mentat_provider.Catalog
+module Composition = Mentat_boot.Composition
+module Exit_status = Mentat_boot.Exit_status
+module Output = Mentat_boot.Output
+module User_dirs = Mentat_boot.User_dirs
 
 let docs = Cli_common.s_diagnostic
 
@@ -323,7 +327,7 @@ let stat_artifact ~now path =
 (* Read a candidate log file with a generous cap for the grep; an oversized or
    unreadable file is skipped rather than failing the report. *)
 let read_for_grep path =
-  match Fs.read_capped ~max_bytes:(16 * 1024 * 1024) path with
+  match Mentat_boot.Fs.read_capped ~max_bytes:(16 * 1024 * 1024) path with
   | Ok contents -> contents
   | Error _ -> None
 

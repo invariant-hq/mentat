@@ -21,6 +21,14 @@ module Image = Mentat_mutation.Image
 module Ports = Mentat_agent.Ports
 module Diff = Textdiff
 module Listing = Mentat_session.Listing
+module Agent_client = Mentat_boot.Agent_client
+module Argv = Mentat_boot.Argv
+module Composition = Mentat_boot.Composition
+module Exit_status = Mentat_boot.Exit_status
+module Fs = Mentat_boot.Fs
+module Output = Mentat_boot.Output
+module Session_meta = Mentat_boot.Session_meta
+module Workspace_adapter = Mentat_boot.Workspace_adapter
 
 let docs = Cli_common.s_session
 let fresh_id () = Id.of_string (Session_meta.fresh_id ())

@@ -4,6 +4,11 @@
  ---------------------------------------------------------------------------*)
 
 open Mentat_routine
+module Composition = Mentat_boot.Composition
+module Github_app_store = Mentat_boot.Github_app_store
+module Routine_fire = Mentat_boot.Routine_fire
+module Routine_store = Mentat_boot.Routine_store
+module Stop_signal = Mentat_boot.Stop_signal
 
 (* The admission bound on the delivery queue. Overflow refuses at the wire
    before any receipt is written: the pump serializes runs of minutes, so a
@@ -69,7 +74,8 @@ let checkout_url ~git_base ~repo =
 let create (shared : Composition.shared) ~broker ~stop ?github_base_url
     ?git_base () =
   match
-    Daemon.resolve_sibling ~env:"MENTAT_BIN" ~name:"mentat" ~beside:"mentatd"
+    Mentat_boot.Daemon.resolve_sibling ~env:"MENTAT_BIN" ~name:"mentat"
+      ~beside:"mentatd"
   with
   | Error message -> Error message
   | Ok mentat_bin ->

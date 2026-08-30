@@ -7,6 +7,8 @@ module Store = Mentat_store
 module Session = Mentat_session
 module Id = Mentat_session.Id
 module Document = Store.Session.Document
+module Composition = Mentat_boot.Composition
+module Exit_status = Mentat_boot.Exit_status
 
 type candidate = { id : Id.t; available : bool }
 
