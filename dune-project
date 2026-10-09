@@ -65,12 +65,12 @@
 ; Windtrap 0.2.0 pre-release dogfood: pin the upstream repository until
 ; the release lands in the package repository.
 (pin
- (url "git+ssh://git@github.com/invariant-hq/windtrap.git")
+ (url "git+https://github.com/invariant-hq/windtrap.git")
  (package
   (name windtrap)))
 
 (pin
- (url "git+ssh://git@github.com/invariant-hq/windtrap.git")
+ (url "git+https://github.com/invariant-hq/windtrap.git")
  (package
   (name ppx_windtrap)))
 
